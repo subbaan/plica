@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.6 (2026-10-12): wide tables
+
+- **Table rows never soft-wrap.** With soft wrap on, prose still wraps, but a table wider than the window keeps one screen line per row. A `›` at the right edge shows that a row continues.
+- **The caret's table scrolls sideways on its own** to keep the caret in view, for example with Tab into a far column. A `‹` at the left edge shows it is scrolled. The prose around it stays put, and other tables stay at their start. Shift+wheel scrolls it too. Clicking and dragging map through the scroll, so cells under the pointer are what you get.
+- With soft wrap off, everything scrolls together as before.
+
 ## 0.3.5 (2026-10-12): select, copy and paste table cells
 
 - **Cell selection:** drag from one cell into another, or use **Shift+↑/↓**, or **Shift+←/→** at the edge of a cell's text, to select a rectangle of cells. The table menu can also select the whole row, column or table. The status bar shows e.g. `2×3 cells`.

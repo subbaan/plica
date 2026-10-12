@@ -57,6 +57,12 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.3.6
+
+- **Soft-wrap policy for tables: never wrap a table row.** A wrapped Markdown row is unreadable and its cells don't line up. `App::rows_of` lays out table lines with `wrap_width: None`, and because every layout path (viewport, caret motion, hit-testing) goes through `rows_of`, they all agree.
+- **Per-row horizontal scroll.** Without soft wrap, `Tab::scroll_x` scrolls the view as before. With it, only the caret's table scrolls, by `Tab::table_scroll_x`. It follows the caret in `ensure_caret_visible` and resets to 0 when the caret leaves the table. `App::row_scroll_x(line)` gives each line's offset. The draw loop records them per rendered row (`App::rendered_scroll`), and `pos_at_screen` uses those recorded values, so a click maps through exactly what was drawn even if the caret moves on the same click.
+- **The table cache's "not a table" set is a HashSet.** `rows_of` now asks `table_at` for every line it lays out, and a Vec `contains` would make scrolling through a long file quadratic.
+
 ### 2026-10-12 · 0.3.5
 
 - **A cell selection is its own state** (`App::cell_sel`: table, anchor and head cell, buffer version), not a text selection. A rectangle of cells can't be expressed as one char range. While it is active, the text caret sits in the head cell with no text selection, and the draw loop paints the selected cells' spans. It is dropped as soon as the buffer changes in another way (version check) or by any key that doesn't act on cells: copy, cut, paste, Shift+arrows, Delete, Backspace, typing and Esc keep it, everything else clears it first.

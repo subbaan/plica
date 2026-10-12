@@ -185,8 +185,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         matches.get(i).is_some_and(|&(ms, me)| s >= ms && e <= me)
     };
 
-    let scroll_x = if app.wrap { 0 } else { app.tab.scroll_x };
+    // Each row's sideways scroll: the whole view without soft wrap; with
+    // it, only the caret's (unwrapped) table.
+    let sxs: Vec<usize> = rows.iter().map(|r| app.row_scroll_x(r.line)).collect();
     for (i, row) in rows.iter().enumerate() {
+        let scroll_x = sxs[i];
         let y = text.y + i as u16;
         let is_caret_line = row.line == caret_line && sel.is_empty();
         if is_caret_line {
@@ -255,6 +258,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 put(buf, text.x + rel as u16, y, " ", 1, sel_style);
             }
         }
+        // A table row cut by the window edge (soft wrap on): ‹ / › markers.
+        if app.wrap && table_lines.contains_key(&row.line) && text.width > 2 {
+            let mark = base.patch(border_style).add_modifier(Modifier::BOLD);
+            if scroll_x > 0 {
+                put(buf, text.x, y, "‹", 1, mark);
+            }
+            if row.width() > scroll_x + text.width as usize {
+                put(buf, text.right() - 1, y, "›", 1, mark);
+            }
+        }
     }
     // Rows past end of document.
     for i in rows.len()..text.height as usize {
@@ -267,7 +280,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.prompt.is_none()
         && let Some((i, row)) = rows.iter().enumerate().find(|(_, r)| r.contains_caret(sel.head))
     {
-        let col = row.col_of(sel.head) as isize - scroll_x as isize;
+        let col = row.col_of(sel.head) as isize - sxs[i] as isize;
         if col >= 0 && col <= text.width as isize {
             caret_pos = Some(Position { x: (text.x + col as u16).min(text.right().saturating_sub(1)), y: text.y + i as u16 });
         }
@@ -275,6 +288,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_scrollbar(buf, app, scrollbar, rows.len(), &p);
     app.rendered_rows = rows;
+    app.rendered_scroll = sxs;
 
     // ---- tab bar ----
     let surface = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);

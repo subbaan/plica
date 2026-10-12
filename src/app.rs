@@ -210,8 +210,10 @@ pub struct App {
     pub status: Option<(String, Level, Instant)>,
     pub quit: bool,
 
-    /// Rows exactly as last rendered (for mouse hit-testing).
+    /// Rows exactly as last rendered (for mouse hit-testing), and how far
+    /// each was scrolled sideways.
     pub rendered_rows: Vec<VisualRow>,
+    pub rendered_scroll: Vec<usize>,
     pub regions: Regions,
 
     drag: Option<(DragUnit, Selection)>,
@@ -279,6 +281,7 @@ impl App {
             status: None,
             quit: false,
             rendered_rows: Vec::new(),
+            rendered_scroll: Vec::new(),
             regions: Regions::default(),
             drag: None,
             dragging_scrollbar: false,
@@ -761,8 +764,26 @@ impl App {
         LayoutOpts { tab_width: self.tab_width, wrap_width: self.wrap.then_some(w) }
     }
 
+    /// Visual rows of `line`. Table rows never soft-wrap (a wrapped table
+    /// is unreadable); a wide table scrolls sideways instead.
     pub fn rows_of(&self, line: usize) -> Vec<VisualRow> {
-        layout_line(self.tab.buf.rope(), line, self.layout_opts())
+        let mut opts = self.layout_opts();
+        if opts.wrap_width.is_some() && self.tab.table_at(line).is_some() {
+            opts.wrap_width = None;
+        }
+        layout_line(self.tab.buf.rope(), line, opts)
+    }
+
+    /// How far `line` is scrolled sideways: the whole view without soft
+    /// wrap; with it, only the caret's table.
+    pub fn row_scroll_x(&self, line: usize) -> usize {
+        if !self.wrap {
+            return self.tab.scroll_x;
+        }
+        match self.caret_table() {
+            Some(t) if (t.first_line()..=t.last_line()).contains(&line) => self.tab.table_scroll_x,
+            _ => 0,
+        }
     }
 
     // ---- palette ---------------------------------------------------------------
@@ -1246,6 +1267,7 @@ impl App {
         self.wrap = !self.wrap;
         self.tab.top_row = 0;
         self.tab.scroll_x = 0;
+        self.tab.table_scroll_x = 0;
         self.info(if self.wrap { "Soft wrap on" } else { "Soft wrap off" });
     }
 
@@ -1849,9 +1871,9 @@ impl App {
             {
                 self.cycle_tab(if m.kind == MouseEventKind::ScrollUp { -1 } else { 1 });
             }
-            MouseEventKind::ScrollUp if shift => self.tab.scroll_x = self.tab.scroll_x.saturating_sub(SCROLL_STEP * 2),
+            MouseEventKind::ScrollUp if shift => self.scroll_horiz_back(SCROLL_STEP * 2),
             MouseEventKind::ScrollDown if shift => self.scroll_horiz(SCROLL_STEP * 2),
-            MouseEventKind::ScrollLeft => self.tab.scroll_x = self.tab.scroll_x.saturating_sub(SCROLL_STEP * 2),
+            MouseEventKind::ScrollLeft => self.scroll_horiz_back(SCROLL_STEP * 2),
             MouseEventKind::ScrollRight => self.scroll_horiz(SCROLL_STEP * 2),
             MouseEventKind::ScrollUp => self.scroll_rows(-(SCROLL_STEP as isize)),
             MouseEventKind::ScrollDown => self.scroll_rows(SCROLL_STEP as isize),
@@ -1859,9 +1881,20 @@ impl App {
         }
     }
 
+    /// Sideways scroll: the view without soft wrap, else the caret's table.
     fn scroll_horiz(&mut self, n: usize) {
         if !self.wrap {
             self.tab.scroll_x += n;
+        } else if self.caret_table().is_some() {
+            self.tab.table_scroll_x += n;
+        }
+    }
+
+    fn scroll_horiz_back(&mut self, n: usize) {
+        if !self.wrap {
+            self.tab.scroll_x = self.tab.scroll_x.saturating_sub(n);
+        } else {
+            self.tab.table_scroll_x = self.tab.table_scroll_x.saturating_sub(n);
         }
     }
 
@@ -1942,8 +1975,14 @@ impl App {
         let Some(row) = self.rendered_rows.get(i) else {
             return Some(self.tab.buf.len_chars());
         };
-        let col = (x.saturating_sub(t.x)) as usize + if self.wrap { 0 } else { self.tab.scroll_x };
+        let sx = self.rendered_scroll.get(i).copied().unwrap_or_else(|| self.row_scroll_x(row.line));
+        let col = (x.saturating_sub(t.x)) as usize + sx;
         Some(row.pos_at_col(col))
+    }
+
+    #[cfg(test)]
+    pub fn pos_at_screen_pub(&self, x: u16, y: u16) -> Option<usize> {
+        self.pos_at_screen(x, y)
     }
 
     fn tab_hit_at(&self, x: u16, y: u16) -> Option<TabHit> {
@@ -2085,17 +2124,25 @@ impl App {
             }
         }
 
-        if !self.wrap {
-            let w = self.regions.text.width as usize;
-            let col = crows[crow].col_of(head);
-            let margin = 4.min(w / 4);
-            if col < self.tab.scroll_x + margin {
-                self.tab.scroll_x = col.saturating_sub(margin);
-            } else if col + margin >= self.tab.scroll_x + w {
-                self.tab.scroll_x = col + margin + 1 - w;
+        let w = self.regions.text.width as usize;
+        let col = crows[crow].col_of(head);
+        let margin = 4.min(w / 4);
+        let follow = |sx: &mut usize| {
+            if col < *sx + margin {
+                *sx = col.saturating_sub(margin);
+            } else if col + margin >= *sx + w {
+                *sx = col + margin + 1 - w;
             }
+        };
+        if !self.wrap {
+            follow(&mut self.tab.scroll_x);
         } else {
             self.tab.scroll_x = 0;
+            if self.caret_table().is_some() {
+                follow(&mut self.tab.table_scroll_x);
+            } else {
+                self.tab.table_scroll_x = 0;
+            }
         }
         self.tab.follow_caret = false;
     }

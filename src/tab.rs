@@ -27,6 +27,9 @@ pub struct Tab {
     pub top_line: usize,
     pub top_row: usize,
     pub scroll_x: usize,
+    /// With soft wrap on, table rows don't wrap: the caret's table scrolls
+    /// sideways by this much on its own.
+    pub table_scroll_x: usize,
     /// Set when the caret moved and the viewport must follow it.
     pub follow_caret: bool,
     /// The file changed on disk while this (background) tab had unsaved
@@ -63,6 +66,7 @@ impl Tab {
             top_line: 0,
             top_row: 0,
             scroll_x: 0,
+            table_scroll_x: 0,
             follow_caret: true,
             disk_conflict: false,
             uid: NEXT_TAB_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -132,7 +136,7 @@ impl Tab {
                 Some(t)
             }
             None => {
-                c.misses.push(line);
+                c.misses.insert(line);
                 None
             }
         }
@@ -172,5 +176,5 @@ pub fn detect_indent(buf: &Buffer, tab_width: usize) -> String {
 struct TableCache {
     key: (u64, u64),
     tables: Vec<Rc<Table>>,
-    misses: Vec<usize>,
+    misses: std::collections::HashSet<usize>,
 }

@@ -696,6 +696,13 @@ t.click(t.col_of(3, "a |"), 3)
 t.send("\x1b[200~X\tY\nZ\tW\n\x1b[201~", 0.4)  # bracketed paste
 t.send("\x13", 0.4)
 check("table: tab-separated paste fills and extends the table", open(tdoc).read().startswith("| k | v |   |\n|---|---|---|\n| 1 | X | Y |\n| 2 | Z | W |\n"), open(tdoc).read())
+# A table wider than the window doesn't wrap; the caret's table scrolls.
+wide = "| " + " | ".join(f"column{i}" for i in range(8)) + " |\n" + "|---" * 8 + "|\n" + "| " + " | ".join(f"v{i}" for i in range(8)) + " |\n"
+open(tdoc, "w").write("intro\n" + wide); t.pump(0.8)
+check("table: wide rows stay on one line", t.line(3).lstrip().startswith("3") and "›" in t.line(2) and "column0" in t.line(2), t.text())
+t.send("\x1b[1;5H\x1b[B", 0.2)
+t.send("\t" * 7, 0.4)
+check("table: caret's table scrolls sideways", "‹" in t.line(2) and "column7" in t.line(2) and "intro" in t.line(1), t.text())
 t.send("\x11", 0.4)
 if t.p.isalive(): t.send("n", 0.4)
 check("table: clean quit", not t.p.isalive())

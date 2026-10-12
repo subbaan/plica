@@ -735,6 +735,33 @@ mod tests {
     }
 
     #[test]
+    fn wide_tables_scroll_sideways_instead_of_wrapping() {
+        let long = "word ".repeat(10);
+        let src = format!("{long}\n| alpha | beta | gamma | delta | epsilon |\n|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 |\n");
+        let mut a = app_with(&src, 20, 8);
+        assert!(a.rows_of(0).len() > 1, "prose still wraps");
+        assert_eq!(a.rows_of(1).len(), 1, "table rows don't");
+        caret_at(&mut a, "epsilon");
+        a.tab.follow_caret = true;
+        a.ensure_caret_visible();
+        assert!(a.tab.table_scroll_x > 0);
+        assert_eq!(a.row_scroll_x(1), a.tab.table_scroll_x);
+        assert_eq!(a.row_scroll_x(0), 0, "only the table scrolls");
+        // Clicking maps through the table's scroll.
+        a.tab.top_line = 0;
+        a.rendered_rows = a.visible_rows(8);
+        a.rendered_scroll = a.rendered_rows.iter().map(|r| a.row_scroll_x(r.line)).collect();
+        let row_y = a.rendered_rows.iter().position(|r| r.line == 1).unwrap() as u16 + a.regions.text.y;
+        let pos = a.pos_at_screen_pub(a.regions.text.x, row_y).unwrap();
+        assert_eq!(pos - a.tab.buf.line_start(1), a.tab.table_scroll_x);
+        // Leaving the table resets it.
+        a.tab.buf.sel = crate::buffer::Selection::caret(0);
+        a.tab.follow_caret = true;
+        a.ensure_caret_visible();
+        assert_eq!(a.tab.table_scroll_x, 0);
+    }
+
+    #[test]
     fn typed_spaces_inside_a_cell_are_kept() {
         let mut a = app_with(T, 60, 12);
         caret_at(&mut a, "Samp");
