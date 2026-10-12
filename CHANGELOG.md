@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3 (2026-10-12): table rows and columns
+
+- The **table menu** (Alt+T, F6, or **right-click in a table**) now has: insert row above / below, delete row, move row up / down, insert column left / right, delete column, move column left / right, and align a column left / centre / right / none. Type to filter, e.g. "col right".
+- **Alt+↑ / Alt+↓** move the current row up or down within the table.
+- Each action is a single undo step and puts the caret in the cell it affected. Other cells keep their exact text and padding; a new column takes the table's style. Changing a column's alignment re-pads its cells if the column was lined up, and otherwise changes only the `---` row.
+- The header and `---` rows can't be deleted or moved, and a table always keeps at least one column. Plica says so instead of breaking the table.
+- Fix (inside tables): a typed word and the spaces after it now undo in the same steps as ordinary typing. Previously an empty cell's padding could split every keystroke into its own undo step.
+
 ## 0.3.2 (2026-10-12): Markdown tables, first slice
 
 The start of Phase 4. Plica now recognises Markdown pipe tables (a header row followed by a row like `|---|:--:|`) and edits them cell by cell. The file stays ordinary Markdown.

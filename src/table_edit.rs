@@ -8,7 +8,7 @@
 //! them back on. Edits that don't fit a single cell (a selection across
 //! cells, typing in the delimiter row) fall through to plain editing.
 
-use crate::app::App;
+use crate::app::{App, TableAction};
 use crate::buffer::{EditKind, Selection};
 use crate::keymap::Command;
 use crate::table::{RowKind, Table};
@@ -68,6 +68,14 @@ impl App {
             KeyCode::Tab if !ctrl && !alt && !shift => self.table_step(&t, true),
             KeyCode::BackTab | KeyCode::Tab if !ctrl && !alt => self.table_step(&t, false),
             KeyCode::Enter if !ctrl && !alt && !shift => self.table_new_row(&t),
+            KeyCode::Up if alt && !ctrl && !shift => {
+                self.table_action(TableAction::RowUp);
+                true
+            }
+            KeyCode::Down if alt && !ctrl && !shift => {
+                self.table_action(TableAction::RowDown);
+                true
+            }
             KeyCode::Char(c) if !ctrl && !alt => self.table_type(&t, &c.to_string()),
             KeyCode::Backspace if !shift => self.table_erase(&t, false, ctrl || alt),
             KeyCode::Delete if !shift => self.table_erase(&t, true, ctrl || alt),
@@ -129,7 +137,9 @@ impl App {
         let caret_off = (ra + ins.chars().count()).saturating_sub(lead).min(new.chars().count());
         let (ops, start) = t.edit_cell(rope, r, c, &new, self.table_realign);
         let caret = start + caret_off;
-        self.tab.buf.edit(ops, kind, Some(Selection::caret(caret)));
+        // Like plain typing: a typed space starts a new undo step.
+        let word_start = kind == EditKind::Typing && !ins.is_empty() && ins.chars().all(char::is_whitespace);
+        self.tab.buf.edit(ops, kind, Some(Selection::caret(caret)), word_start);
         self.table_typed_at = Some((self.tab.buf.cache_key(), caret));
         true
     }
@@ -222,7 +232,7 @@ impl App {
         let row = t.empty_row(self.tab.buf.rope());
         let at = t.rows[r].end;
         let text = format!("{}{row}", self.tab.doc.line_ending.as_str());
-        self.tab.buf.edit(vec![(at, 0, text)], EditKind::Other, Some(Selection::caret(at)));
+        self.tab.buf.edit(vec![(at, 0, text)], EditKind::Other, Some(Selection::caret(at)), false);
         let line = t.rows[r].line + 1;
         if let Some(nt) = self.tab.table_at(line)
             && let Some(cell) = nt.rows[r + 1].cells.get(c).or(nt.rows[r + 1].cells.last())
@@ -231,6 +241,59 @@ impl App {
         }
         self.tab.buf.break_undo_group();
         self.table_typed_at = None;
+    }
+
+    /// Run a table-menu action on the table under the caret, as one undo
+    /// step, then put the caret in the cell it concerns.
+    pub fn table_action(&mut self, a: TableAction) {
+        if a == TableAction::Format {
+            return self.format_table();
+        }
+        let Some(t) = self.caret_table() else {
+            self.warn("The caret isn't in a Markdown table");
+            return;
+        };
+        let rope = self.tab.buf.rope();
+        let Some((r, c)) = t.cell_at(rope, self.tab.buf.sel.head) else { return };
+        let le = self.tab.doc.line_ending.as_str();
+        let body_r = r.max(2);
+        // (ops, target cell, message when refused)
+        let (ops, target, refused): (Option<Vec<(usize, usize, String)>>, (usize, usize), &str) = match a {
+            TableAction::Format => unreachable!(),
+            TableAction::RowAbove => (Some(t.insert_row(rope, body_r, le)), (body_r, c), ""),
+            TableAction::RowBelow => (Some(t.insert_row(rope, r.max(1) + 1, le)), (r.max(1) + 1, c), ""),
+            TableAction::DeleteRow => (t.delete_row(rope, r), (r.min(t.rows.len().saturating_sub(2)).max(2), c), "Only body rows can be deleted (not the header or the --- row)"),
+            TableAction::RowUp | TableAction::RowDown => match t.move_row(rope, r, a == TableAction::RowUp) {
+                Some((ops, to)) => (Some(ops), (to, c), ""),
+                None => (None, (r, c), "Can't move this row further"),
+            },
+            TableAction::ColLeft => (Some(t.insert_col(c)), (r, c), ""),
+            TableAction::ColRight => (Some(t.insert_col(c + 1)), (r, c + 1), ""),
+            TableAction::DeleteCol => (t.delete_col(c), (r, c.saturating_sub(usize::from(c + 1 >= t.rows[0].cells.len()))), "A table needs at least one column"),
+            TableAction::MoveColLeft | TableAction::MoveColRight => match t.move_col(rope, c, a == TableAction::MoveColLeft) {
+                Some((ops, to)) => (Some(ops), (r, to), ""),
+                None => (None, (r, c), "Can't move this column further"),
+            },
+            TableAction::Align(al) => (Some(t.set_align(rope, c, al)), (r, c), ""),
+        };
+        let Some(ops) = ops else {
+            self.warn(refused);
+            return;
+        };
+        if ops.is_empty() {
+            return;
+        }
+        let first = t.first_line();
+        self.tab.buf.edit(ops, EditKind::Other, None, false);
+        self.tab.buf.break_undo_group();
+        self.table_typed_at = None;
+        if let Some(nt) = self.tab.table_at(first)
+            && let Some(row) = nt.rows.get(target.0.min(nt.rows.len() - 1))
+            && let Some(cell) = row.cells.get(target.1).or(row.cells.last())
+        {
+            self.tab.buf.sel = Selection::caret(cell.content.start);
+        }
+        self.tab.follow_caret = true;
     }
 
     /// Format table: line up every row of the table under the caret, as one
@@ -251,7 +314,7 @@ impl App {
             self.info("Table is already formatted");
             return;
         }
-        self.tab.buf.edit(ops, EditKind::Other, None);
+        self.tab.buf.edit(ops, EditKind::Other, None, false);
         if let (Some((r, c, off)), Some(nt)) = (spot, self.tab.table_at(t.first_line()))
             && let Some(cell) = nt.rows.get(r).and_then(|row| row.cells.get(c))
         {
@@ -355,6 +418,44 @@ mod tests {
         a.tab.buf.sel = crate::buffer::Selection::caret(a.tab.buf.sel.head + 8);
         type_str(&mut a, "!");
         assert!(text(&a).contains("| Samp! |"), "after the trailing pipe: {}", text(&a));
+    }
+
+    #[test]
+    fn menu_actions_rows_and_columns() {
+        use crate::app::TableAction as A;
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n";
+        let mut a = app_with(src, 60, 12);
+        caret_at(&mut a, "3");
+        key(&mut a, KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(text(&a), "| a | b |\n|---|---|\n| 3 | 4 |\n| 1 | 2 |\n");
+        assert_eq!(a.tab.buf.rope().char(a.tab.buf.sel.head), '3', "caret moves with the row");
+        a.table_action(A::DeleteRow);
+        assert_eq!(text(&a), "| a | b |\n|---|---|\n| 1 | 2 |\n");
+        a.table_action(A::ColRight);
+        type_str(&mut a, "new");
+        assert_eq!(text(&a), "| a |     | b |\n|---|-----|---|\n| 1 | new | 2 |\n");
+        a.table_action(A::MoveColLeft);
+        assert_eq!(text(&a), "|     | a | b |\n|-----|---|---|\n| new | 1 | 2 |\n");
+        a.table_action(A::Align(crate::table::Align::Right));
+        assert_eq!(text(&a), "|     | a | b |\n|----:|---|---|\n| new | 1 | 2 |\n");
+        a.table_action(A::DeleteCol);
+        assert_eq!(text(&a), "| a | b |\n|---|---|\n| 1 | 2 |\n");
+        // Each action is one undo step.
+        for _ in 0..4 {
+            key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        }
+        assert_eq!(text(&a), "| a |   | b |\n|---|---|---|\n| 1 |   | 2 |\n", "delete, align, move and the typed word undone; the inserted column is back");
+    }
+
+    #[test]
+    fn right_click_in_a_table_opens_the_menu() {
+        use ratatui::crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+        let mut a = app_with(T, 60, 12);
+        a.rendered_rows = a.visible_rows(12);
+        let (x, y) = (a.regions.text.x + 3, a.regions.text.y + 4);
+        a.handle_event(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: x, row: y, modifiers: KeyModifiers::NONE }));
+        assert!(a.picker.as_ref().is_some_and(|p| p.title == "Table"));
+        assert_eq!(a.tab.buf.line_of(a.tab.buf.sel.head), 4);
     }
 
     #[test]

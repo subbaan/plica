@@ -57,6 +57,13 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.3.3
+
+- **Structural table edits touch as little as possible.** A row insert, delete or move rewrites only those lines. A column insert or delete edits one span per row and leaves every other cell's exact text and padding alone. A column move swaps whole spans, so lined-up columns stay lined up. Only Format rewrites rows wholesale. Header and delimiter rows are never deleted or moved; a single-column table refuses to lose its column.
+- **Appending a column to a row without a trailing pipe adds a pipe on both sides.** In GFM a lone `|` at the end of a row is only a trailing pipe, not a new cell.
+- **Undo grouping for table typing is decided by the caller.** *Bug found by test:* `ends_word_boundary` looked at the last primitive edit, which for a table keystroke can be another row's padding (all spaces), so every keystroke became its own undo step. `Buffer::edit` now takes `word_start` from the caller: a typed space starts a new step, as in plain typing.
+- **Right-click in a table opens the table menu.** The menu is the shared `Picker` (filterable), so all actions are reachable without memorising keys. Alt+↑/↓ (move row) are fixed keys inside tables only, because Alt+arrows elsewhere still move the caret.
+
 ### 2026-10-12 · 0.3.2
 
 - **Tables are recognised locally and cached per buffer version.** `Table::at(rope, line)` expands from the line over contiguous "pipe lines" (non-blank, indent < 4, an unescaped `|`, not a fence line). The first header + delimiter pair with matching cell counts starts the table; pipe lines above it are prose. The cost is O(table) plus a fence scan of the text above. `Tab::table_at` caches found tables, and lines known not to be in one, until the text changes. Lines over 20 000 chars are never rows, so huge single-line files aren't rescanned on every keystroke.

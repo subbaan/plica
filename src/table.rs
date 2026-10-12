@@ -388,12 +388,16 @@ impl Table {
     /// table's spacing. The last cell of a table without a trailing pipe
     /// gets no trailing spaces.
     fn cell_text(&self, kind: RowKind, c: usize, ncols: usize, content: &str, inner: usize) -> String {
+        self.cell_text_as(kind, c, ncols, content, inner, self.align(c))
+    }
+
+    fn cell_text_as(&self, kind: RowKind, c: usize, ncols: usize, content: &str, inner: usize, align: Align) -> String {
         let (l, r) = self.sides(c, ncols);
         let s = match kind {
-            RowKind::Delimiter if self.delim_spaced => format!("{}{}{}", " ".repeat(l), Self::dashes(inner, self.align(c)), " ".repeat(r)),
-            RowKind::Delimiter => Self::dashes(l + inner + r, self.align(c)),
+            RowKind::Delimiter if self.delim_spaced => format!("{}{}{}", " ".repeat(l), Self::dashes(inner, align), " ".repeat(r)),
+            RowKind::Delimiter => Self::dashes(l + inner + r, align),
             _ => {
-                let (pl, pr) = Self::pad_split(content, inner, self.align(c));
+                let (pl, pr) = Self::pad_split(content, inner, align);
                 format!("{}{content}{}", " ".repeat(l + pl), " ".repeat(pr + r))
             }
         };
@@ -475,6 +479,143 @@ impl Table {
             }
         }
         (ops, start_new)
+    }
+
+    /// Insert an empty row before row `at` (2 ..= rows.len(); body rows
+    /// only). `le` is the document's line ending.
+    pub fn insert_row(&self, rope: &Rope, at: usize, le: &str) -> Vec<(usize, usize, String)> {
+        let row = self.empty_row(rope);
+        let at = at.clamp(2, self.rows.len());
+        if at < self.rows.len() {
+            vec![(self.rows[at].start, 0, format!("{row}{le}"))]
+        } else {
+            vec![(self.rows[at - 1].end, 0, format!("{le}{row}"))]
+        }
+    }
+
+    /// Delete body row `r`, line terminator included.
+    pub fn delete_row(&self, rope: &Rope, r: usize) -> Option<Vec<(usize, usize, String)>> {
+        let row = self.rows.get(r).filter(|row| row.kind == RowKind::Body)?;
+        let op = if row.line + 1 < rope.len_lines() {
+            let next = rope.line_to_char(row.line + 1);
+            (row.start, next - row.start, String::new())
+        } else {
+            // Last line of the file: take the terminator before it instead.
+            let prev = self.rows[r - 1].end;
+            (prev, row.end - prev, String::new())
+        };
+        Some(vec![op])
+    }
+
+    /// Swap body row `r` with its neighbour above (`up`) or below.
+    pub fn move_row(&self, rope: &Rope, r: usize, up: bool) -> Option<(Vec<(usize, usize, String)>, usize)> {
+        let t = if up { r.checked_sub(1)? } else { r + 1 };
+        let (a, b) = (self.rows.get(r)?, self.rows.get(t)?);
+        if a.kind != RowKind::Body || b.kind != RowKind::Body {
+            return None;
+        }
+        let ta = Self::text(rope, &(a.start..a.end));
+        let tb = Self::text(rope, &(b.start..b.end));
+        Some((vec![(a.start, a.end - a.start, tb), (b.start, b.end - b.start, ta)], t))
+    }
+
+    /// Insert an empty column at index `at` (0 ..= columns) in every row
+    /// that reaches it. Other cells keep their exact text.
+    pub fn insert_col(&self, at: usize) -> Vec<(usize, usize, String)> {
+        let ncols = self.cols() + 1;
+        let mut ops = Vec::new();
+        for row in &self.rows {
+            let n = row.cells.len();
+            if at > n {
+                continue;
+            }
+            let inner = self.min_inner(at, ncols);
+            let cell = self.cell_text_as(row.kind, at, ncols, "", inner, Align::None);
+            if at == n && !row.trail {
+                // Appending to a row without a trailing pipe: a lone `|` at
+                // the end would only be a trailing pipe, so the new cell
+                // gets one on both sides.
+                let open = self.cell_text_as(row.kind, at, ncols + 1, "", self.min_inner(at, ncols + 1), Align::None);
+                ops.push((row.end, 0, format!("|{open}|")));
+            } else if at == n {
+                // After the trailing pipe.
+                ops.push((row.cells[n - 1].span.end + 1, 0, format!("{cell}|")));
+            } else {
+                ops.push((row.cells[at].span.start, 0, format!("{cell}|")));
+            }
+        }
+        ops
+    }
+
+    /// Delete column `c` (and one pipe next to it) from every row that has
+    /// it. Refused for a single-column table.
+    pub fn delete_col(&self, c: usize) -> Option<Vec<(usize, usize, String)>> {
+        if self.rows[0].cells.len() < 2 || c >= self.rows[0].cells.len() {
+            return None;
+        }
+        let mut ops = Vec::new();
+        for row in &self.rows {
+            let n = row.cells.len();
+            let Some(cell) = row.cells.get(c) else { continue };
+            if n == 1 {
+                ops.push((cell.span.start, cell.span.len(), String::new()));
+            } else if c + 1 < n {
+                // The cell and the pipe after it.
+                ops.push((cell.span.start, cell.span.len() + 1, String::new()));
+            } else {
+                // Last cell: the pipe before it and the cell.
+                ops.push((cell.span.start - 1, cell.span.len() + 1, String::new()));
+            }
+        }
+        Some(ops)
+    }
+
+    /// Swap column `c` with its left (`left`) or right neighbour in every
+    /// row that has both.
+    pub fn move_col(&self, rope: &Rope, c: usize, left: bool) -> Option<(Vec<(usize, usize, String)>, usize)> {
+        let t = if left { c.checked_sub(1)? } else { c + 1 };
+        if t >= self.rows[0].cells.len() {
+            return None;
+        }
+        let mut ops = Vec::new();
+        for row in &self.rows {
+            let (Some(a), Some(b)) = (row.cells.get(c), row.cells.get(t)) else { continue };
+            // Whole spans swap, so lined-up columns stay lined up.
+            let (ta, tb) = (Self::text(rope, &a.span), Self::text(rope, &b.span));
+            ops.push((a.span.start, a.span.len(), tb));
+            ops.push((b.span.start, b.span.len(), ta));
+        }
+        Some((ops, t))
+    }
+
+    /// Set column `c`'s alignment: the delimiter cell gets the colons, and
+    /// if the column lines up its cells are re-padded (same width).
+    pub fn set_align(&self, rope: &Rope, c: usize, align: Align) -> Vec<(usize, usize, String)> {
+        let t = self;
+        let ncols = t.cols();
+        let (l, r) = t.sides(c, ncols);
+        let aligned = t.column_aligned(rope, c);
+        let mut ops = Vec::new();
+        for row in &t.rows {
+            let Some(cell) = row.cells.get(c) else { continue };
+            let old = Self::text(rope, &cell.span);
+            let new = if aligned && !(c + 1 == ncols && !t.trail) {
+                let inner = text_width(&old).saturating_sub(l + r).max(t.min_inner(c, ncols));
+                t.cell_text_as(row.kind, c, ncols, &Self::text(rope, &cell.content), inner, align)
+            } else if row.kind == RowKind::Delimiter {
+                // Keep the delimiter's width and padding, swap the dashes.
+                let dash = old.trim();
+                let lead = old.len() - old.trim_start().len();
+                let trail = old.len() - old.trim_end().len();
+                format!("{}{}{}", " ".repeat(lead), Self::dashes(dash.chars().count(), align), " ".repeat(trail))
+            } else {
+                continue;
+            };
+            if new != old {
+                ops.push((cell.span.start, cell.span.len(), new));
+            }
+        }
+        ops
     }
 
     /// A new empty row (as text, no line terminator) in the table's style.
@@ -619,6 +760,55 @@ mod tests {
         let src = "| a | b |\n|---|---|\n| 1 | 2 |\n";
         let (rope, t) = table(src, 0).unwrap();
         assert!(t.format(&rope).is_empty());
+    }
+
+    #[test]
+    fn row_operations() {
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
+        let (rope, t) = table(src, 0).unwrap();
+        assert_eq!(apply(src, t.insert_row(&rope, 3, "\n")), "| a | b |\n|---|---|\n| 1 | 2 |\n|   |   |\n| 3 | 4 |");
+        assert_eq!(apply(src, t.insert_row(&rope, 4, "\n")), "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n|   |   |");
+        assert_eq!(apply(src, t.delete_row(&rope, 2).unwrap()), "| a | b |\n|---|---|\n| 3 | 4 |");
+        assert_eq!(apply(src, t.delete_row(&rope, 3).unwrap()), "| a | b |\n|---|---|\n| 1 | 2 |", "last line, no terminator");
+        assert!(t.delete_row(&rope, 0).is_none() && t.delete_row(&rope, 1).is_none(), "header and delimiter stay");
+        let (ops, to) = t.move_row(&rope, 3, true).unwrap();
+        assert_eq!((apply(src, ops).as_str(), to), ("| a | b |\n|---|---|\n| 3 | 4 |\n| 1 | 2 |", 2));
+        assert!(t.move_row(&rope, 2, true).is_none(), "not above the delimiter");
+        assert!(t.move_row(&rope, 3, false).is_none());
+    }
+
+    #[test]
+    fn column_operations() {
+        let src = "| a | bb |\n|---|:--:|\n| 1 | 22 |\n";
+        let (rope, t) = table(src, 0).unwrap();
+        assert_eq!(apply(src, t.insert_col(1)), "| a |   | bb |\n|---|---|:--:|\n| 1 |   | 22 |\n");
+        assert_eq!(apply(src, t.insert_col(0)), "|   | a | bb |\n|---|---|:--:|\n|   | 1 | 22 |\n");
+        assert_eq!(apply(src, t.insert_col(2)), "| a | bb |   |\n|---|:--:|---|\n| 1 | 22 |   |\n");
+        assert_eq!(apply(src, t.delete_col(0).unwrap()), "| bb |\n|:--:|\n| 22 |\n");
+        assert_eq!(apply(src, t.delete_col(1).unwrap()), "| a |\n|---|\n| 1 |\n");
+        let (ops, to) = t.move_col(&rope, 0, false).unwrap();
+        assert_eq!((apply(src, ops).as_str(), to), ("| bb | a |\n|:--:|---|\n| 22 | 1 |\n", 1));
+        assert!(t.move_col(&rope, 0, true).is_none());
+        let one = "| a |\n|---|\n";
+        let (_, t1) = table(one, 0).unwrap();
+        assert!(t1.delete_col(0).is_none(), "the only column stays");
+        // Pipeless edges.
+        let src = "a | b\n--|--\n1 | 2\n";
+        let (_, t) = table(src, 0).unwrap();
+        assert_eq!(apply(src, t.insert_col(2)), "a | b|   |\n--|--|---|\n1 | 2|   |\n");
+        assert_eq!(apply(src, t.delete_col(1).unwrap()), "a \n--\n1 \n");
+    }
+
+    #[test]
+    fn alignment_changes() {
+        let src = "| Name  | N |\n|-------|---|\n| Ann   | 1 |\n";
+        let (rope, t) = table(src, 0).unwrap();
+        assert_eq!(apply(src, t.set_align(&rope, 0, Align::Right)), "|  Name | N |\n|------:|---|\n|   Ann | 1 |\n");
+        assert_eq!(apply(src, t.set_align(&rope, 0, Align::Center)), "| Name  | N |\n|:-----:|---|\n|  Ann  | 1 |\n");
+        // An unaligned column only changes its delimiter.
+        let src = "|a|b|\n|---|-|\n|xx|y|\n";
+        let (rope, t) = table(src, 0).unwrap();
+        assert_eq!(apply(src, t.set_align(&rope, 0, Align::Left)), "|a|b|\n|:--|-|\n|xx|y|\n");
     }
 
     #[test]

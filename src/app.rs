@@ -136,6 +136,17 @@ pub enum PickChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableAction {
     Format,
+    RowAbove,
+    RowBelow,
+    DeleteRow,
+    RowUp,
+    RowDown,
+    ColLeft,
+    ColRight,
+    DeleteCol,
+    MoveColLeft,
+    MoveColRight,
+    Align(crate::table::Align),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1477,13 +1488,13 @@ impl App {
         match c {
             PickChoice::Reopen(e) => self.reopen_as(e),
             PickChoice::SaveWith(e) => self.save_with(e),
-            PickChoice::Table(TableAction::Format) => self.format_table(),
+            PickChoice::Table(a) => self.table_action(a),
         }
         self.tab.follow_caret = true;
     }
 
     /// The table menu (its actions also have their own commands).
-    fn table_menu(&mut self) {
+    pub fn table_menu(&mut self) {
         if self.caret_table().is_none() {
             self.warn("Put the caret in a Markdown table first (a header row, then a row like |---|---|)");
             return;
@@ -1494,7 +1505,24 @@ impl App {
             current: false,
             value: PickChoice::Table(value),
         };
-        let items = vec![item("Format table", Some(Command::FormatTable), TableAction::Format)];
+        use crate::table::Align;
+        let items = vec![
+            item("Format table", Some(Command::FormatTable), TableAction::Format),
+            item("Insert row above", None, TableAction::RowAbove),
+            item("Insert row below (Enter)", None, TableAction::RowBelow),
+            item("Delete row", None, TableAction::DeleteRow),
+            item("Move row up (Alt+↑)", None, TableAction::RowUp),
+            item("Move row down (Alt+↓)", None, TableAction::RowDown),
+            item("Insert column left", None, TableAction::ColLeft),
+            item("Insert column right", None, TableAction::ColRight),
+            item("Delete column", None, TableAction::DeleteCol),
+            item("Move column left", None, TableAction::MoveColLeft),
+            item("Move column right", None, TableAction::MoveColRight),
+            item("Align column left", None, TableAction::Align(Align::Left)),
+            item("Align column centre", None, TableAction::Align(Align::Center)),
+            item("Align column right", None, TableAction::Align(Align::Right)),
+            item("Align column: none", None, TableAction::Align(Align::None)),
+        ];
         self.picker = Some(Picker::new("Table", items));
     }
 
@@ -1752,6 +1780,19 @@ impl App {
                     self.publish_primary();
                 }
                 self.dragging_scrollbar = false;
+            }
+            MouseEventKind::Down(MouseButton::Right) if contains(self.regions.text, m.column, m.row) => {
+                // Right-click in a table: caret there (unless inside the
+                // selection) and the table menu.
+                if let Some(pos) = self.pos_at_screen(m.column, m.row)
+                    && self.tab.table_at(self.tab.buf.line_of(pos)).is_some()
+                {
+                    let sel = self.tab.buf.sel;
+                    if sel.is_empty() || pos < sel.start() || pos > sel.end() {
+                        self.tab.buf.sel = Selection::caret(pos);
+                    }
+                    self.table_menu();
+                }
             }
             MouseEventKind::Down(MouseButton::Middle) if self.primary_selection && contains(self.regions.text, m.column, m.row) => {
                 // Linux convention: paste the primary selection at the pointer.
