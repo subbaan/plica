@@ -4,6 +4,7 @@ mod clipboard;
 mod document;
 mod drop;
 mod layout;
+mod tab;
 mod term;
 mod theme;
 mod ui;
@@ -11,7 +12,8 @@ mod watch;
 
 use anyhow::{Context, Result, bail};
 use app::{App, ThemeSource};
-use buffer::{Buffer, Selection};
+use buffer::Selection;
+use tab::Tab;
 use ratatui::Terminal;
 use ratatui::crossterm::event;
 use ratatui::prelude::CrosstermBackend;
@@ -25,11 +27,11 @@ const PALETTE_DEBOUNCE: Duration = Duration::from_millis(150);
 const HELP: &str = "\
 Plica — a mouse-friendly terminal text editor
 
-Usage: plica [OPTIONS] [+LINE] [FILE]
+Usage: plica [OPTIONS] [+LINE] [FILE...]
 
 Arguments:
-  FILE                 File to open (created on first save if missing)
-  +LINE                Start with the caret on LINE
+  FILE...              Files to open, one tab each (created on first save if missing)
+  +LINE                Start with the caret on LINE of the first file
 
 Options:
   --palette PATH       Follow a Kitty-format colour file, reloading live
@@ -47,7 +49,7 @@ if it exists, otherwise uses Dracula. Press F1 inside Plica for keys.
 ";
 
 struct Args {
-    file: Option<PathBuf>,
+    files: Vec<PathBuf>,
     line: Option<usize>,
     palette: Option<PathBuf>,
     builtin: bool,
@@ -55,7 +57,7 @@ struct Args {
 }
 
 fn parse_args() -> Result<Option<Args>> {
-    let mut a = Args { file: None, line: None, palette: None, builtin: false, check_palette: None };
+    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: false, check_palette: None };
     let mut it = std::env::args_os().skip(1);
     let mut only_files = false;
     while let Some(arg) = it.next() {
@@ -94,10 +96,7 @@ fn parse_args() -> Result<Option<Args>> {
                 _ => {}
             }
         }
-        if a.file.is_some() {
-            bail!("only one file at a time in this version (tabs arrive in 0.2)");
-        }
-        a.file = Some(arg.into());
+        a.files.push(arg.into());
     }
     Ok(Some(a))
 }
@@ -150,14 +149,18 @@ fn run() -> Result<()> {
         return check_palette(p);
     }
 
-    // Load the document before touching the terminal so errors print cleanly.
-    let (buf, doc) = match &args.file {
-        Some(path) => {
-            let l = document::load(path)?;
-            (Buffer::from_str(&l.text), l.doc)
+    // Load documents before touching the terminal so errors print cleanly.
+    const TAB_WIDTH: usize = 4;
+    let mut tabs: Vec<Tab> = Vec::new();
+    for path in &args.files {
+        if tabs.iter().any(|t| t.shows(path)) {
+            continue;
         }
-        None => (Buffer::new(), document::Document::untitled()),
-    };
+        tabs.push(Tab::open(path, TAB_WIDTH)?.0);
+    }
+    if tabs.is_empty() {
+        tabs.push(Tab::untitled(TAB_WIDTH));
+    }
 
     // Choose the colour source.
     let palette_path = if args.builtin { None } else { args.palette.clone().or_else(default_palette_path) };
@@ -187,14 +190,16 @@ fn run() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     terminal.clear()?;
 
-    let mut app = App::new(buf, doc, theme, source, caps);
+    let mut tabs = tabs.into_iter();
+    let mut app = App::new(tabs.next().expect("at least one tab"), theme, source, caps);
+    app.bg_tabs = tabs.collect();
     if let Some(line) = args.line {
-        let l = line.saturating_sub(1).min(app.buf.len_lines() - 1);
-        app.buf.sel = Selection::caret(app.buf.line_start(l));
+        let l = line.saturating_sub(1).min(app.tab.buf.len_lines() - 1);
+        app.tab.buf.sel = Selection::caret(app.tab.buf.line_start(l));
     }
     if let Some(w) = startup_warning {
         app.warn(w);
-    } else if app.doc.mixed_line_endings {
+    } else if app.tab.doc.mixed_line_endings {
         app.warn("File has mixed line endings; they are preserved as-is");
     }
 
@@ -258,17 +263,19 @@ fn run() -> Result<()> {
 
     drop(terminal);
     drop(guard);
-    if killed && app.buf.is_dirty() {
-        match write_recovery(&app) {
-            Ok(p) => eprintln!("plica: terminated with unsaved changes; recovery copy written to {}", p.display()),
-            Err(e) => eprintln!("plica: terminated with unsaved changes and could not write recovery copy: {e:#}"),
+    if killed {
+        for tab in app.all_tabs().filter(|t| t.buf.is_dirty()) {
+            match write_recovery(tab) {
+                Ok(p) => eprintln!("plica: terminated with unsaved changes; recovery copy written to {}", p.display()),
+                Err(e) => eprintln!("plica: terminated with unsaved changes and could not write recovery copy: {e:#}"),
+            }
         }
     }
     Ok(())
 }
 
 /// Emergency snapshot under $XDG_STATE_HOME/plica/recovery (never the original file).
-fn write_recovery(app: &App) -> Result<PathBuf> {
+fn write_recovery(tab: &Tab) -> Result<PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
@@ -277,7 +284,8 @@ fn write_recovery(app: &App) -> Result<PathBuf> {
     let dir = state.join("plica").join("recovery");
     std::fs::create_dir_all(&dir)?;
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let path = dir.join(format!("{}.{ts}.txt", app.doc.display_name()));
-    std::fs::write(&path, app.buf.rope().to_string())?;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    let path = dir.join(format!("{}.{ts}.{nanos:09}.txt", tab.doc.display_name()));
+    std::fs::write(&path, tab.buf.rope().to_string())?;
     Ok(path)
 }

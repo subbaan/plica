@@ -194,7 +194,7 @@ t.send("\x1b", 0.1)  # cancel pending
 
 # Quit with dirty buffer requires confirmation
 t.send("\x11")
-check("dirty quit asks", t.p.isalive() and "Unsaved" in t.line(ROWS - 1), t.line(ROWS - 1))
+check("dirty quit asks", t.p.isalive() and "unsaved" in t.line(ROWS - 1).lower(), t.line(ROWS - 1))
 t.send("\x11", 0.6)
 check("second Ctrl+Q quits", not t.p.isalive())
 tail = t.raw[-400:]
@@ -270,6 +270,29 @@ finally:
 t.send("\x13", 0.4)
 check("save succeeds once writable", open(rofile).read() == "edit original\n", open(rofile).read())
 t.send("\x11", 0.5)
+
+# ---------------------------------------------------------------- session 6: tabs
+fa = os.path.join(WORK, "alpha.txt"); open(fa, "w").write("alpha body\n")
+fb = os.path.join(WORK, "beta.txt"); open(fb, "w").write("beta body\n")
+t = Term([fa, fb])
+check("two files open as tabs", "alpha.txt" in t.line(0) and "beta.txt" in t.line(0), t.line(0))
+check("first tab active", "alpha body" in t.text(), t.text())
+t.click(t.col_of(0, "beta.txt") + 1, 0)
+check("click tab switches", "beta body" in t.text(), t.text())
+t.send("\x1b[5;5~")  # Ctrl+PageUp
+check("Ctrl+PageUp switches back", "alpha body" in t.text(), t.text())
+t.send("edit")
+check("dirty tab shows ●", "●" in t.line(0), t.line(0))
+# Middle-click on beta closes it (clean, no prompt).
+t.p.send(f"\x1b[<1;{t.col_of(0, 'beta.txt') + 2};1M"); t.p.send(f"\x1b[<1;{t.col_of(0, 'beta.txt') + 2};1m"); t.pump(0.3)
+check("middle-click closes tab", "beta.txt" not in t.line(0) and "alpha.txt" in t.line(0), t.line(0))
+# Drop a file while dirty: opens in a new tab, edit kept.
+t.send(f"\x1b[200~{fb}\x1b[201~", 0.4)
+check("drop while dirty opens new tab", "beta body" in t.text() and "alpha.txt" in t.line(0), t.line(0))
+t.send("\x11")
+check("quit asks when a background tab is dirty", t.p.isalive(), t.line(ROWS - 1))
+t.send("\x11", 0.5)
+check("second Ctrl+Q quits", not t.p.isalive())
 
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))

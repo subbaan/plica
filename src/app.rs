@@ -2,8 +2,8 @@
 
 use crate::buffer::{Buffer, EditKind, Selection};
 use crate::clipboard::Clipboard;
-use crate::document::{self, Document};
 use crate::drop;
+use crate::tab::Tab;
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
 use crate::term::{self, Capabilities};
 use crate::theme::{self, Theme};
@@ -79,17 +79,33 @@ pub struct Regions {
     pub gutter: Rect,
     pub scrollbar: Rect,
     pub buttons: Vec<(Rect, Button)>,
+    pub tab_bar: Rect,
+    pub tab_hits: Vec<(Rect, TabHit)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabHit {
+    Select(usize),
+    Close(usize),
+    Prev,
+    Next,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
     Quit,
+    CloseTab,
     OverwriteExternal,
 }
 
 pub struct App {
-    pub buf: Buffer,
-    pub doc: Document,
+    /// The active tab. Others live in `bg_tabs`; the full order is
+    /// `bg_tabs[..active] ++ [tab] ++ bg_tabs[active..]`. Keeping the active
+    /// tab as a plain field lets the borrow checker split `self.tab.buf`
+    /// from the rest of `self`.
+    pub tab: Tab,
+    pub bg_tabs: Vec<Tab>,
+    pub active: usize,
     pub clipboard: Clipboard,
     pub theme: Theme,
     pub theme_source: ThemeSource,
@@ -97,8 +113,6 @@ pub struct App {
     pub wrap: bool,
     pub line_numbers: bool,
     pub tab_width: usize,
-    /// What Tab inserts / indents with: "\t" or N spaces, detected per file.
-    pub indent_unit: String,
     pub show_whitespace: bool,
     pub mouse_enabled: bool,
     pub show_help: bool,
@@ -107,15 +121,9 @@ pub struct App {
     pub status: Option<(String, Level, Instant)>,
     pub quit: bool,
 
-    /// Viewport: first visible visual row is row `top_row` of line `top_line`.
-    pub top_line: usize,
-    pub top_row: usize,
-    pub scroll_x: usize,
     /// Rows exactly as last rendered (for mouse hit-testing).
     pub rendered_rows: Vec<VisualRow>,
     pub regions: Regions,
-    /// Set when the caret moved and the viewport must follow it.
-    pub follow_caret: bool,
 
     drag: Option<(DragUnit, Selection)>,
     dragging_scrollbar: bool,
@@ -125,10 +133,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(buf: Buffer, doc: Document, theme: Theme, theme_source: ThemeSource, caps: Capabilities) -> Self {
-        let mut app = Self {
-            buf,
-            doc,
+    pub fn new(tab: Tab, theme: Theme, theme_source: ThemeSource, caps: Capabilities) -> Self {
+        Self {
+            tab,
+            bg_tabs: Vec::new(),
+            active: 0,
             clipboard: Clipboard::default(),
             theme,
             theme_source,
@@ -136,7 +145,6 @@ impl App {
             wrap: true,
             line_numbers: true,
             tab_width: 4,
-            indent_unit: String::new(),
             show_whitespace: false,
             mouse_enabled: true,
             show_help: false,
@@ -144,20 +152,113 @@ impl App {
             last_find: String::new(),
             status: None,
             quit: false,
-            top_line: 0,
-            top_row: 0,
-            scroll_x: 0,
             rendered_rows: Vec::new(),
             regions: Regions::default(),
-            follow_caret: true,
             drag: None,
             dragging_scrollbar: false,
             last_mouse: (0, 0),
             last_click: None,
             pending: None,
+        }
+    }
+
+    // ---- tabs ----------------------------------------------------------------------
+
+    pub fn tab_count(&self) -> usize {
+        self.bg_tabs.len() + 1
+    }
+
+    pub fn tab_at(&self, i: usize) -> &Tab {
+        match i.cmp(&self.active) {
+            std::cmp::Ordering::Equal => &self.tab,
+            std::cmp::Ordering::Less => &self.bg_tabs[i],
+            std::cmp::Ordering::Greater => &self.bg_tabs[i - 1],
+        }
+    }
+
+    pub fn switch_to(&mut self, i: usize) {
+        if i == self.active || i >= self.tab_count() {
+            return;
+        }
+        let cur = std::mem::replace(&mut self.tab, Tab::untitled(self.tab_width));
+        self.bg_tabs.insert(self.active, cur);
+        self.tab = self.bg_tabs.remove(i);
+        self.active = i;
+        self.after_tab_change();
+    }
+
+    fn cycle_tab(&mut self, delta: isize) {
+        let n = self.tab_count() as isize;
+        self.switch_to((self.active as isize + delta).rem_euclid(n) as usize);
+    }
+
+    /// Show `tab` in a new tab right of the current one, or in place of an
+    /// untouched Untitled tab.
+    fn add_tab(&mut self, tab: Tab) {
+        if self.tab.is_pristine() {
+            self.tab = tab;
+        } else {
+            let cur = std::mem::replace(&mut self.tab, tab);
+            self.bg_tabs.insert(self.active, cur);
+            self.active += 1;
+        }
+        self.after_tab_change();
+    }
+
+    /// Close the active tab without asking. Closing the last tab quits.
+    fn close_active_tab(&mut self) {
+        if self.bg_tabs.is_empty() {
+            self.quit = true;
+            return;
+        }
+        self.tab = if self.active < self.bg_tabs.len() {
+            self.bg_tabs.remove(self.active)
+        } else {
+            self.active -= 1;
+            self.bg_tabs.remove(self.active)
         };
-        app.indent_unit = detect_indent(&app.buf, app.tab_width);
-        app
+        self.after_tab_change();
+    }
+
+    /// Close the active tab, asking first (second request confirms) if it
+    /// has unsaved changes.
+    fn request_close_tab(&mut self, pending: Option<Pending>) {
+        if self.tab.buf.is_dirty() && pending != Some(Pending::CloseTab) {
+            self.pending = Some(Pending::CloseTab);
+            self.warn("Unsaved changes! Close again to discard them, or Ctrl+S to save");
+        } else {
+            self.close_active_tab();
+        }
+    }
+
+    fn on_tab_bar_click(&mut self, hit: TabHit, pending: Option<Pending>) {
+        match hit {
+            TabHit::Select(i) => self.switch_to(i),
+            TabHit::Close(i) => {
+                // Keep a pending confirmation if it is for this same tab.
+                let pending = if i == self.active { pending } else { None };
+                self.switch_to(i);
+                self.request_close_tab(pending);
+            }
+            TabHit::Prev => self.cycle_tab(-1),
+            TabHit::Next => self.cycle_tab(1),
+        }
+    }
+
+    fn after_tab_change(&mut self) {
+        self.drag = None;
+        self.pending = None;
+        self.rendered_rows.clear();
+        self.tab.follow_caret = true;
+    }
+
+    fn dirty_tab_count(&self) -> usize {
+        (0..self.tab_count()).filter(|&i| self.tab_at(i).buf.is_dirty()).count()
+    }
+
+    /// All tabs, in order (for recovery snapshots).
+    pub fn all_tabs(&self) -> impl Iterator<Item = &Tab> {
+        (0..self.tab_count()).map(|i| self.tab_at(i))
     }
 
     pub fn info(&mut self, msg: impl Into<String>) {
@@ -174,7 +275,7 @@ impl App {
     }
 
     pub fn rows_of(&self, line: usize) -> Vec<VisualRow> {
-        layout_line(self.buf.rope(), line, self.layout_opts())
+        layout_line(self.tab.buf.rope(), line, self.layout_opts())
     }
 
     // ---- palette ---------------------------------------------------------------
@@ -230,7 +331,7 @@ impl App {
                     self.paste_text(&text);
                 }
             }
-            Event::FocusGained if self.doc.changed_on_disk() => {
+            Event::FocusGained if self.tab.doc.changed_on_disk() => {
                 self.warn("File changed on disk since it was opened/saved");
             }
             _ => {}
@@ -276,30 +377,29 @@ impl App {
             (_, Some('s')) if ctrl && shift => self.open_prompt(PromptKind::SaveAs),
             (KeyCode::F(12), _) => self.open_prompt(PromptKind::SaveAs),
             (_, Some('s')) if ctrl => self.save(pending == Some(Pending::OverwriteExternal)),
-            (_, Some('o')) if ctrl => {
-                if self.buf.is_dirty() {
-                    self.warn("Save or undo changes before opening another file (tabs arrive in 0.2)");
-                } else {
-                    self.open_prompt(PromptKind::Open);
-                }
-            }
-            (_, Some('q')) | (_, Some('w')) if ctrl => {
-                if self.buf.is_dirty() && pending != Some(Pending::Quit) {
+            (_, Some('o')) if ctrl => self.open_prompt(PromptKind::Open),
+            (_, Some('q')) if ctrl => {
+                let dirty = self.dirty_tab_count();
+                if dirty > 0 && pending != Some(Pending::Quit) {
                     self.pending = Some(Pending::Quit);
-                    self.warn("Unsaved changes! Press again to quit without saving, or Ctrl+S to save");
+                    self.warn(format!("{dirty} tab(s) have unsaved changes! Ctrl+Q again quits without saving"));
                 } else {
                     self.quit = true;
                 }
             }
+            (_, Some('w')) if ctrl => self.request_close_tab(pending),
             (_, Some('n')) if ctrl => {
-                if self.buf.is_dirty() {
-                    self.warn("Save or undo changes before starting a new file (tabs arrive in 0.2)");
-                } else {
-                    self.buf = Buffer::new();
-                    self.doc = Document::untitled();
-                    self.indent_unit = detect_indent(&self.buf, self.tab_width);
-                    self.info("New file");
-                }
+                self.add_tab(Tab::untitled(self.tab_width));
+                self.info("New file");
+            }
+            (KeyCode::PageUp, _) if ctrl => self.cycle_tab(-1),
+            (KeyCode::PageDown, _) if ctrl => self.cycle_tab(1),
+            (KeyCode::Tab, _) if ctrl => self.cycle_tab(if shift { -1 } else { 1 }),
+            (KeyCode::BackTab, _) if ctrl => self.cycle_tab(-1),
+            (KeyCode::Char(c @ '1'..='9'), _) if alt => {
+                // Alt+9 is always the last tab, like browsers.
+                let n = c as usize - '1' as usize;
+                self.switch_to(if c == '9' { self.tab_count() - 1 } else { n });
             }
             (KeyCode::F(1), _) => self.show_help = true,
             (_, Some('w')) if alt => {
@@ -321,33 +421,33 @@ impl App {
                 self.paste_text(&t);
             }
             (_, Some('a')) if ctrl => {
-                self.buf.sel = Selection { anchor: 0, head: self.buf.len_chars() };
-                self.buf.break_undo_group();
+                self.tab.buf.sel = Selection { anchor: 0, head: self.tab.buf.len_chars() };
+                self.tab.buf.break_undo_group();
             }
             (_, Some('f')) if ctrl => self.open_prompt(PromptKind::Find),
             (_, Some('g')) if ctrl => self.open_prompt(PromptKind::GotoLine),
             (KeyCode::F(3), _) => self.find_next(!shift),
 
             (KeyCode::Esc, _) => {
-                self.buf.sel = Selection::caret(self.buf.sel.head);
+                self.tab.buf.sel = Selection::caret(self.tab.buf.sel.head);
             }
             (KeyCode::Enter, _) => self.newline(),
             (KeyCode::Tab, _) if shift => self.outdent(),
             (KeyCode::Tab, _) => self.tab(),
             (KeyCode::BackTab, _) => self.outdent(),
             (KeyCode::Backspace, _) => {
-                let h = self.buf.sel.head;
-                let from = if ctrl || alt { self.buf.word_left(h) } else { self.buf.prev_grapheme(h) };
-                self.buf.delete((from, h), EditKind::Deleting);
+                let h = self.tab.buf.sel.head;
+                let from = if ctrl || alt { self.tab.buf.word_left(h) } else { self.tab.buf.prev_grapheme(h) };
+                self.tab.buf.delete((from, h), EditKind::Deleting);
             }
             (KeyCode::Delete, _) => {
-                let h = self.buf.sel.head;
-                let to = if ctrl || alt { self.buf.word_right(h) } else { self.buf.next_grapheme(h) };
-                self.buf.delete((h, to), EditKind::Deleting);
+                let h = self.tab.buf.sel.head;
+                let to = if ctrl || alt { self.tab.buf.word_right(h) } else { self.tab.buf.next_grapheme(h) };
+                self.tab.buf.delete((h, to), EditKind::Deleting);
             }
             (KeyCode::Char(c), _) if !ctrl && !alt => {
                 let mut s = [0u8; 4];
-                self.buf.insert(c.encode_utf8(&mut s), EditKind::Typing);
+                self.tab.buf.insert(c.encode_utf8(&mut s), EditKind::Typing);
             }
 
             // -- motion --
@@ -365,12 +465,12 @@ impl App {
                 self.move_to(to, shift);
             }
             (KeyCode::End, _) => {
-                let to = if ctrl { self.buf.len_chars() } else { self.visual_row_end() };
+                let to = if ctrl { self.tab.buf.len_chars() } else { self.visual_row_end() };
                 self.move_to(to, shift);
             }
             _ => return,
         }
-        self.follow_caret = true;
+        self.tab.follow_caret = true;
     }
 
     fn page_rows(&self) -> usize {
@@ -378,18 +478,18 @@ impl App {
     }
 
     fn move_to(&mut self, pos: usize, extend: bool) {
-        let pos = self.buf.snap(pos);
+        let pos = self.tab.buf.snap(pos);
         if extend {
-            self.buf.sel.head = pos;
+            self.tab.buf.sel.head = pos;
         } else {
-            self.buf.sel = Selection::caret(pos);
+            self.tab.buf.sel = Selection::caret(pos);
         }
-        self.buf.preferred_col = None;
-        self.buf.break_undo_group();
+        self.tab.buf.preferred_col = None;
+        self.tab.buf.break_undo_group();
     }
 
     fn move_horiz(&mut self, right: bool, word: bool, extend: bool) {
-        let sel = self.buf.sel;
+        let sel = self.tab.buf.sel;
         // Collapsing a selection with plain Left/Right goes to its edge.
         if !extend && !sel.is_empty() && !word {
             self.move_to(if right { sel.end() } else { sel.start() }, false);
@@ -397,20 +497,20 @@ impl App {
         }
         let h = sel.head;
         let to = match (right, word) {
-            (true, false) => self.buf.next_grapheme(h),
-            (false, false) => self.buf.prev_grapheme(h),
-            (true, true) => self.buf.word_right(h),
-            (false, true) => self.buf.word_left(h),
+            (true, false) => self.tab.buf.next_grapheme(h),
+            (false, false) => self.tab.buf.prev_grapheme(h),
+            (true, true) => self.tab.buf.word_right(h),
+            (false, true) => self.tab.buf.word_left(h),
         };
         self.move_to(to, extend);
     }
 
     fn move_vert(&mut self, delta: isize, extend: bool) {
-        let head = self.buf.sel.head;
-        let line = self.buf.line_of(head);
+        let head = self.tab.buf.sel.head;
+        let line = self.tab.buf.line_of(head);
         let rows = self.rows_of(line);
         let idx = row_index_for(&rows, head);
-        let col = self.buf.preferred_col.unwrap_or_else(|| rows[idx].col_of(head));
+        let col = self.tab.buf.preferred_col.unwrap_or_else(|| rows[idx].col_of(head));
 
         // Walk `delta` visual rows across line boundaries.
         let (mut line, mut rows, mut idx) = (line, rows, idx as isize);
@@ -424,13 +524,13 @@ impl App {
                 line -= 1;
                 rows = self.rows_of(line);
                 idx = rows.len() as isize - 1;
-            } else if step > 0 && line + 1 < self.buf.len_lines() {
+            } else if step > 0 && line + 1 < self.tab.buf.len_lines() {
                 line += 1;
                 rows = self.rows_of(line);
                 idx = 0;
             } else {
                 // Top/bottom of document: go to start/end like GUI editors.
-                let to = if step < 0 { 0 } else { self.buf.len_chars() };
+                let to = if step < 0 { 0 } else { self.tab.buf.len_chars() };
                 self.move_to(to, extend);
                 return;
             }
@@ -438,21 +538,21 @@ impl App {
         }
         let to = rows[idx as usize].pos_at_col(col);
         self.move_to(to, extend);
-        self.buf.preferred_col = Some(col);
+        self.tab.buf.preferred_col = Some(col);
     }
 
     /// Home toggles between first non-blank char and the start of the row.
     fn smart_home(&self) -> usize {
-        let head = self.buf.sel.head;
-        let line = self.buf.line_of(head);
+        let head = self.tab.buf.sel.head;
+        let line = self.tab.buf.line_of(head);
         let rows = self.rows_of(line);
         let row = &rows[row_index_for(&rows, head)];
         if row.row_in_line > 0 {
             return row.start;
         }
-        let start = self.buf.line_start(line);
-        let end = self.buf.line_end(line);
-        let rope = self.buf.rope();
+        let start = self.tab.buf.line_start(line);
+        let end = self.tab.buf.line_end(line);
+        let rope = self.tab.buf.rope();
         let mut first = start;
         while first < end && matches!(rope.char(first), ' ' | '\t') {
             first += 1;
@@ -461,8 +561,8 @@ impl App {
     }
 
     fn visual_row_end(&self) -> usize {
-        let head = self.buf.sel.head;
-        let rows = self.rows_of(self.buf.line_of(head));
+        let head = self.tab.buf.sel.head;
+        let rows = self.rows_of(self.tab.buf.line_of(head));
         let row = &rows[row_index_for(&rows, head)];
         if row.is_last { row.end } else { row.glyphs.last().map_or(row.start, |g| g.start) }
     }
@@ -470,10 +570,10 @@ impl App {
     /// Lines touched by the selection (a selection ending at column 0 does
     /// not include that last line).
     fn selected_lines(&self) -> std::ops::RangeInclusive<usize> {
-        let sel = self.buf.sel;
-        let first = self.buf.line_of(sel.start());
-        let mut last = self.buf.line_of(sel.end());
-        if last > first && self.buf.line_start(last) == sel.end() {
+        let sel = self.tab.buf.sel;
+        let first = self.tab.buf.line_of(sel.start());
+        let mut last = self.tab.buf.line_of(sel.end());
+        if last > first && self.tab.buf.line_start(last) == sel.end() {
             last -= 1;
         }
         first..=last
@@ -483,32 +583,32 @@ impl App {
         let lines = self.selected_lines();
         if lines.start() != lines.end() {
             // Multi-line selection: indent every non-blank line.
-            let unit = self.indent_unit.clone();
+            let unit = self.tab.indent_unit.clone();
             let ops = lines
-                .filter(|&l| self.buf.line_end(l) > self.buf.line_start(l))
-                .map(|l| (self.buf.line_start(l), 0, unit.clone()))
+                .filter(|&l| self.tab.buf.line_end(l) > self.tab.buf.line_start(l))
+                .map(|l| (self.tab.buf.line_start(l), 0, unit.clone()))
                 .collect();
-            self.buf.transact(ops);
+            self.tab.buf.transact(ops);
             return;
         }
-        if self.indent_unit == "\t" {
-            self.buf.insert("\t", EditKind::Typing);
+        if self.tab.indent_unit == "\t" {
+            self.tab.buf.insert("\t", EditKind::Typing);
         } else {
             // Spaces up to the next tab stop.
-            let start = self.buf.sel.start();
-            let rows = self.rows_of(self.buf.line_of(start));
+            let start = self.tab.buf.sel.start();
+            let rows = self.rows_of(self.tab.buf.line_of(start));
             let col = rows[row_index_for(&rows, start)].col_of(start);
             let n = self.tab_width - col % self.tab_width;
-            self.buf.insert(&" ".repeat(n), EditKind::Typing);
+            self.tab.buf.insert(&" ".repeat(n), EditKind::Typing);
         }
     }
 
     fn outdent(&mut self) {
-        let rope = self.buf.rope();
+        let rope = self.tab.buf.rope();
         let mut ops = Vec::new();
         for l in self.selected_lines() {
-            let start = self.buf.line_start(l);
-            let end = self.buf.line_end(l);
+            let start = self.tab.buf.line_start(l);
+            let end = self.tab.buf.line_end(l);
             let n = if start < end && rope.char(start) == '\t' {
                 1
             } else {
@@ -519,54 +619,54 @@ impl App {
             }
         }
         if !ops.is_empty() {
-            self.buf.transact(ops);
+            self.tab.buf.transact(ops);
         }
     }
 
     fn newline(&mut self) {
         // Auto-indent: copy the current line's leading whitespace.
-        let head = self.buf.sel.start();
-        let line = self.buf.line_of(head);
-        let start = self.buf.line_start(line);
-        let rope = self.buf.rope();
+        let head = self.tab.buf.sel.start();
+        let line = self.tab.buf.line_of(head);
+        let start = self.tab.buf.line_start(line);
+        let rope = self.tab.buf.rope();
         let mut indent = String::new();
         let mut p = start;
         while p < head && matches!(rope.char(p), ' ' | '\t') {
             indent.push(rope.char(p));
             p += 1;
         }
-        let text = format!("{}{}", self.doc.line_ending.as_str(), indent);
-        self.buf.insert(&text, EditKind::Other);
+        let text = format!("{}{}", self.tab.doc.line_ending.as_str(), indent);
+        self.tab.buf.insert(&text, EditKind::Other);
     }
 
     fn undo(&mut self) {
-        if !self.buf.undo() {
+        if !self.tab.buf.undo() {
             self.info("Nothing to undo");
         }
     }
 
     fn redo(&mut self) {
-        if !self.buf.redo() {
+        if !self.tab.buf.redo() {
             self.info("Nothing to redo");
         }
     }
 
     fn copy(&mut self) {
-        if self.buf.sel.is_empty() {
+        if self.tab.buf.sel.is_empty() {
             return;
         }
-        let text = self.buf.selected_text();
+        let text = self.tab.buf.selected_text();
         let dest = self.clipboard.copy(&text);
         self.info(format!("Copied {} chars to {dest}", text.chars().count()));
     }
 
     fn cut(&mut self) {
-        if self.buf.sel.is_empty() {
+        if self.tab.buf.sel.is_empty() {
             return;
         }
-        let text = self.buf.selected_text();
+        let text = self.tab.buf.selected_text();
         self.clipboard.copy(&text);
-        self.buf.delete((0, 0), EditKind::Other);
+        self.tab.buf.delete((0, 0), EditKind::Other);
     }
 
     /// Insert pasted text literally as one undo step, adopting the document's
@@ -576,19 +676,19 @@ impl App {
             return;
         }
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let normalized = if self.doc.line_ending.as_str() == "\n" {
+        let normalized = if self.tab.doc.line_ending.as_str() == "\n" {
             normalized
         } else {
-            normalized.replace('\n', self.doc.line_ending.as_str())
+            normalized.replace('\n', self.tab.doc.line_ending.as_str())
         };
-        self.buf.insert(&normalized, EditKind::Other);
-        self.buf.break_undo_group();
+        self.tab.buf.insert(&normalized, EditKind::Other);
+        self.tab.buf.break_undo_group();
     }
 
     fn toggle_wrap(&mut self) {
         self.wrap = !self.wrap;
-        self.top_row = 0;
-        self.scroll_x = 0;
+        self.tab.top_row = 0;
+        self.tab.scroll_x = 0;
         self.info(if self.wrap { "Soft wrap on" } else { "Soft wrap off" });
     }
 
@@ -608,20 +708,20 @@ impl App {
     // ---- saving --------------------------------------------------------------------
 
     fn save(&mut self, force: bool) {
-        if self.doc.path.is_none() {
+        if self.tab.doc.path.is_none() {
             self.open_prompt(PromptKind::SaveAs);
             return;
         }
-        if !force && self.doc.changed_on_disk() {
+        if !force && self.tab.doc.changed_on_disk() {
             self.pending = Some(Pending::OverwriteExternal);
             self.warn("File changed on disk! Ctrl+S again to overwrite it, F12 to save a copy");
             return;
         }
-        let text = self.buf.rope().to_string();
-        match self.doc.save(&text) {
+        let text = self.tab.buf.rope().to_string();
+        match self.tab.doc.save(&text) {
             Ok(()) => {
-                self.buf.mark_saved();
-                self.info(format!("Saved {}", self.doc.display_name()));
+                self.tab.buf.mark_saved();
+                self.info(format!("Saved {}", self.tab.doc.display_name()));
             }
             Err(e) => self.warn(format!("Save failed: {e:#}")),
         }
@@ -634,17 +734,17 @@ impl App {
             self.warn(format!("{} exists; choose another name (overwrite prompt arrives in 0.2)", path.display()));
             return;
         }
-        let old = self.doc.path.replace(path);
-        let old_stamp = self.doc.stamp.take();
-        let text = self.buf.rope().to_string();
-        match self.doc.save(&text) {
+        let old = self.tab.doc.path.replace(path);
+        let old_stamp = self.tab.doc.stamp.take();
+        let text = self.tab.buf.rope().to_string();
+        match self.tab.doc.save(&text) {
             Ok(()) => {
-                self.buf.mark_saved();
-                self.info(format!("Saved as {}", self.doc.display_name()));
+                self.tab.buf.mark_saved();
+                self.info(format!("Saved as {}", self.tab.doc.display_name()));
             }
             Err(e) => {
-                self.doc.path = old;
-                self.doc.stamp = old_stamp;
+                self.tab.doc.path = old;
+                self.tab.doc.stamp = old_stamp;
                 self.warn(format!("Save failed: {e:#}"));
             }
         }
@@ -654,20 +754,20 @@ impl App {
         self.open_file(&expand_tilde(path));
     }
 
-    /// Replace the (clean) current buffer with a file. Returns true on success.
+    /// Open a file in a tab (switching to it if it is already open).
+    /// Returns true on success.
     fn open_file(&mut self, path: &Path) -> bool {
-        match document::load(path) {
-            Ok(l) => {
-                self.buf = Buffer::from_str(&l.text);
-                self.doc = l.doc;
-                self.indent_unit = detect_indent(&self.buf, self.tab_width);
-                self.top_line = 0;
-                self.top_row = 0;
-                self.scroll_x = 0;
-                self.follow_caret = true;
-                let name = self.doc.display_name();
-                self.info(if l.is_new { format!("New file {name}") } else { format!("Opened {name}") });
-                if self.doc.mixed_line_endings {
+        if let Some(i) = (0..self.tab_count()).find(|&i| self.tab_at(i).shows(path)) {
+            self.switch_to(i);
+            self.info(format!("{} is already open", self.tab.doc.display_name()));
+            return true;
+        }
+        match Tab::open(path, self.tab_width) {
+            Ok((tab, is_new)) => {
+                self.add_tab(tab);
+                let name = self.tab.doc.display_name();
+                self.info(if is_new { format!("New file {name}") } else { format!("Opened {name}") });
+                if self.tab.doc.mixed_line_endings {
                     self.warn("File has mixed line endings; they are preserved as-is");
                 }
                 true
@@ -679,31 +779,26 @@ impl App {
         }
     }
 
-    /// Files dropped onto the terminal window.
+    /// Files dropped onto the terminal window: each opens in its own tab.
     fn open_dropped(&mut self, paths: &[PathBuf]) {
-        let first = &paths[0];
-        if first.is_dir() {
+        if paths.len() == 1 && paths[0].is_dir() {
             // Let the user pick a file inside the dropped folder.
-            let mut input = first.display().to_string();
+            let mut input = paths[0].display().to_string();
             if !input.ends_with('/') {
                 input.push('/');
             }
             self.prompt = Some(Prompt { kind: PromptKind::Open, input });
             return;
         }
-        if self.buf.is_dirty() {
-            self.warn(format!(
-                "Unsaved changes: save (Ctrl+S) then drop {} again. Tabs in 0.2 will open it alongside",
-                first.file_name().map_or_else(|| first.display().to_string(), |n| n.to_string_lossy().into_owned())
-            ));
-            return;
+        let files: Vec<&PathBuf> = paths.iter().filter(|p| !p.is_dir()).collect();
+        let mut opened = 0;
+        for p in &files {
+            if self.open_file(p) {
+                opened += 1;
+            }
         }
-        if self.open_file(first) && paths.len() > 1 {
-            self.info(format!(
-                "Opened {} ({} more dropped; multiple files open in tabs from 0.2)",
-                self.doc.display_name(),
-                paths.len() - 1
-            ));
+        if opened > 1 {
+            self.info(format!("Opened {opened} dropped files"));
         }
     }
 
@@ -712,10 +807,10 @@ impl App {
     fn open_prompt(&mut self, kind: PromptKind) {
         let input = match kind {
             PromptKind::Find => {
-                let sel = self.buf.selected_text();
+                let sel = self.tab.buf.selected_text();
                 if !sel.is_empty() && !sel.contains('\n') { sel } else { self.last_find.clone() }
             }
-            PromptKind::SaveAs => self.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            PromptKind::SaveAs => self.tab.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             _ => String::new(),
         };
         self.prompt = Some(Prompt { kind, input });
@@ -744,7 +839,7 @@ impl App {
                     _ => {}
                 }
                 self.prompt = None;
-                self.follow_caret = true;
+                self.tab.follow_caret = true;
             }
             KeyCode::Backspace => {
                 p.input.pop();
@@ -775,8 +870,8 @@ impl App {
     fn goto_line(&mut self, input: &str) {
         match input.trim().parse::<usize>() {
             Ok(n) if n >= 1 => {
-                let line = (n - 1).min(self.buf.len_lines() - 1);
-                let pos = self.buf.line_start(line);
+                let line = (n - 1).min(self.tab.buf.len_lines() - 1);
+                let pos = self.tab.buf.line_start(line);
                 self.move_to(pos, false);
             }
             _ => self.warn("Not a line number"),
@@ -787,10 +882,10 @@ impl App {
         let Some(p) = &self.prompt else { return };
         self.last_find = p.input.clone();
         // Search from the start of the current selection so typing extends the match.
-        let from = self.buf.sel.start();
-        if let Some((s, e)) = find_in(&self.buf, &self.last_find, from, true) {
-            self.buf.sel = Selection { anchor: s, head: e };
-            self.follow_caret = true;
+        let from = self.tab.buf.sel.start();
+        if let Some((s, e)) = find_in(&self.tab.buf, &self.last_find, from, true) {
+            self.tab.buf.sel = Selection { anchor: s, head: e };
+            self.tab.follow_caret = true;
         }
     }
 
@@ -799,14 +894,14 @@ impl App {
             self.open_prompt(PromptKind::Find);
             return;
         }
-        let from = if forward { self.buf.sel.end() } else { self.buf.sel.start() };
-        match find_in(&self.buf, &self.last_find, from, forward) {
+        let from = if forward { self.tab.buf.sel.end() } else { self.tab.buf.sel.start() };
+        match find_in(&self.tab.buf, &self.last_find, from, forward) {
             Some((s, e)) => {
                 if (forward && s < from) || (!forward && s >= from) {
                     self.info("Search wrapped");
                 }
-                self.buf.sel = Selection { anchor: s, head: e };
-                self.follow_caret = true;
+                self.tab.buf.sel = Selection { anchor: s, head: e };
+                self.tab.follow_caret = true;
             }
             None => self.warn(format!("Not found: {}", self.last_find)),
         }
@@ -820,9 +915,13 @@ impl App {
         let shift = m.modifiers.contains(KeyModifiers::SHIFT);
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                self.pending = None;
+                let pending = self.pending.take();
                 if self.show_help {
                     self.show_help = false;
+                    return;
+                }
+                if let Some(hit) = self.tab_hit_at(m.column, m.row) {
+                    self.on_tab_bar_click(hit, pending);
                     return;
                 }
                 if let Some(b) = self.button_at(m.column, m.row) {
@@ -840,32 +939,32 @@ impl App {
                     // Gutter: select whole lines; drag extends by lines.
                     let range = self.line_range(pos);
                     if shift || alt {
-                        let anchor = self.buf.sel.start().min(range.0);
-                        self.buf.sel = Selection { anchor, head: range.1.max(self.buf.sel.end()) };
+                        let anchor = self.tab.buf.sel.start().min(range.0);
+                        self.tab.buf.sel = Selection { anchor, head: range.1.max(self.tab.buf.sel.end()) };
                     } else {
-                        self.buf.sel = Selection { anchor: range.0, head: range.1 };
+                        self.tab.buf.sel = Selection { anchor: range.0, head: range.1 };
                     }
                     self.drag = Some((DragUnit::Line, Selection { anchor: range.0, head: range.1 }));
-                    self.buf.preferred_col = None;
-                    self.buf.break_undo_group();
+                    self.tab.buf.preferred_col = None;
+                    self.tab.buf.break_undo_group();
                     return;
                 }
                 if (shift || alt) && count == 1 {
                     // Extend selection. Alt+click is the fallback for terminals
                     // that reserve Shift+click (stock Kitty, many others).
-                    self.buf.sel.head = pos;
-                    self.drag = Some((DragUnit::Char, Selection::caret(self.buf.sel.anchor)));
+                    self.tab.buf.sel.head = pos;
+                    self.drag = Some((DragUnit::Char, Selection::caret(self.tab.buf.sel.anchor)));
                 } else {
                     let (unit, range) = match count {
                         1 => (DragUnit::Char, (pos, pos)),
-                        2 => (DragUnit::Word, self.buf.word_at(pos)),
+                        2 => (DragUnit::Word, self.tab.buf.word_at(pos)),
                         _ => (DragUnit::Line, self.line_range(pos)),
                     };
-                    self.buf.sel = Selection { anchor: range.0, head: range.1 };
+                    self.tab.buf.sel = Selection { anchor: range.0, head: range.1 };
                     self.drag = Some((unit, Selection { anchor: range.0, head: range.1 }));
                 }
-                self.buf.preferred_col = None;
-                self.buf.break_undo_group();
+                self.tab.buf.preferred_col = None;
+                self.tab.buf.break_undo_group();
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.dragging_scrollbar {
@@ -878,9 +977,20 @@ impl App {
                 self.drag = None;
                 self.dragging_scrollbar = false;
             }
-            MouseEventKind::ScrollUp if shift => self.scroll_x = self.scroll_x.saturating_sub(SCROLL_STEP * 2),
+            MouseEventKind::Down(MouseButton::Middle) => {
+                let pending = self.pending.take();
+                if let Some(TabHit::Select(i) | TabHit::Close(i)) = self.tab_hit_at(m.column, m.row) {
+                    self.on_tab_bar_click(TabHit::Close(i), pending);
+                }
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                if contains(self.regions.tab_bar, m.column, m.row) =>
+            {
+                self.cycle_tab(if m.kind == MouseEventKind::ScrollUp { -1 } else { 1 });
+            }
+            MouseEventKind::ScrollUp if shift => self.tab.scroll_x = self.tab.scroll_x.saturating_sub(SCROLL_STEP * 2),
             MouseEventKind::ScrollDown if shift => self.scroll_horiz(SCROLL_STEP * 2),
-            MouseEventKind::ScrollLeft => self.scroll_x = self.scroll_x.saturating_sub(SCROLL_STEP * 2),
+            MouseEventKind::ScrollLeft => self.tab.scroll_x = self.tab.scroll_x.saturating_sub(SCROLL_STEP * 2),
             MouseEventKind::ScrollRight => self.scroll_horiz(SCROLL_STEP * 2),
             MouseEventKind::ScrollUp => self.scroll_rows(-(SCROLL_STEP as isize)),
             MouseEventKind::ScrollDown => self.scroll_rows(SCROLL_STEP as isize),
@@ -890,7 +1000,7 @@ impl App {
 
     fn scroll_horiz(&mut self, n: usize) {
         if !self.wrap {
-            self.scroll_x += n;
+            self.tab.scroll_x += n;
         }
     }
 
@@ -904,10 +1014,10 @@ impl App {
             self.scroll_rows(1);
         }
         if !self.wrap {
-            if x < t.x && self.scroll_x > 0 {
-                self.scroll_x -= 1;
+            if x < t.x && self.tab.scroll_x > 0 {
+                self.tab.scroll_x -= 1;
             } else if x >= t.x + t.width {
-                self.scroll_x += 1;
+                self.tab.scroll_x += 1;
             }
         }
         let cy = y.clamp(t.y, t.y + t.height.saturating_sub(1));
@@ -915,14 +1025,14 @@ impl App {
         let Some(pos) = self.pos_at_screen(cx, cy) else { return };
         let (s, e) = match unit {
             DragUnit::Char => {
-                self.buf.sel = Selection { anchor: origin.anchor, head: pos };
+                self.tab.buf.sel = Selection { anchor: origin.anchor, head: pos };
                 return;
             }
-            DragUnit::Word => self.buf.word_at(pos),
+            DragUnit::Word => self.tab.buf.word_at(pos),
             DragUnit::Line => self.line_range(pos),
         };
         // Keep the originally clicked word/line selected, extend toward the pointer.
-        self.buf.sel = if s < origin.start() {
+        self.tab.buf.sel = if s < origin.start() {
             Selection { anchor: origin.end(), head: s }
         } else {
             Selection { anchor: origin.start(), head: e.max(origin.end()) }
@@ -930,9 +1040,9 @@ impl App {
     }
 
     fn line_range(&self, pos: usize) -> (usize, usize) {
-        let line = self.buf.line_of(pos);
-        let start = self.buf.line_start(line);
-        let end = if line + 1 < self.buf.len_lines() { self.buf.line_start(line + 1) } else { self.buf.len_chars() };
+        let line = self.tab.buf.line_of(pos);
+        let start = self.tab.buf.line_start(line);
+        let end = if line + 1 < self.tab.buf.len_lines() { self.tab.buf.line_start(line + 1) } else { self.tab.buf.len_chars() };
         (start, end)
     }
 
@@ -957,10 +1067,15 @@ impl App {
         }
         let i = (y - t.y) as usize;
         let Some(row) = self.rendered_rows.get(i) else {
-            return Some(self.buf.len_chars());
+            return Some(self.tab.buf.len_chars());
         };
-        let col = (x.saturating_sub(t.x)) as usize + if self.wrap { 0 } else { self.scroll_x };
+        let col = (x.saturating_sub(t.x)) as usize + if self.wrap { 0 } else { self.tab.scroll_x };
         Some(row.pos_at_col(col))
+    }
+
+    fn tab_hit_at(&self, x: u16, y: u16) -> Option<TabHit> {
+        // Close markers are listed before their tab, so they win.
+        self.regions.tab_hits.iter().find(|(r, _)| contains(*r, x, y)).map(|(_, h)| *h)
     }
 
     fn button_at(&self, x: u16, y: u16) -> Option<Button> {
@@ -982,36 +1097,36 @@ impl App {
             return;
         }
         let frac = (y.saturating_sub(r.y)) as f64 / r.height.saturating_sub(1).max(1) as f64;
-        let lines = self.buf.len_lines();
-        self.top_line = ((frac.clamp(0.0, 1.0) * lines.saturating_sub(1) as f64).round() as usize).min(lines - 1);
-        self.top_row = 0;
-        self.follow_caret = false;
+        let lines = self.tab.buf.len_lines();
+        self.tab.top_line = ((frac.clamp(0.0, 1.0) * lines.saturating_sub(1) as f64).round() as usize).min(lines - 1);
+        self.tab.top_row = 0;
+        self.tab.follow_caret = false;
     }
 
     // ---- viewport ------------------------------------------------------------------------
 
     /// Scroll the viewport by visual rows without moving the caret.
     pub fn scroll_rows(&mut self, delta: isize) {
-        self.follow_caret = false;
+        self.tab.follow_caret = false;
         if delta > 0 {
             for _ in 0..delta {
-                let n = self.rows_of(self.top_line).len();
-                if self.top_row + 1 < n {
-                    self.top_row += 1;
-                } else if self.top_line + 1 < self.buf.len_lines() {
-                    self.top_line += 1;
-                    self.top_row = 0;
+                let n = self.rows_of(self.tab.top_line).len();
+                if self.tab.top_row + 1 < n {
+                    self.tab.top_row += 1;
+                } else if self.tab.top_line + 1 < self.tab.buf.len_lines() {
+                    self.tab.top_line += 1;
+                    self.tab.top_row = 0;
                 } else {
                     break;
                 }
             }
         } else {
             for _ in 0..(-delta) {
-                if self.top_row > 0 {
-                    self.top_row -= 1;
-                } else if self.top_line > 0 {
-                    self.top_line -= 1;
-                    self.top_row = self.rows_of(self.top_line).len() - 1;
+                if self.tab.top_row > 0 {
+                    self.tab.top_row -= 1;
+                } else if self.tab.top_line > 0 {
+                    self.tab.top_line -= 1;
+                    self.tab.top_row = self.rows_of(self.tab.top_line).len() - 1;
                 } else {
                     break;
                 }
@@ -1025,24 +1140,24 @@ impl App {
         if height == 0 {
             return;
         }
-        self.top_line = self.top_line.min(self.buf.len_lines() - 1);
-        self.top_row = self.top_row.min(self.rows_of(self.top_line).len() - 1);
-        if !self.follow_caret {
+        self.tab.top_line = self.tab.top_line.min(self.tab.buf.len_lines() - 1);
+        self.tab.top_row = self.tab.top_row.min(self.rows_of(self.tab.top_line).len() - 1);
+        if !self.tab.follow_caret {
             return;
         }
-        let head = self.buf.sel.head;
-        let cline = self.buf.line_of(head);
+        let head = self.tab.buf.sel.head;
+        let cline = self.tab.buf.line_of(head);
         let crows = self.rows_of(cline);
         let crow = row_index_for(&crows, head);
 
-        if (cline, crow) < (self.top_line, self.top_row) {
-            self.top_line = cline;
-            self.top_row = crow;
+        if (cline, crow) < (self.tab.top_line, self.tab.top_row) {
+            self.tab.top_line = cline;
+            self.tab.top_row = crow;
         } else {
             // Count rows from top to caret; stop once past the viewport.
             let mut count = 0usize;
-            let mut line = self.top_line;
-            let mut first = self.top_row;
+            let mut line = self.tab.top_line;
+            let mut first = self.tab.top_row;
             let mut visible = false;
             while line <= cline && count < height {
                 let n = if line == cline { crow + 1 } else { self.rows_of(line).len() };
@@ -1066,8 +1181,8 @@ impl App {
                         break;
                     }
                 }
-                self.top_line = l;
-                self.top_row = r;
+                self.tab.top_line = l;
+                self.tab.top_row = r;
             }
         }
 
@@ -1075,23 +1190,23 @@ impl App {
             let w = self.regions.text.width as usize;
             let col = crows[crow].col_of(head);
             let margin = 4.min(w / 4);
-            if col < self.scroll_x + margin {
-                self.scroll_x = col.saturating_sub(margin);
-            } else if col + margin >= self.scroll_x + w {
-                self.scroll_x = col + margin + 1 - w;
+            if col < self.tab.scroll_x + margin {
+                self.tab.scroll_x = col.saturating_sub(margin);
+            } else if col + margin >= self.tab.scroll_x + w {
+                self.tab.scroll_x = col + margin + 1 - w;
             }
         } else {
-            self.scroll_x = 0;
+            self.tab.scroll_x = 0;
         }
-        self.follow_caret = false;
+        self.tab.follow_caret = false;
     }
 
     /// Collect the visual rows for the viewport starting at the top position.
     pub fn visible_rows(&self, height: usize) -> Vec<VisualRow> {
         let mut out = Vec::with_capacity(height);
-        let mut line = self.top_line;
-        let mut skip = self.top_row;
-        while out.len() < height && line < self.buf.len_lines() {
+        let mut line = self.tab.top_line;
+        let mut skip = self.tab.top_row;
+        while out.len() < height && line < self.tab.buf.len_lines() {
             for r in self.rows_of(line).into_iter().skip(skip) {
                 if out.len() == height {
                     break;
@@ -1103,21 +1218,6 @@ impl App {
         }
         out
     }
-}
-
-/// Guess the file's indentation style from its first lines: tabs unless
-/// space-indented lines clearly dominate. Empty files default to tabs.
-pub fn detect_indent(buf: &Buffer, tab_width: usize) -> String {
-    let rope = buf.rope();
-    let (mut tabs, mut spaces) = (0usize, 0usize);
-    for line in rope.lines().take(2000) {
-        match (line.get_char(0), line.get_char(1)) {
-            (Some('\t'), _) => tabs += 1,
-            (Some(' '), Some(' ')) => spaces += 1,
-            _ => {}
-        }
-    }
-    if spaces > tabs { " ".repeat(tab_width) } else { "\t".to_string() }
 }
 
 fn contains(r: Rect, x: u16, y: u16) -> bool {
@@ -1190,7 +1290,8 @@ mod tests {
     fn app_with(text: &str, w: u16, h: u16) -> App {
         let caps = Capabilities { keyboard_enhanced: true, truecolor: true };
         let theme = theme::resolve(&theme::dracula());
-        let mut a = App::new(Buffer::from_str(text), Document::untitled(), theme, ThemeSource::Builtin, caps);
+        let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), 4);
+        let mut a = App::new(tab, theme, ThemeSource::Builtin, caps);
         a.regions.text = Rect { x: 5, y: 1, width: w, height: h };
         a.regions.gutter = Rect { x: 0, y: 1, width: 5, height: h };
         a
@@ -1201,52 +1302,52 @@ mod tests {
     }
 
     fn text(a: &App) -> String {
-        a.buf.rope().to_string()
+        a.tab.buf.rope().to_string()
     }
 
     #[test]
     fn viewport_follows_caret_down_and_up() {
         let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
         let mut a = app_with(&body, 40, 10);
-        a.buf.sel = Selection::caret(a.buf.line_start(50));
-        a.follow_caret = true;
+        a.tab.buf.sel = Selection::caret(a.tab.buf.line_start(50));
+        a.tab.follow_caret = true;
         a.ensure_caret_visible();
-        assert_eq!(a.top_line, 41, "caret line should be the last visible row");
-        a.buf.sel = Selection::caret(a.buf.line_start(3));
-        a.follow_caret = true;
+        assert_eq!(a.tab.top_line, 41, "caret line should be the last visible row");
+        a.tab.buf.sel = Selection::caret(a.tab.buf.line_start(3));
+        a.tab.follow_caret = true;
         a.ensure_caret_visible();
-        assert_eq!(a.top_line, 3);
+        assert_eq!(a.tab.top_line, 3);
     }
 
     #[test]
     fn vertical_motion_walks_wrapped_rows_and_keeps_column() {
         // Width 10: first line wraps into 3 rows.
         let mut a = app_with("aaaa bbbb cccc dddd eeee\nxy\n", 10, 10);
-        a.buf.sel = Selection::caret(2);
+        a.tab.buf.sel = Selection::caret(2);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(a.buf.sel.head, 12, "same column on the next visual row");
+        assert_eq!(a.tab.buf.sel.head, 12, "same column on the next visual row");
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
         key(&mut a, KeyCode::Down, KeyModifiers::NONE);
-        assert_eq!(a.buf.sel.head, a.buf.line_start(1) + 2, "short line clamps to its end");
+        assert_eq!(a.tab.buf.sel.head, a.tab.buf.line_start(1) + 2, "short line clamps to its end");
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
-        assert_eq!(a.buf.sel.head, 22, "preferred column is remembered");
+        assert_eq!(a.tab.buf.sel.head, 22, "preferred column is remembered");
     }
 
     #[test]
     fn indent_detection_and_tab_behaviour() {
         let mut a = app_with("def f():\n    return 1\n    pass\n", 40, 10);
-        assert_eq!(a.indent_unit, "    ");
-        a.buf.sel = Selection::caret(a.buf.line_start(1) + 2);
+        assert_eq!(a.tab.indent_unit, "    ");
+        a.tab.buf.sel = Selection::caret(a.tab.buf.line_start(1) + 2);
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
         assert!(text(&a).contains("\n      return"), "Tab pads to the next tab stop");
         let a2 = app_with("x\n\ty\n", 40, 10);
-        assert_eq!(a2.indent_unit, "\t");
+        assert_eq!(a2.tab.indent_unit, "\t");
     }
 
     #[test]
     fn tab_and_shift_tab_on_selection_indent_lines_atomically() {
         let mut a = app_with("one\n\ntwo\nthree\n", 40, 10);
-        a.buf.sel = Selection { anchor: 1, head: a.buf.line_start(3) }; // ends at col 0 of line 3
+        a.tab.buf.sel = Selection { anchor: 1, head: a.tab.buf.line_start(3) }; // ends at col 0 of line 3
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(text(&a), "\tone\n\n\ttwo\nthree\n", "blank line and line 3 untouched");
         key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
@@ -1262,8 +1363,8 @@ mod tests {
         key(&mut a, KeyCode::Down, KeyModifiers::CONTROL);
         key(&mut a, KeyCode::Down, KeyModifiers::CONTROL);
         a.ensure_caret_visible();
-        assert_eq!(a.top_line, 2);
-        assert_eq!(a.buf.sel.head, 0);
+        assert_eq!(a.tab.top_line, 2);
+        assert_eq!(a.tab.buf.sel.head, 0);
     }
 
     #[test]
@@ -1274,16 +1375,73 @@ mod tests {
         let mut a = app_with("", 40, 10);
         a.handle_event(Event::Paste(format!("{}\n", f.display())));
         assert_eq!(text(&a), "dropped contents");
-        assert_eq!(a.doc.path.as_deref(), Some(f.as_path()));
-        // With unsaved changes the drop is refused, nothing is inserted or lost.
+        assert_eq!(a.tab_count(), 1, "pristine Untitled tab is replaced");
+        assert_eq!(a.tab.doc.path.as_deref(), Some(f.as_path()));
+        // Dropping the same file again just switches to it.
         a.handle_event(Event::Paste("x".into()));
-        let before = text(&a);
         a.handle_event(Event::Paste(format!("'{}' ", f.display())));
-        assert_eq!(text(&a), before);
-        assert!(a.status.as_ref().unwrap().0.contains("Unsaved"));
+        assert_eq!(a.tab_count(), 1);
+        assert!(text(&a).starts_with('x'), "unsaved edit kept");
         // Ordinary paste still inserts text.
         a.handle_event(Event::Paste("/not/a/real/path".into()));
         assert!(text(&a).contains("/not/a/real/path"));
+    }
+
+    #[test]
+    fn several_dropped_files_open_in_tabs_and_unsaved_work_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let f1 = d.path().join("one.txt");
+        let f2 = d.path().join("two.txt");
+        std::fs::write(&f1, "1").unwrap();
+        std::fs::write(&f2, "2").unwrap();
+        let mut a = app_with("draft", 40, 10);
+        a.tab.buf.sel = Selection::caret(5);
+        a.handle_event(Event::Paste("!".into()));
+        a.handle_event(Event::Paste(format!("{}\n{}", f1.display(), f2.display())));
+        assert_eq!(a.tab_count(), 3);
+        assert_eq!(text(&a), "2");
+        assert_eq!(a.tab_at(0).buf.rope().to_string(), "draft!");
+        assert!(a.tab_at(0).buf.is_dirty());
+    }
+
+    #[test]
+    fn tab_switching_order_and_closing() {
+        let mut a = app_with("A", 40, 10); // has content, so not pristine
+        for c in ['B', 'C'] {
+            key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            key(&mut a, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!((a.tab_count(), a.active, text(&a).as_str()), (3, 2, "C"));
+        key(&mut a, KeyCode::PageUp, KeyModifiers::CONTROL);
+        assert_eq!(text(&a), "B");
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
+        assert_eq!(text(&a), "A");
+        key(&mut a, KeyCode::Char('9'), KeyModifiers::ALT);
+        assert_eq!(text(&a), "C");
+        key(&mut a, KeyCode::Tab, KeyModifiers::CONTROL);
+        assert_eq!(text(&a), "A", "Ctrl+Tab wraps around");
+        key(&mut a, KeyCode::BackTab, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert_eq!(text(&a), "C");
+        // Order is preserved across switches.
+        let order: Vec<String> = a.all_tabs().map(|t| t.buf.rope().to_string()).collect();
+        assert_eq!(order, ["A", "B", "C"]);
+        // Closing a dirty tab needs a second Ctrl+W.
+        key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!(a.tab_count(), 3);
+        key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert_eq!((a.tab_count(), text(&a).as_str()), (2, "B"), "last tab closed -> left neighbour");
+        // Quit with unsaved tabs needs a second Ctrl+Q.
+        key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert!(!a.quit);
+        key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn closing_the_last_clean_tab_quits() {
+        let mut a = app_with("", 40, 10);
+        key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(a.quit);
     }
 
     #[test]
@@ -1307,7 +1465,7 @@ mod tests {
         let ev = |kind| Event::Mouse(MouseEvent { kind, column: 1, row: 2, modifiers: KeyModifiers::NONE });
         a.handle_event(ev(MouseEventKind::Down(MouseButton::Left)));
         a.handle_event(ev(MouseEventKind::Up(MouseButton::Left)));
-        assert_eq!(a.buf.selected_text(), "beta\n");
+        assert_eq!(a.tab.buf.selected_text(), "beta\n");
     }
 
     #[test]

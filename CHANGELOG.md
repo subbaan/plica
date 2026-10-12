@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 (2026-10-12): tabs
+
+- Multiple documents in tabs. `plica a.txt b.txt` opens one tab per file; opening a file that is already open switches to it.
+- Tab bar: click to switch, × to close, ● marks unsaved changes (click it to close), middle-click closes, mouse wheel over the bar cycles tabs. When tabs overflow, ‹ › markers appear and the active tab stays visible. The title-bar buttons hide when the tabs need the room.
+- Keys: Ctrl+N new tab, Ctrl+O opens into a new tab, Ctrl+W closes the tab (asks once if unsaved; closing the last tab quits), Ctrl+Q quits (asks once if any tab is unsaved), Ctrl+PageUp/PageDown and Ctrl+Tab/Ctrl+Shift+Tab switch, Alt+1..9 jump (Alt+9 = last).
+- Dropping files now opens each in its own tab, even when the current tab has unsaved changes. An untouched Untitled tab is reused.
+- Recovery copies on SIGTERM/SIGHUP/SIGINT are written for every unsaved tab.
+
 ## 0.1.0 (2026-10-12): Phase 1, basic editor
 
 - **Drag and drop:** dropping a file onto the terminal opens it instead of inserting its path. Understands Kitty (plain paths per line), VTE terminals (shell-quoted paths) and `file://` URIs. Only a paste made up entirely of existing absolute paths counts as a drop; Ctrl+V never does, so a path can still be inserted as text. A dropped folder opens the Open prompt inside it; dropping into the Open/Save As prompt fills in the path. With unsaved changes the drop is refused (tabs in 0.2 will open it alongside).

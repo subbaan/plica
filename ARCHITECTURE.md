@@ -7,12 +7,13 @@ How Plica is put together, and a dated log of design decisions and **workarounds
 ## Overview
 
 ```
-main.rs ── CLI, palette selection, event loop, palette debounce, recovery on signal
+main.rs ── CLI (files → tabs), palette selection, event loop, palette debounce, recovery on signal
   │
   ├─ term.rs ─────── raw mode / alt screen / mouse / paste / keyboard flags; restore() on exit, panic, signal
   ├─ watch.rs ────── notify watcher on the palette's parent directory → mpsc → main (debounced)
   │
-  └─ app.rs ──────── App state: Buffer + Document + Theme + viewport; key/mouse/paste commands
+  └─ app.rs ──────── App state: tabs + Theme + shared UI state; key/mouse/paste commands
+        ├─ tab.rs ───── Tab = Buffer + Document + indent style + viewport
         ├─ buffer.rs ── ropey Rope, grapheme navigation, Selection, transactions, undo/redo
         ├─ layout.rs ── per-line VisualRow/Glyph layout: wrap, tabs, widths, hit-testing
         ├─ document.rs ─ load (UTF-8 only), atomic save, line-ending detection, disk stamps
@@ -40,6 +41,14 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.1.1
+
+- **Active tab is a plain field (`App::tab`); other tabs live in `bg_tabs`** in order around index `active`. *Why not `Vec<Tab>` with an index:* with an accessor, every `self.tab_mut().buf.insert(..)` borrows all of `self`, which clashes with layout helpers that also borrow `self`. A direct field lets Rust split borrows (`self.tab.buf` vs `self.regions`). Switching tabs is a `mem::replace` plus an insert/remove in `bg_tabs`.
+- **An untouched Untitled tab is replaced** when a file is opened or dropped, so starting `plica` and then opening a file doesn't leave an empty tab behind.
+- **Closing the last tab quits** (Mousepad/Gedit behaviour) instead of leaving an empty editor.
+- **Unsaved-close confirmation is "press again"** for now (the `Pending` mechanism). Proper dialogs replace it in 0.1.2.
+- **Tabs beat title-bar buttons for space:** the buttons are only drawn when all tabs fit beside them, since every button has a key.
 
 ### 2026-10-12 · 0.1.0
 

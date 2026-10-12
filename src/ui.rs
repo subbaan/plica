@@ -1,7 +1,7 @@
 //! Rendering. Everything here asks the `Theme` for semantic roles; only
 //! `Painter` knows how roles become terminal colours.
 
-use crate::app::{App, Button, Level, PromptKind, ThemeSource, find_all};
+use crate::app::{App, Button, Level, PromptKind, TabHit, ThemeSource, find_all};
 use crate::layout::GlyphKind;
 use crate::theme::Rgb;
 use ratatui::Frame;
@@ -74,7 +74,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let prompt = Rect { x: area.x, y: status.y - prompt_h, width: area.width, height: prompt_h };
     let editor = Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height - 2 - prompt_h };
 
-    let gutter_w = if app.line_numbers { digits(app.buf.len_lines()).max(3) as u16 + 2 } else { 1 };
+    let gutter_w = if app.line_numbers { digits(app.tab.buf.len_lines()).max(3) as u16 + 2 } else { 1 };
     let gutter = Rect { width: gutter_w.min(editor.width / 2), ..editor };
     let scrollbar = Rect { x: editor.right() - 1, width: 1, ..editor };
     let text = Rect {
@@ -91,8 +91,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ---- editor ----
     let base = p.style(t.editor_fg, t.editor_bg);
     buf.set_style(editor, base);
-    let sel = app.buf.sel;
-    let caret_line = app.buf.line_of(sel.head);
+    let sel = app.tab.buf.sel;
+    let caret_line = app.tab.buf.line_of(sel.head);
     let sel_style = p.plain_or(p.style(t.selection_fg, t.selection_bg), Modifier::REVERSED);
     let search_style = p.plain_or(p.style(t.search_fg, t.search_bg), Modifier::UNDERLINED);
     let current_line = if p.plain { base } else { p.style(t.editor_fg, t.current_line_bg) };
@@ -109,7 +109,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     let in_match = |s: usize, e: usize| matches.iter().any(|&(ms, me)| s >= ms && e <= me);
 
-    let scroll_x = if app.wrap { 0 } else { app.scroll_x };
+    let scroll_x = if app.wrap { 0 } else { app.tab.scroll_x };
     for (i, row) in rows.iter().enumerate() {
         let y = text.y + i as u16;
         let is_caret_line = row.line == caret_line && sel.is_empty();
@@ -194,41 +194,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_scrollbar(buf, app, scrollbar, rows.len(), &p);
     app.rendered_rows = rows;
 
-    // ---- title bar ----
+    // ---- tab bar ----
     let surface = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
-    buf.set_style(title, surface);
     let accent = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::REVERSED | Modifier::BOLD);
-    let buttons: [(&str, Button, bool); 4] = [
-        (" Save ", Button::Save, app.buf.is_dirty()),
-        (" Wrap ", Button::Wrap, app.wrap),
-        (" Mouse ", Button::Mouse, app.mouse_enabled),
-        (" Help F1 ", Button::Help, false),
-    ];
-    let total: u16 = buttons.iter().map(|b| b.0.len() as u16 + 1).sum();
-    let mut x = title.right().saturating_sub(total);
-    let show_buttons = x > title.x + 20;
-    // File name has priority over the app name; shorten it in the middle
-    // (keeping the extension) rather than letting buttons cover it.
-    let room = (if show_buttons { x - title.x - 1 } else { title.width }) as usize;
-    let dirty = if app.buf.is_dirty() { "● " } else { "" };
-    let name = app.doc.display_name();
-    let full = format!(" Plica {VERSION}  │  {dirty}{name}");
-    let label = if full.chars().count() <= room {
-        full
-    } else {
-        format!(" {dirty}{}", fit_middle(&name, room.saturating_sub(1 + dirty.chars().count())))
-    };
-    buf.set_stringn(title.x, title.y, label, room, surface);
-    app.regions.buttons.clear();
-    if show_buttons {
-        for (label, b, on) in buttons {
-            let w = label.len() as u16;
-            let st = if on { accent } else { surface.add_modifier(Modifier::BOLD) };
-            buf.set_stringn(x, title.y, label, w as usize, st);
-            app.regions.buttons.push((Rect { x, y: title.y, width: w, height: 1 }, b));
-            x += w + 1;
-        }
-    }
+    draw_tab_bar(buf, app, title, surface, accent, &p);
 
     // ---- prompt ----
     if let Some(pr) = &app.prompt {
@@ -274,7 +243,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             buf.set_stringn(status.x, status.y, format!(" {m}"), left_w, surface);
         }
         None => {
-            let path = app.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Untitled (Ctrl+S to choose a name)".into());
+            let path = app.tab.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Untitled (Ctrl+S to choose a name)".into());
             buf.set_stringn(status.x, status.y, format!(" {path}"), left_w, surface.add_modifier(Modifier::DIM));
         }
     }
@@ -287,6 +256,96 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if let Some(pos) = caret_pos {
         f.set_cursor_position(pos);
+    }
+}
+
+fn draw_tab_bar(buf: &mut TermBuf, app: &mut App, title: Rect, surface: Style, accent: Style, p: &Painter) {
+    buf.set_style(title, surface);
+    let buttons: [(&str, Button, bool); 4] = [
+        (" Save ", Button::Save, app.tab.buf.is_dirty()),
+        (" Wrap ", Button::Wrap, app.wrap),
+        (" Mouse ", Button::Mouse, app.mouse_enabled),
+        (" Help F1 ", Button::Help, false),
+    ];
+    // " name ● " / " name × " per tab; ● = unsaved (click to close, like VS Code).
+    let n = app.tab_count();
+    let labels: Vec<(String, bool)> = (0..n)
+        .map(|i| {
+            let tab = app.tab_at(i);
+            (fit_middle(&tab.doc.display_name(), 28), tab.buf.is_dirty())
+        })
+        .collect();
+    let width = |l: &(String, bool)| l.0.chars().count() as u16 + 4;
+    let app_name = format!(" Plica {VERSION} │");
+    let all: u16 = labels.iter().map(width).sum();
+
+    // Tabs have priority: the buttons (all reachable by keys too) show only
+    // when every tab still fits beside them.
+    let total: u16 = buttons.iter().map(|b| b.0.len() as u16 + 1).sum();
+    let bx = title.right().saturating_sub(total);
+    let show_buttons = bx > title.x + 20 && title.x + all < bx;
+    let bar_end = if show_buttons { bx - 1 } else { title.right() };
+    let bar = Rect { width: bar_end - title.x, ..title };
+    app.regions.tab_bar = bar;
+    app.regions.tab_hits.clear();
+    app.regions.buttons.clear();
+    let mut x = bar.x;
+    if all + (app_name.chars().count() as u16) < bar.width {
+        buf.set_stringn(x, bar.y, &app_name, bar.width as usize, surface.add_modifier(Modifier::DIM));
+        x += app_name.chars().count() as u16;
+    }
+    // Scroll so the active tab is visible, with ‹ › markers for hidden tabs.
+    let active = app.active;
+    let avail = bar.right().saturating_sub(x);
+    let mut start = 0;
+    while start < active {
+        let need: u16 = labels[start..=active].iter().map(width).sum::<u16>()
+            + u16::from(start > 0)
+            + u16::from(active + 1 < n);
+        if need <= avail {
+            break;
+        }
+        start += 1;
+    }
+    if start > 0 {
+        buf.set_stringn(x, bar.y, "‹", 1, surface.add_modifier(Modifier::BOLD));
+        app.regions.tab_hits.push((Rect { x, y: bar.y, width: 1, height: 1 }, TabHit::Prev));
+        x += 1;
+    }
+    let warn = if p.plain { surface } else { surface.fg(p.c(app.theme.warning)) };
+    for (i, label) in labels.iter().enumerate().skip(start) {
+        let w = width(label);
+        let more_after = i + 1 < n;
+        if x + w + u16::from(more_after) > bar.right() && i != active {
+            buf.set_stringn(x, bar.y, "›", 1, surface.add_modifier(Modifier::BOLD));
+            app.regions.tab_hits.push((Rect { x, y: bar.y, width: 1, height: 1 }, TabHit::Next));
+            break;
+        }
+        let st = if i == active { accent } else { surface };
+        let (marker, mst) = if label.1 { ("●", if i == active { st } else { warn }) } else { ("×", st) };
+        buf.set_stringn(x, bar.y, format!(" {} ", label.0), bar.right().saturating_sub(x) as usize, st);
+        let mx = x + w - 2;
+        if mx < bar.right() {
+            buf.set_stringn(mx, bar.y, marker, 1, mst);
+            buf.set_stringn(mx + 1, bar.y, " ", 1, st);
+            app.regions.tab_hits.push((Rect { x: mx, y: bar.y, width: 1, height: 1 }, TabHit::Close(i)));
+        }
+        app.regions.tab_hits.push((Rect { x, y: bar.y, width: w.min(bar.right() - x), height: 1 }, TabHit::Select(i)));
+        x += w;
+        if x >= bar.right() {
+            break;
+        }
+    }
+
+    if show_buttons {
+        let mut x = bx;
+        for (label, b, on) in buttons {
+            let w = label.len() as u16;
+            let st = if on { accent } else { surface.add_modifier(Modifier::BOLD) };
+            buf.set_stringn(x, title.y, label, w as usize, st);
+            app.regions.buttons.push((Rect { x, y: title.y, width: w, height: 1 }, b));
+            x += w + 1;
+        }
     }
 }
 
@@ -305,7 +364,7 @@ fn put(buf: &mut TermBuf, x: u16, y: u16, sym: &str, width: usize, st: Style) {
 
 fn visible_matches(app: &App, q: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
     // Search only the visible window, once per frame.
-    let rope = app.buf.rope();
+    let rope = app.tab.buf.rope();
     let window = rope.slice(start..end).to_string();
     let base_b = rope.char_to_byte(start);
     find_all(&window, q)
@@ -316,26 +375,26 @@ fn visible_matches(app: &App, q: &str, start: usize, end: usize) -> Vec<(usize, 
 }
 
 fn status_right(app: &App, compact: bool) -> String {
-    let head = app.buf.sel.head;
-    let line = app.buf.line_of(head);
-    let line_start = app.buf.line_start(line);
+    let head = app.tab.buf.sel.head;
+    let line = app.tab.buf.line_of(head);
+    let line_start = app.tab.buf.line_start(line);
     // Column = graphemes from line start, 1-based.
     let mut col = 1;
     let mut p = line_start;
     while p < head {
-        p = app.buf.next_grapheme(p);
+        p = app.tab.buf.next_grapheme(p);
         col += 1;
     }
     let mut parts = vec![format!("Ln {}, Col {}", line + 1, col)];
     if compact {
         return format!(" {} ", parts[0]);
     }
-    if !app.buf.sel.is_empty() {
-        parts.push(format!("Sel {}", app.buf.sel.end() - app.buf.sel.start()));
+    if !app.tab.buf.sel.is_empty() {
+        parts.push(format!("Sel {}", app.tab.buf.sel.end() - app.tab.buf.sel.start()));
     }
-    parts.push(if app.doc.has_bom { "UTF-8 BOM".into() } else { "UTF-8".into() });
-    let le = app.doc.line_ending.label();
-    parts.push(if app.doc.mixed_line_endings { format!("{le}*") } else { le.into() });
+    parts.push(if app.tab.doc.has_bom { "UTF-8 BOM".into() } else { "UTF-8".into() });
+    let le = app.tab.doc.line_ending.label();
+    parts.push(if app.tab.doc.mixed_line_endings { format!("{le}*") } else { le.into() });
     parts.push(match &app.theme_source {
         ThemeSource::Builtin => "Dracula".into(),
         ThemeSource::TerminalDefault => "no colour".into(),
@@ -351,7 +410,7 @@ fn draw_scrollbar(buf: &mut TermBuf, app: &App, r: Rect, _rows: usize, p: &Paint
     let t = &app.theme;
     let track = p.plain_or(p.style(t.muted, t.editor_bg), Modifier::DIM);
     let thumb = p.plain_or(p.style(t.muted, t.muted), Modifier::REVERSED);
-    let lines = app.buf.len_lines().max(1);
+    let lines = app.tab.buf.len_lines().max(1);
     let h = r.height as usize;
     for i in 0..h {
         put(buf, r.x, r.y + i as u16, "│", 1, track);
@@ -360,7 +419,7 @@ fn draw_scrollbar(buf: &mut TermBuf, app: &App, r: Rect, _rows: usize, p: &Paint
         return;
     }
     let thumb_h = (h * h / (lines + h)).clamp(1, h);
-    let pos = (app.top_line * (h - thumb_h)) / lines.saturating_sub(1).max(1);
+    let pos = (app.tab.top_line * (h - thumb_h)) / lines.saturating_sub(1).max(1);
     for i in pos..(pos + thumb_h).min(h) {
         put(buf, r.x, r.y + i as u16, " ", 1, thumb);
     }
@@ -373,17 +432,19 @@ fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
         format!("Plica {VERSION} — keys"),
         String::new(),
         "Ctrl+S  Save            F12 / Ctrl+Shift+S  Save as".into(),
-        "Ctrl+O  Open            Ctrl+Q / Ctrl+W     Quit".into(),
+        "Ctrl+N  New tab   Ctrl+O  Open   Ctrl+W  Close tab   Ctrl+Q  Quit".into(),
+        "Ctrl+PgUp/PgDn or Ctrl+Tab  Switch tabs   Alt+1..9  Go to tab".into(),
         "Ctrl+Z  Undo            Ctrl+Y / Ctrl+Shift+Z  Redo".into(),
         "Ctrl+C/X/V  Copy/Cut/Paste      Ctrl+A  Select all".into(),
         "Ctrl+F  Find   F3 / Shift+F3  Next/prev   Ctrl+G  Go to line".into(),
         "Ctrl+←/→ (or Alt+←/→)  Word left/right".into(),
-        "Tab / Shift+Tab  Indent/outdent lines   Ctrl+N  New   Ctrl+↑/↓  Scroll".into(),
+        "Tab / Shift+Tab  Indent/outdent lines   Ctrl+↑/↓  Scroll".into(),
         "Alt+Z  Wrap   Alt+L  Line numbers   Alt+W  Whitespace   Alt+M  Mouse".into(),
         String::new(),
         "Mouse: click caret · drag select · double/triple click word/line".into(),
         "       Shift+click (or Alt+click) extend · wheel · Shift+wheel sideways".into(),
-        "       Click/drag line numbers to select lines · drop a file to open it".into(),
+        "       Click/drag line numbers to select lines · drop files to open them".into(),
+        "       Tabs: click to switch · × or middle-click to close · wheel to cycle".into(),
         "       Alt+M or the Mouse button gives the mouse to the terminal.".into(),
         String::new(),
         format!(
