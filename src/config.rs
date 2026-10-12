@@ -36,6 +36,7 @@ pub struct Config {
     pub show_whitespace: bool,
     pub indent: IndentMode,
     pub mouse: bool,
+    pub primary_selection: bool,
     pub theme: ThemeChoice,
     pub palette: Option<PathBuf>,
     pub recovery: bool,
@@ -51,6 +52,7 @@ impl Default for Config {
             show_whitespace: false,
             indent: IndentMode::Auto,
             mouse: true,
+            primary_selection: true,
             theme: ThemeChoice::Auto,
             palette: None,
             recovery: true,
@@ -125,6 +127,9 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
             }),
             "interaction" => section(val, "interaction", &mut w, |k, v, w| match k {
                 "mouse" => known(boolean(v, "interaction.mouse", w).map(|b| cfg.mouse = b)),
+                "primary_selection" => {
+                    known(boolean(v, "interaction.primary_selection", w).map(|b| cfg.primary_selection = b))
+                }
                 _ => false,
             }),
             "appearance" => section(val, "appearance", &mut w, |k, v, w| match k {
@@ -265,6 +270,7 @@ indent = "auto"          # auto (detect per file) | tabs | spaces
 
 [interaction]
 mouse = true             # false: leave the mouse to the terminal
+primary_selection = true # select to copy, middle-click to paste (X11/Wayland)
 
 [appearance]
 theme = "auto"           # auto | palette | dracula | terminal

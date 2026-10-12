@@ -273,6 +273,7 @@ fn run() -> Result<()> {
     app.line_numbers = cfg.line_numbers;
     app.show_whitespace = cfg.show_whitespace;
     app.keymap = cfg.keymap();
+    app.primary_selection = cfg.primary_selection;
     if !cfg.mouse {
         app.mouse_enabled = false;
         let _ = term::set_mouse(false);

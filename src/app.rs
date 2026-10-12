@@ -135,6 +135,9 @@ pub struct App {
     pub keymap: Keymap,
     pub show_whitespace: bool,
     pub mouse_enabled: bool,
+    /// X11/Wayland primary selection: select to copy, middle-click to paste.
+    pub primary_selection: bool,
+    primary_due: Option<Instant>,
     pub show_help: bool,
     pub prompt: Option<Prompt>,
     pub last_find: String,
@@ -164,7 +167,7 @@ impl App {
             tab,
             bg_tabs: Vec::new(),
             active: 0,
-            clipboard: Clipboard::default(),
+            clipboard: Clipboard::system(),
             theme,
             theme_source,
             caps,
@@ -175,6 +178,8 @@ impl App {
             keymap: Keymap::defaults(),
             show_whitespace: false,
             mouse_enabled: true,
+            primary_selection: true,
+            primary_due: None,
             show_help: false,
             prompt: None,
             last_find: String::new(),
@@ -672,6 +677,10 @@ impl App {
 
     /// Called regularly from the main loop (drag autoscroll).
     pub fn tick(&mut self) -> bool {
+        if self.primary_due.is_some_and(|t| Instant::now() >= t) {
+            self.primary_due = None;
+            self.publish_primary();
+        }
         if self.drag.is_some() {
             let (x, y) = self.last_mouse;
             let t = self.regions.text;
@@ -785,6 +794,7 @@ impl App {
             Command::SelectAll => {
                 self.tab.buf.sel = Selection { anchor: 0, head: self.tab.buf.len_chars() };
                 self.tab.buf.break_undo_group();
+                self.schedule_primary();
             }
             Command::Find => self.open_find(false),
             Command::Replace => self.open_find(true),
@@ -808,6 +818,21 @@ impl App {
         self.tab.follow_caret = true;
     }
 
+    /// Keyboard selections publish the primary selection once they settle,
+    /// so holding Shift+arrow doesn't spawn a clipboard tool per keypress.
+    fn schedule_primary(&mut self) {
+        if self.primary_selection {
+            self.primary_due = Some(Instant::now() + Duration::from_millis(400));
+        }
+    }
+
+    fn publish_primary(&mut self) {
+        if self.primary_selection && !self.tab.buf.sel.is_empty() {
+            let text = self.tab.buf.selected_text();
+            self.clipboard.set_primary(&text);
+        }
+    }
+
     fn page_rows(&self) -> usize {
         (self.regions.text.height as usize).saturating_sub(1).max(1)
     }
@@ -816,6 +841,7 @@ impl App {
         let pos = self.tab.buf.snap(pos);
         if extend {
             self.tab.buf.sel.head = pos;
+            self.schedule_primary();
         } else {
             self.tab.buf.sel = Selection::caret(pos);
         }
@@ -1312,8 +1338,22 @@ impl App {
                 }
             }
             MouseEventKind::Up(_) => {
-                self.drag = None;
+                if self.drag.take().is_some() {
+                    self.publish_primary();
+                }
                 self.dragging_scrollbar = false;
+            }
+            MouseEventKind::Down(MouseButton::Middle) if self.primary_selection && contains(self.regions.text, m.column, m.row) => {
+                // Linux convention: paste the primary selection at the pointer.
+                if let Some(pos) = self.pos_at_screen(m.column, m.row) {
+                    let text = self.clipboard.paste_primary();
+                    if !text.is_empty() {
+                        self.tab.buf.sel = Selection::caret(pos);
+                        self.tab.buf.break_undo_group();
+                        self.paste_text(&text);
+                        self.tab.follow_caret = true;
+                    }
+                }
             }
             MouseEventKind::Down(MouseButton::Middle) => {
                 if let Some(TabHit::Select(i) | TabHit::Close(i)) = self.tab_hit_at(m.column, m.row) {
@@ -1584,6 +1624,7 @@ mod tests {
         let theme = theme::resolve(&theme::dracula());
         let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto });
         let mut a = App::new(tab, theme, ThemeSource::Builtin, caps);
+        a.clipboard = Clipboard::internal_only();
         a.regions.text = Rect { x: 5, y: 1, width: w, height: h };
         a.regions.gutter = Rect { x: 0, y: 1, width: 5, height: h };
         a
@@ -2021,5 +2062,26 @@ mod tests {
         assert!(a.quit);
         a.recovery.as_ref().unwrap().flush();
         assert_eq!(std::fs::read_dir(&rec_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn selections_set_primary_and_middle_click_pastes_it() {
+        let mut a = app_with("hello world\nsecond line\n", 40, 10);
+        a.rendered_rows = a.visible_rows(10);
+        let mouse = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE });
+        // Drag-select "hello" (text starts at x=5).
+        a.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), 5, 1));
+        a.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), 10, 1));
+        a.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), 10, 1));
+        assert_eq!(a.clipboard.paste_primary(), "hello");
+        // Middle-click at the start of line 2 inserts it there.
+        a.handle_event(mouse(MouseEventKind::Down(MouseButton::Middle), 5, 2));
+        assert_eq!(text(&a), "hello world\nhellosecond line\n");
+        // Keyboard selection publishes after it settles.
+        a.tab.buf.sel = Selection::caret(6);
+        key(&mut a, KeyCode::End, KeyModifiers::SHIFT);
+        a.primary_due = Some(Instant::now());
+        a.tick();
+        assert_eq!(a.clipboard.paste_primary(), "world");
     }
 }

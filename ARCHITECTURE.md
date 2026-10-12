@@ -47,6 +47,13 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.1.6
+
+- **Primary selection is published when a selection settles:** mouse selections on button release, keyboard selections 400 ms after the last change (`primary_due`, checked in `tick`). *Why:* each publish may spawn xclip; publishing on every Shift+arrow would spawn one per keypress.
+- **OSC 52 with target `p` is sent as well as the tool**, because Kitty sets the primary selection from it even when no X tool is installed (default `clipboard_control` allows write-primary).
+- **Find-bar selections don't set primary**; only selections the user makes do, so searching doesn't overwrite what they last selected elsewhere.
+- **`Clipboard::internal_only()` for unit tests.** *Problem found while adding this feature:* unit tests inherit the developer's `DISPLAY`, so any test that copied text would run xclip and overwrite the real desktop clipboard. Tests now use an internal-only clipboard (the e2e harness already clears `DISPLAY`/`WAYLAND_DISPLAY`).
+
 ### 2026-10-12 · 0.1.5
 
 - **Config is parsed into a raw `toml::Table` and validated field by field** (`config.rs`), not deserialised with serde. *Why:* serde fails the whole struct on one bad value; walking the table lets each setting fall back on its own and lets every unknown key or bad value produce a precise warning (including the value written). A syntax error is the only whole-file fallback. Plica never writes the file (a Preferences UI will need a comment-preserving writer such as `toml_edit`).

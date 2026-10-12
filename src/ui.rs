@@ -537,9 +537,15 @@ fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
         String::new(),
         "Fixed: Alt+1..9 go to tab · Tab/Shift+Tab indent · Ctrl/Alt+←/→ word · Esc clears selection".into(),
         "Find bar: Alt+C case · Alt+W whole word · Alt+L in selection · Alt+A replace all".into(),
-        "Mouse: click · drag · double/triple-click · Shift/Alt+click extend · wheel (Shift: sideways)".into(),
+        "Mouse: click · drag · double/triple-click · Shift/Alt+click extend · middle-click pastes selection".into(),
+        "       wheel (Shift: sideways)".into(),
         "       line numbers select lines · tabs: click, ×, middle-click, wheel · drop files to open".into(),
         String::new(),
+        if std::env::var_os("TMUX").is_some() {
+            "tmux: needs `set -g mouse on` and `set -g set-clipboard on` for mouse and clipboard".into()
+        } else {
+            String::new()
+        },
         format!(
             "Terminal: keyboard protocol {} · {}",
             if caps.keyboard_enhanced { "on" } else { "off (some Ctrl+Shift keys unavailable)" },

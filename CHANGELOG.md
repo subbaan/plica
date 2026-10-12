@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 (2026-10-12): primary selection
+
+- Selecting text sets the X11/Wayland primary selection (mouse selections on release, keyboard selections once they settle), via OSC 52 (Kitty accepts it) and xclip / xsel / wl-copy when present. Middle-click in the text pastes it at the pointer. Turn off with `interaction.primary_selection = false`.
+- Help notes the tmux settings needed for mouse and clipboard when running inside tmux.
+- Unit tests can no longer touch the real system clipboard.
+
 ## 0.1.5 (2026-10-12): config file and key remapping
 
 - Config file `$XDG_CONFIG_HOME/plica/config.toml` (schema version 1): tab width, soft wrap, line numbers, visible whitespace, indent style (auto / tabs / spaces), mouse, theme (auto / palette / dracula / terminal) and palette path, crash recovery on/off.
