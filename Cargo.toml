@@ -1,0 +1,21 @@
+[package]
+name = "plica"
+version = "0.1.0"
+edition = "2024"
+description = "A mouse-friendly terminal text editor"
+rust-version = "1.88"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+notify = "8"
+ratatui = "0.30"
+ropey = "1"
+signal-hook = "0.3"
+tempfile = "3"
+unicode-segmentation = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true

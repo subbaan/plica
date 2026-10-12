@@ -1,0 +1,74 @@
+# Plica architecture
+
+How Plica is put together, and a dated log of design decisions and **workarounds**, each with the problem it solves. Scope and phases: `PLICA_IMPLEMENTATION_PLAN_v0.1.0.md`. Stack choice: `docs/adr/`. User-facing changes: `CHANGELOG.md`.
+
+**Keep this file current:** when a change makes a design decision, works around a terminal/library/OS quirk, or fixes a bug whose cause isn't obvious from the code, add a log entry (newest first) and update the overview if the structure changed.
+
+## Overview
+
+```
+main.rs ── CLI, palette selection, event loop, palette debounce, recovery on signal
+  │
+  ├─ term.rs ─────── raw mode / alt screen / mouse / paste / keyboard flags; restore() on exit, panic, signal
+  ├─ watch.rs ────── notify watcher on the palette's parent directory → mpsc → main (debounced)
+  │
+  └─ app.rs ──────── App state: Buffer + Document + Theme + viewport; key/mouse/paste commands
+        ├─ buffer.rs ── ropey Rope, grapheme navigation, Selection, transactions, undo/redo
+        ├─ layout.rs ── per-line VisualRow/Glyph layout: wrap, tabs, widths, hit-testing
+        ├─ document.rs ─ load (UTF-8 only), atomic save, line-ending detection, disk stamps
+        ├─ clipboard.rs ─ internal + OSC 52 + wl-copy/xclip/xsel
+        ├─ drop.rs ──── recognise file drops delivered as pastes
+        └─ theme.rs ─── parse_kitty → Palette → resolve → Theme (semantic roles, contrast repair)
+ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → truecolour / 256 / plain
+```
+
+### Core invariants
+
+- **Text is the canonical model.** Highlights and (future) tables are views computed from the rope; on-disk bytes are exactly the rope (plus a remembered BOM).
+- **Three offset spaces, never mixed:** char index into the rope (all internal positions, snapped to grapheme boundaries) · bytes (only in `document.rs` and search) · display cells (only in `layout.rs`/`ui.rs`).
+- **One width function:** layout uses ratatui's `CellWidth`, the same function the renderer uses.
+- **Hit-testing uses what was drawn:** `App::rendered_rows` holds the rows from the last frame.
+- **Nothing walks the whole document per keystroke** except find (O(n), acceptable at tens of MB).
+- **Every UI region asks the Theme for a semantic role**, so a palette swap recolours everything.
+
+### Event loop
+
+`main.rs` polls crossterm (250 ms idle, 50 ms while a status message or palette reload is pending), drains all queued events before one redraw, checks the signal flag, and applies a palette reload 150 ms after the last watcher event. Redraws go through ratatui's diff, so only changed cells are sent to the terminal.
+
+### Viewport
+
+The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
+
+## Decision and workaround log
+
+### 2026-10-12 · 0.1.0
+
+- **File drops are detected from paste content.** *Problem:* terminals have no drop event for the program inside them. Kitty pastes the dropped paths (one per line, unquoted, already decoded from `file://`); VTE terminals paste shell-quoted paths plus a trailing space; some paste raw `file://` URIs. *Decision:* a bracketed paste counts as a drop only if **every** token is an existing absolute path or local `file://` URI. *Trade-off:* a deliberately pasted bare path to a real file opens it; **Ctrl+V is exempt** so text insertion stays possible. With unsaved changes the drop is refused rather than discarding work (single buffer until tabs).
+- **Indent style detected per file** (tabs unless space-indented lines dominate the first 2000 lines). Multi-line indent/outdent uses `Buffer::transact` so it is one undo step; positions are given against the original text and applied in descending order.
+- **Title bar shortens the file name in the middle.** *Problem:* in narrow terminals the buttons were drawn over the name. Priority is file name > app name > full name; a middle ellipsis keeps the extension visible.
+
+### 2026-10-12 · 0.0.2
+
+- **User's Kitty remapped onto Super** (`kitty_mod ctrl+super`; backup `~/.config/kitty/kitty.conf.pre-keyreplan-20261012`). *Problem:* Kitty's defaults and the user's config took about 80 app chords (Shift+arrows, Ctrl+arrows, Ctrl+Shift+S/Z, Ctrl+Tab, Shift+click). *Decision:* conventional app keys win on the user's machine, **but Plica keeps fallbacks** (F12 Save As, Ctrl+Y redo, Alt+←/→ word motion, Alt+click extend) because stock terminals still take those chords.
+
+### 2026-10-12 · 0.0.1 (Phase 0 spike)
+
+- **Stack: Rust + crossterm + ratatui + ropey** (ADR 0001). ratatui is used only as a diffing cell buffer; the editor draws cells itself.
+- **Caret is the terminal's hardware cursor** (steady bar), so Kitty draws it with the theme's cursor colours and cursor trail.
+- **Wide glyphs reset their shadow cells** after writing the symbol; otherwise ratatui's diff can leave stale half-glyphs.
+- **Control characters are never written raw** (`^X`, `^?`, U+FFFD); lone combining marks are drawn on U+25CC. *Problem:* raw C0/ESC in a file would corrupt the terminal.
+- **Palette watcher watches the parent directory**, filters by file name, and also watches the symlink target's directory. *Problem:* theme tools replace the file by rename, which detaches an inode watch.
+- **Watcher ignores open/read/close-nowrite events.** *Bug found by the e2e test:* Plica's own reload read the file, generated an access event, and triggered another reload: an endless loop every 150 ms (and status messages kept being overwritten). Only create/modify/remove/close-write count.
+- **Invalid palette keeps the last-known-good colours.** A palette must define valid `foreground` and `background`, otherwise it is rejected whole; bad optional values are warnings.
+- **Contrast repair:** roles are nudged toward white/black until they meet WCAG targets (4.5 for text, 2.5 for muted). The user's ThemeWall `color8` (`#505253`) is lifted to `#848686` for muted text.
+- **Atomic save:** temp file in the same directory → fsync → rename → fsync dir; mode and owner copied; new files honour the umask (read from `/proc/self/status` so the process umask is never changed). *Workarounds:* symlinks are resolved so the link survives; files with **hard links are written in place**, because rename would split the link. ACLs/xattrs are not preserved (known limitation).
+- **UTF-8 only:** other encodings are refused at load with the offset of the first bad byte, rather than risk lossy round-trips.
+- **Line endings are never rewritten.** The rope holds the file's exact text; Enter and paste insert the document's dominant ending. *Problem:* terminals often deliver pasted newlines as CR, so pastes are normalised to the document's ending.
+- **Undo grouping:** typing coalesces until a 1.5 s pause, a whitespace insert, caret movement or save. *Bug found by e2e:* typing over a selection put the first key in its own step; now the replacement and the following keys are one step.
+- **Dirty tracking compares undo-stack identity**, not a revision counter, so undoing back to the saved state clears the ● marker.
+- **Smart-case find lowercases only where UTF-8 length is unchanged**, so byte offsets in the lowered copy still map onto the original text.
+- **Status messages take priority on narrow terminals:** the right-hand fields collapse to Ln/Col. *Problem:* at 60 columns messages like "Save failed" were cut to a few characters.
+- **Clipboard copy goes to three places** (internal, OSC 52, wl-copy/xclip/xsel). Paste prefers the tool, with a 700 ms timeout so a dead clipboard owner can't hang the UI.
+- **Recovery copy on SIGTERM/SIGHUP/SIGINT** to `$XDG_STATE_HOME/plica/recovery/`, never next to or over the original.
+- **Kitty facts found during the spike:** Kitty eats Shift+click/drag in mouse-grabbing apps (its selection override), most Ctrl+Shift+letter chords, and Ctrl+Tab. With an app in front, a drop becomes a paste of plain paths.
+- **e2e harness quirks (test-only):** pyte composes `e`+U+0301 into `é` and its display strings don't map to columns for wide glyphs, so checks NFC-normalise and compute columns from cells.

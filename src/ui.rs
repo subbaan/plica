@@ -1,0 +1,463 @@
+//! Rendering. Everything here asks the `Theme` for semantic roles; only
+//! `Painter` knows how roles become terminal colours.
+
+use crate::app::{App, Button, Level, PromptKind, ThemeSource, find_all};
+use crate::layout::GlyphKind;
+use crate::theme::Rgb;
+use ratatui::Frame;
+use ratatui::buffer::Buffer as TermBuf;
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use std::time::Duration;
+
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Converts theme colours to terminal colours for the active colour mode.
+pub struct Painter {
+    pub truecolor: bool,
+    pub plain: bool,
+}
+
+impl Painter {
+    fn c(&self, rgb: Rgb) -> Color {
+        if self.plain {
+            Color::Reset
+        } else if self.truecolor {
+            Color::Rgb(rgb.0, rgb.1, rgb.2)
+        } else {
+            Color::Indexed(nearest_256(rgb))
+        }
+    }
+
+    fn style(&self, fg: Rgb, bg: Rgb) -> Style {
+        Style::default().fg(self.c(fg)).bg(self.c(bg))
+    }
+
+    /// In plain mode, emphasis must come from attributes instead of colour.
+    fn plain_or(&self, s: Style, m: Modifier) -> Style {
+        if self.plain { Style::default().add_modifier(m) } else { s }
+    }
+}
+
+fn nearest_256(c: Rgb) -> u8 {
+    const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    let idx = |v: u8| STEPS.iter().enumerate().min_by_key(|(_, s)| (**s as i32 - v as i32).abs()).unwrap().0;
+    let (r, g, b) = (idx(c.0), idx(c.1), idx(c.2));
+    let cube = 16 + 36 * r + 6 * g + b;
+    let cube_rgb = (STEPS[r], STEPS[g], STEPS[b]);
+    let avg = (c.0 as u32 + c.1 as u32 + c.2 as u32) / 3;
+    let gi = (((avg as i32 - 8).max(0) / 10).min(23)) as u8;
+    let gv = 8 + 10 * gi as i32;
+    let d = |a: (i32, i32, i32)| (a.0 - c.0 as i32).pow(2) + (a.1 - c.1 as i32).pow(2) + (a.2 - c.2 as i32).pow(2);
+    if d((gv, gv, gv)) < d((cube_rgb.0 as i32, cube_rgb.1 as i32, cube_rgb.2 as i32)) {
+        232 + gi
+    } else {
+        cube as u8
+    }
+}
+
+pub fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    if area.width < 10 || area.height < 4 {
+        return;
+    }
+    let p = Painter {
+        truecolor: app.caps.truecolor,
+        plain: app.theme_source == ThemeSource::TerminalDefault,
+    };
+    let t = app.theme.clone();
+    let buf = f.buffer_mut();
+
+    let title = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+    let status = Rect { x: area.x, y: area.bottom() - 1, width: area.width, height: 1 };
+    let prompt_h = u16::from(app.prompt.is_some());
+    let prompt = Rect { x: area.x, y: status.y - prompt_h, width: area.width, height: prompt_h };
+    let editor = Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height - 2 - prompt_h };
+
+    let gutter_w = if app.line_numbers { digits(app.buf.len_lines()).max(3) as u16 + 2 } else { 1 };
+    let gutter = Rect { width: gutter_w.min(editor.width / 2), ..editor };
+    let scrollbar = Rect { x: editor.right() - 1, width: 1, ..editor };
+    let text = Rect {
+        x: gutter.right(),
+        width: editor.width.saturating_sub(gutter.width + scrollbar.width),
+        ..editor
+    };
+    app.regions.text = text;
+    app.regions.gutter = gutter;
+    app.regions.scrollbar = scrollbar;
+    app.ensure_caret_visible();
+    let rows = app.visible_rows(text.height as usize);
+
+    // ---- editor ----
+    let base = p.style(t.editor_fg, t.editor_bg);
+    buf.set_style(editor, base);
+    let sel = app.buf.sel;
+    let caret_line = app.buf.line_of(sel.head);
+    let sel_style = p.plain_or(p.style(t.selection_fg, t.selection_bg), Modifier::REVERSED);
+    let search_style = p.plain_or(p.style(t.search_fg, t.search_bg), Modifier::UNDERLINED);
+    let current_line = if p.plain { base } else { p.style(t.editor_fg, t.current_line_bg) };
+    let gutter_style = p.plain_or(p.style(t.gutter_fg, t.editor_bg), Modifier::DIM);
+    let sub_style = p.plain_or(Style::default().fg(p.c(t.substitute)), Modifier::DIM);
+
+    // Visible search matches while the find bar is open.
+    let mut matches: Vec<(usize, usize)> = Vec::new();
+    if let (Some(pr), Some(first), Some(last)) = (&app.prompt, rows.first(), rows.last())
+        && pr.kind == PromptKind::Find
+        && !pr.input.is_empty()
+    {
+        matches = visible_matches(app, &pr.input, first.start, last.end);
+    }
+    let in_match = |s: usize, e: usize| matches.iter().any(|&(ms, me)| s >= ms && e <= me);
+
+    let scroll_x = if app.wrap { 0 } else { app.scroll_x };
+    for (i, row) in rows.iter().enumerate() {
+        let y = text.y + i as u16;
+        let is_caret_line = row.line == caret_line && sel.is_empty();
+        if is_caret_line {
+            buf.set_style(Rect { x: text.x, y, width: text.width, height: 1 }, current_line);
+        }
+        // Gutter: line number on a line's first row, a wrap marker on others.
+        buf.set_style(Rect { x: gutter.x, y, width: gutter.width, height: 1 }, gutter_style);
+        if app.line_numbers {
+            let label = if row.row_in_line == 0 { format!("{:>w$} ", row.line + 1, w = gutter.width as usize - 2) } else { format!("{:>w$} ", "↪", w = gutter.width as usize - 2) };
+            let st = if row.line == caret_line { gutter_style.fg(p.c(t.editor_fg)) } else { gutter_style };
+            buf.set_stringn(gutter.x, y, label, gutter.width as usize, st);
+        }
+        for g in &row.glyphs {
+            if g.col + g.width <= scroll_x {
+                continue;
+            }
+            let rel = g.col as isize - scroll_x as isize;
+            if rel as usize + g.width > text.width as usize {
+                // Partially visible wide glyph at the right edge: blank it.
+                if rel >= 0 && (rel as usize) < text.width as usize {
+                    put(buf, text.x + rel as u16, y, " ", 1, base);
+                }
+                break;
+            }
+            let mut st = if is_caret_line { current_line } else { base };
+            if g.kind == GlyphKind::Substitute {
+                st = st.patch(sub_style);
+            }
+            if in_match(g.start, g.end) {
+                st = search_style;
+            }
+            if g.start >= sel.start() && g.end <= sel.end() && !sel.is_empty() {
+                st = sel_style;
+            }
+            if rel < 0 {
+                // Wide glyph cut by the left edge.
+                let visible = (g.width as isize + rel) as usize;
+                for k in 0..visible {
+                    put(buf, text.x + k as u16, y, " ", 1, st);
+                }
+                continue;
+            }
+            let x = text.x + rel as u16;
+            let ws_style = if p.plain { st.add_modifier(Modifier::DIM) } else { st.fg(p.c(t.muted)) };
+            if g.kind == GlyphKind::Tab {
+                for k in 0..g.width {
+                    let (sym, s2) = if app.show_whitespace && k == 0 { ("→", ws_style) } else { (" ", st) };
+                    put(buf, x + k as u16, y, sym, 1, s2);
+                }
+            } else if app.show_whitespace && g.symbol == " " {
+                put(buf, x, y, "·", 1, ws_style);
+            } else {
+                put(buf, x, y, &g.symbol, g.width, st);
+            }
+        }
+        // Show a selected line break as one highlighted cell.
+        if row.is_last && !sel.is_empty() && row.end >= sel.start() && row.end < sel.end() {
+            let rel = row.width() as isize - scroll_x as isize;
+            if rel >= 0 && (rel as u16) < text.width {
+                put(buf, text.x + rel as u16, y, " ", 1, sel_style);
+            }
+        }
+    }
+    // Rows past end of document.
+    for i in rows.len()..text.height as usize {
+        let y = text.y + i as u16;
+        buf.set_stringn(gutter.x, y, format!("{:>w$}", "~", w = gutter.width.saturating_sub(2) as usize), gutter.width as usize, gutter_style);
+    }
+
+    // Caret (hardware cursor so Kitty draws it with its own cursor colours).
+    let mut caret_pos = None;
+    if app.prompt.is_none()
+        && let Some((i, row)) = rows.iter().enumerate().find(|(_, r)| r.contains_caret(sel.head))
+    {
+        let col = row.col_of(sel.head) as isize - scroll_x as isize;
+        if col >= 0 && col <= text.width as isize {
+            caret_pos = Some(Position { x: (text.x + col as u16).min(text.right().saturating_sub(1)), y: text.y + i as u16 });
+        }
+    }
+
+    draw_scrollbar(buf, app, scrollbar, rows.len(), &p);
+    app.rendered_rows = rows;
+
+    // ---- title bar ----
+    let surface = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
+    buf.set_style(title, surface);
+    let accent = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::REVERSED | Modifier::BOLD);
+    let buttons: [(&str, Button, bool); 4] = [
+        (" Save ", Button::Save, app.buf.is_dirty()),
+        (" Wrap ", Button::Wrap, app.wrap),
+        (" Mouse ", Button::Mouse, app.mouse_enabled),
+        (" Help F1 ", Button::Help, false),
+    ];
+    let total: u16 = buttons.iter().map(|b| b.0.len() as u16 + 1).sum();
+    let mut x = title.right().saturating_sub(total);
+    let show_buttons = x > title.x + 20;
+    // File name has priority over the app name; shorten it in the middle
+    // (keeping the extension) rather than letting buttons cover it.
+    let room = (if show_buttons { x - title.x - 1 } else { title.width }) as usize;
+    let dirty = if app.buf.is_dirty() { "● " } else { "" };
+    let name = app.doc.display_name();
+    let full = format!(" Plica {VERSION}  │  {dirty}{name}");
+    let label = if full.chars().count() <= room {
+        full
+    } else {
+        format!(" {dirty}{}", fit_middle(&name, room.saturating_sub(1 + dirty.chars().count())))
+    };
+    buf.set_stringn(title.x, title.y, label, room, surface);
+    app.regions.buttons.clear();
+    if show_buttons {
+        for (label, b, on) in buttons {
+            let w = label.len() as u16;
+            let st = if on { accent } else { surface.add_modifier(Modifier::BOLD) };
+            buf.set_stringn(x, title.y, label, w as usize, st);
+            app.regions.buttons.push((Rect { x, y: title.y, width: w, height: 1 }, b));
+            x += w + 1;
+        }
+    }
+
+    // ---- prompt ----
+    if let Some(pr) = &app.prompt {
+        buf.set_style(prompt, surface);
+        let hint = match pr.kind {
+            PromptKind::Find => "  Enter/F3 next · Shift+Enter prev · Esc close",
+            _ => "  Enter confirm · Esc cancel",
+        };
+        let label = format!(" {}: ", pr.kind.label());
+        let lw = label.chars().count() as u16;
+        buf.set_stringn(prompt.x, prompt.y, &label, prompt.width as usize, accent);
+        let input_w = prompt.width.saturating_sub(lw + 1) as usize;
+        // Show the tail of long input.
+        let shown: String = {
+            let n = pr.input.chars().count();
+            pr.input.chars().skip(n.saturating_sub(input_w.saturating_sub(1))).collect()
+        };
+        let (end, _) = buf.set_stringn(prompt.x + lw, prompt.y, &shown, input_w, surface);
+        buf.set_stringn(end + 1, prompt.y, hint, prompt.right().saturating_sub(end + 1) as usize, surface.add_modifier(Modifier::DIM));
+        caret_pos = Some(Position { x: end.min(prompt.right() - 1), y: prompt.y });
+    }
+
+    // ---- status bar ----
+    buf.set_style(status, surface);
+    let msg = app.status.as_ref().filter(|(_, lvl, at)| {
+        at.elapsed() < if *lvl == Level::Warn { Duration::from_secs(10) } else { Duration::from_secs(5) }
+    });
+    let mut right = status_right(app, false);
+    // A message takes priority: drop the extra fields if it would not fit.
+    if let Some((m, _, _)) = msg
+        && m.chars().count() + 4 + right.chars().count() > status.width as usize
+    {
+        right = status_right(app, true);
+    }
+    let rw = right.chars().count() as u16;
+    let left_w = status.width.saturating_sub(rw + 1) as usize;
+    match msg {
+        Some((m, Level::Warn, _)) => {
+            let st = p.plain_or(surface.fg(p.c(t.warning)).add_modifier(Modifier::BOLD), Modifier::BOLD);
+            buf.set_stringn(status.x, status.y, format!(" ⚠ {m}"), left_w, st);
+        }
+        Some((m, Level::Info, _)) => {
+            buf.set_stringn(status.x, status.y, format!(" {m}"), left_w, surface);
+        }
+        None => {
+            let path = app.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Untitled (Ctrl+S to choose a name)".into());
+            buf.set_stringn(status.x, status.y, format!(" {path}"), left_w, surface.add_modifier(Modifier::DIM));
+        }
+    }
+    buf.set_stringn(status.right().saturating_sub(rw), status.y, &right, rw as usize, surface);
+
+    if app.show_help {
+        draw_help(buf, app, area, &p);
+        caret_pos = None;
+    }
+
+    if let Some(pos) = caret_pos {
+        f.set_cursor_position(pos);
+    }
+}
+
+fn put(buf: &mut TermBuf, x: u16, y: u16, sym: &str, width: usize, st: Style) {
+    if let Some(c) = buf.cell_mut((x, y)) {
+        c.set_symbol(sym).set_style(st);
+    }
+    // Cells covered by a wide glyph must be reset so the diff skips them.
+    for k in 1..width {
+        if let Some(c) = buf.cell_mut((x + k as u16, y)) {
+            c.reset();
+            c.set_style(st);
+        }
+    }
+}
+
+fn visible_matches(app: &App, q: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
+    // Search only the visible window, once per frame.
+    let rope = app.buf.rope();
+    let window = rope.slice(start..end).to_string();
+    let base_b = rope.char_to_byte(start);
+    find_all(&window, q)
+        .into_iter()
+        .take(500)
+        .map(|(s, e)| (rope.byte_to_char(base_b + s), rope.byte_to_char(base_b + e)))
+        .collect()
+}
+
+fn status_right(app: &App, compact: bool) -> String {
+    let head = app.buf.sel.head;
+    let line = app.buf.line_of(head);
+    let line_start = app.buf.line_start(line);
+    // Column = graphemes from line start, 1-based.
+    let mut col = 1;
+    let mut p = line_start;
+    while p < head {
+        p = app.buf.next_grapheme(p);
+        col += 1;
+    }
+    let mut parts = vec![format!("Ln {}, Col {}", line + 1, col)];
+    if compact {
+        return format!(" {} ", parts[0]);
+    }
+    if !app.buf.sel.is_empty() {
+        parts.push(format!("Sel {}", app.buf.sel.end() - app.buf.sel.start()));
+    }
+    parts.push(if app.doc.has_bom { "UTF-8 BOM".into() } else { "UTF-8".into() });
+    let le = app.doc.line_ending.label();
+    parts.push(if app.doc.mixed_line_endings { format!("{le}*") } else { le.into() });
+    parts.push(match &app.theme_source {
+        ThemeSource::Builtin => "Dracula".into(),
+        ThemeSource::TerminalDefault => "no colour".into(),
+        ThemeSource::File { path, last_error } => {
+            let n = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if last_error.is_some() { format!("⚠ {n}") } else { n }
+        }
+    });
+    format!(" {} ", parts.join(" │ "))
+}
+
+fn draw_scrollbar(buf: &mut TermBuf, app: &App, r: Rect, _rows: usize, p: &Painter) {
+    let t = &app.theme;
+    let track = p.plain_or(p.style(t.muted, t.editor_bg), Modifier::DIM);
+    let thumb = p.plain_or(p.style(t.muted, t.muted), Modifier::REVERSED);
+    let lines = app.buf.len_lines().max(1);
+    let h = r.height as usize;
+    for i in 0..h {
+        put(buf, r.x, r.y + i as u16, "│", 1, track);
+    }
+    if lines <= 1 && h > 0 {
+        return;
+    }
+    let thumb_h = (h * h / (lines + h)).clamp(1, h);
+    let pos = (app.top_line * (h - thumb_h)) / lines.saturating_sub(1).max(1);
+    for i in pos..(pos + thumb_h).min(h) {
+        put(buf, r.x, r.y + i as u16, " ", 1, thumb);
+    }
+}
+
+fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
+    let t = &app.theme;
+    let caps = &app.caps;
+    let lines: Vec<String> = vec![
+        format!("Plica {VERSION} — keys"),
+        String::new(),
+        "Ctrl+S  Save            F12 / Ctrl+Shift+S  Save as".into(),
+        "Ctrl+O  Open            Ctrl+Q / Ctrl+W     Quit".into(),
+        "Ctrl+Z  Undo            Ctrl+Y / Ctrl+Shift+Z  Redo".into(),
+        "Ctrl+C/X/V  Copy/Cut/Paste      Ctrl+A  Select all".into(),
+        "Ctrl+F  Find   F3 / Shift+F3  Next/prev   Ctrl+G  Go to line".into(),
+        "Ctrl+←/→ (or Alt+←/→)  Word left/right".into(),
+        "Tab / Shift+Tab  Indent/outdent lines   Ctrl+N  New   Ctrl+↑/↓  Scroll".into(),
+        "Alt+Z  Wrap   Alt+L  Line numbers   Alt+W  Whitespace   Alt+M  Mouse".into(),
+        String::new(),
+        "Mouse: click caret · drag select · double/triple click word/line".into(),
+        "       Shift+click (or Alt+click) extend · wheel · Shift+wheel sideways".into(),
+        "       Click/drag line numbers to select lines · drop a file to open it".into(),
+        "       Alt+M or the Mouse button gives the mouse to the terminal.".into(),
+        String::new(),
+        format!(
+            "Terminal: keyboard protocol {} · {}",
+            if caps.keyboard_enhanced { "on" } else { "off (some Ctrl+Shift keys unavailable)" },
+            if caps.truecolor { "truecolour" } else { "256 colours" }
+        ),
+        String::new(),
+        "Press any key or click to close".into(),
+    ];
+    let w = (lines.iter().map(|l| l.chars().count()).max().unwrap_or(10) + 4).min(area.width as usize) as u16;
+    let h = (lines.len() + 2).min(area.height as usize) as u16;
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    let st = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
+    let border = p.plain_or(p.style(t.accent, t.surface_bg), Modifier::REVERSED);
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
+            put(buf, x, y, " ", 1, st);
+        }
+    }
+    for x in r.x..r.right() {
+        put(buf, x, r.y, "─", 1, border);
+        put(buf, x, r.bottom() - 1, "─", 1, border);
+    }
+    for y in r.y..r.bottom() {
+        put(buf, r.x, y, "│", 1, border);
+        put(buf, r.right() - 1, y, "│", 1, border);
+    }
+    put(buf, r.x, r.y, "╭", 1, border);
+    put(buf, r.right() - 1, r.y, "╮", 1, border);
+    put(buf, r.x, r.bottom() - 1, "╰", 1, border);
+    put(buf, r.right() - 1, r.bottom() - 1, "╯", 1, border);
+    for (i, l) in lines.iter().enumerate().take(h.saturating_sub(2) as usize) {
+        let s = if i == 0 { st.add_modifier(Modifier::BOLD) } else { st };
+        buf.set_stringn(r.x + 2, r.y + 1 + i as u16, l, w.saturating_sub(4) as usize, s);
+    }
+}
+
+/// Shorten `s` to at most `w` chars with a middle ellipsis.
+fn fit_middle(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w {
+        return s.to_string();
+    }
+    if w <= 1 {
+        return "…".chars().take(w).collect();
+    }
+    let tail = (w - 1) / 2;
+    let head = w - 1 - tail;
+    let start: String = s.chars().take(head).collect();
+    let end: String = s.chars().skip(n - tail).collect();
+    format!("{start}…{end}")
+}
+
+fn digits(n: usize) -> usize {
+    n.max(1).ilog10() as usize + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_middle_keeps_ends() {
+        assert_eq!(fit_middle("dropped note.txt", 20), "dropped note.txt");
+        assert_eq!(fit_middle("dropped note.txt", 9), "drop….txt");
+        assert_eq!(fit_middle("abc", 1), "…");
+    }
+
+    #[test]
+    fn nearest_256_basics() {
+        assert_eq!(nearest_256(Rgb(0, 0, 0)), 16);
+        assert_eq!(nearest_256(Rgb(255, 255, 255)), 231);
+        assert_eq!(nearest_256(Rgb(128, 128, 128)), 244);
+        assert_eq!(nearest_256(Rgb(255, 0, 0)), 196);
+    }
+}
