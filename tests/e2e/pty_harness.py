@@ -413,6 +413,39 @@ check("saved preference applies on restart", t.cell(10, 5).bg == "default", t.ce
 t.send("\x11", 0.5)
 os.remove(cfg_file)
 
+# ---------------------------------------------------------------- session 11: highlights
+hl_pal = os.path.join(WORK, "theme", "hl-theme.conf")
+def write_hl_palette(c4):
+    open(hl_pal + ".tmp", "w").write(f"foreground #e0e1e1\nbackground #131617\ncolor3 #de9b4b\ncolor4 {c4}\n")
+    os.replace(hl_pal + ".tmp", hl_pal)
+write_hl_palette("#4d9bdb")
+open(cfg_file, "w").write("""
+[[highlights.group]]
+name = "Names"
+terms = ["Alice", "release day"]
+fg = "color4"
+underline = true
+""")
+fh = os.path.join(WORK, "hl.txt"); hl_text = "TODO: ask Alice about release day\nunAlice todo\n"
+open(fh, "w").write(hl_text)
+t = Term(["--palette", hl_pal, fh])
+x = t.col_of(1, "TODO")
+check("sample TODO uses palette color3, bold", t.cell(x, 1).fg.lower() == "de9b4b" and t.cell(x, 1).bold, (t.cell(x, 1).fg, t.cell(x, 1).bold))
+xa = t.col_of(1, "Alice")
+check("user group uses color4, underlined", t.cell(xa, 1).fg.lower() == "4d9bdb" and t.cell(xa, 1).underscore, (t.cell(xa, 1).fg, t.cell(xa, 1).underscore))
+xr = t.col_of(1, "release day")
+check("phrase highlighted across the space", all(t.cell(xr + k, 1).fg.lower() == "4d9bdb" for k in range(11)), [t.cell(xr + k, 1).fg for k in range(11)])
+xu = t.col_of(2, "unAlice")
+check("whole word: unAlice not highlighted", t.cell(xu + 2, 2).fg.lower() == "e0e1e1", t.cell(xu + 2, 2).fg)
+xt = t.col_of(2, "todo")
+check("case-sensitive sample: lowercase todo not highlighted", t.cell(xt, 2).fg.lower() == "e0e1e1", t.cell(xt, 2).fg)
+write_hl_palette("#c678dd")
+t.pump(0.8)
+check("linked highlight follows live palette", t.cell(xa, 1).fg.lower() == "c678dd", t.cell(xa, 1).fg)
+t.send("\x11", 0.5)
+check("highlighting never touches the file", open(fh).read() == hl_text and not t.p.isalive())
+os.remove(cfg_file)
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

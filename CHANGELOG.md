@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.2 (2026-10-12): word and phrase highlighting
+
+- **Highlight groups** in `config.toml` (`[[highlights.group]]`): a list of words or phrases with a text colour, optional background, and bold / italic / underline. Whole-word (default on) and case-sensitive (default off) matching per group; `file_types = ["md"]` limits a group to some file types. Earlier groups win where matches overlap.
+- Colours can be fixed (`"#rrggbb"`), a palette slot (`"color4"`) or a role (`accent`, `warning`, `search`, …). Slots and roles follow the shared palette live. A colour too faint on the background is lifted so it stays readable.
+- Built-in sample groups for **TODO, FIXME, IMPORTANT, IDEA, DONE** (upper case, whole words). Turn them off with `highlights.samples = false`, or replace one by naming your group the same (e.g. `"Todo"`). `highlights.enabled = false` turns everything off.
+- Highlighting is display-only: files are never changed. Only the visible lines are matched, so large files stay fast.
+- `--check-palette` also lists each highlight group's colours and contrast for that palette.
+- `--print-config` documents the new section.
+
 ## 0.2.1 (2026-10-12): text fields with a cursor
 
 - The Find and Replace fields and the prompts (Open, Save As, Go to line, palette path) now have a real cursor: ←/→ (Ctrl/Alt for words), Home/End, Delete, Ctrl+Backspace / Ctrl+Delete for whole words, typing and pasting at the cursor, and clicking to place the cursor. Long text scrolls with the cursor instead of only showing the end.

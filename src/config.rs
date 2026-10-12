@@ -6,6 +6,7 @@
 //! while that setting keeps its default. A syntax error falls back to all
 //! defaults (with a warning). Plica always starts.
 
+use crate::highlight::{Colour, Group, Highlights};
 use crate::keymap::{Chord, Command, Keymap};
 use std::path::{Path, PathBuf};
 use toml::{Table, Value};
@@ -42,6 +43,7 @@ pub struct Config {
     pub palette: Option<PathBuf>,
     pub recovery: bool,
     pub keymap_overrides: Vec<(Command, Vec<Chord>)>,
+    pub highlights: Highlights,
 }
 
 impl Default for Config {
@@ -58,6 +60,7 @@ impl Default for Config {
             palette: None,
             recovery: true,
             keymap_overrides: Vec::new(),
+            highlights: Highlights::default(),
         }
     }
 }
@@ -160,6 +163,24 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                 "recovery" => known(boolean(v, "files.recovery", w).map(|b| cfg.recovery = b)),
                 _ => false,
             }),
+            "highlights" => section(val, "highlights", &mut w, |k, v, w| match k {
+                "enabled" => known(boolean(v, "highlights.enabled", w).map(|b| cfg.highlights.enabled = b)),
+                "samples" => known(boolean(v, "highlights.samples", w).map(|b| cfg.highlights.samples = b)),
+                "group" => {
+                    match v.as_array() {
+                        Some(a) => {
+                            for (i, item) in a.iter().enumerate() {
+                                if let Some(g) = parse_group(item, i, w) {
+                                    cfg.highlights.groups.push(g);
+                                }
+                            }
+                        }
+                        None => w.push("`highlights.group` should be [[highlights.group]] tables".into()),
+                    }
+                    true
+                }
+                _ => false,
+            }),
             "keys" => match val.as_table() {
                 Some(t) => {
                     for (name, v) in t {
@@ -192,6 +213,82 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
         }
     }
     (cfg, w)
+}
+
+/// One `[[highlights.group]]`. A group without usable terms is dropped
+/// (with a warning); other bad fields keep their defaults.
+fn parse_group(v: &Value, i: usize, w: &mut Vec<String>) -> Option<Group> {
+    let Some(t) = v.as_table() else {
+        w.push(format!("`highlights.group` entry {} should be a table", i + 1));
+        return None;
+    };
+    let mut g = Group::new(&format!("Group {}", i + 1));
+    if let Some(n) = t.get("name").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+        g.name = n.trim().into();
+    }
+    let label = format!("highlights.group \"{}\"", g.name);
+    let strings = |v: &Value, field: &str, w: &mut Vec<String>| -> Vec<String> {
+        let list: Vec<&Value> = match v {
+            Value::String(_) => vec![v],
+            Value::Array(a) => a.iter().collect(),
+            _ => {
+                w.push(format!("`{label}` {field} should be a string or a list of strings"));
+                return Vec::new();
+            }
+        };
+        let mut out = Vec::new();
+        for item in list {
+            match item.as_str() {
+                Some(s) if !s.is_empty() => out.push(s.to_string()),
+                Some(_) => {}
+                None => w.push(format!("`{label}` {field}: {item} is not a string")),
+            }
+        }
+        out
+    };
+    let colour = |v: &Value, field: &str, w: &mut Vec<String>| match v.as_str().filter(|s| !s.trim().is_empty()).map(Colour::parse) {
+        None if v.as_str().is_some() => None,
+        Some(Ok(c)) => Some(c),
+        Some(Err(e)) => {
+            w.push(format!("`{label}` {field}: {e}"));
+            None
+        }
+        None => {
+            w.push(format!("`{label}` {field} should be a colour string"));
+            None
+        }
+    };
+    for (k, v) in t {
+        let flag = |w: &mut Vec<String>| boolean(v, &format!("{label}.{k}"), w);
+        match k.as_str() {
+            "name" => {}
+            "terms" => g.terms = strings(v, "terms", w),
+            "fg" | "foreground" => g.fg = colour(v, "fg", w),
+            "bg" | "background" => g.bg = colour(v, "bg", w),
+            "bold" => g.bold = flag(w).unwrap_or(g.bold),
+            "italic" => g.italic = flag(w).unwrap_or(g.italic),
+            "underline" => g.underline = flag(w).unwrap_or(g.underline),
+            "case_sensitive" => g.case_sensitive = flag(w).unwrap_or(g.case_sensitive),
+            "whole_word" => g.whole_word = flag(w).unwrap_or(g.whole_word),
+            "enabled" => g.enabled = flag(w).unwrap_or(g.enabled),
+            "file_types" => {
+                g.file_types = strings(v, "file_types", w)
+                    .into_iter()
+                    .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+                    .collect()
+            }
+            other => w.push(format!("unknown setting `{label}.{other}`")),
+        }
+    }
+    if g.terms.is_empty() {
+        w.push(format!("`{label}` has no terms; ignored"));
+        return None;
+    }
+    if g.fg.is_none() && g.bg.is_none() && !g.bold && !g.italic && !g.underline {
+        // Nothing to show: default to the accent colour.
+        g.fg = Some(Colour::Role(crate::highlight::Role::Accent));
+    }
+    Some(g)
 }
 
 /// A recognised key: its value was applied or a warning was recorded.
@@ -258,7 +355,7 @@ pub fn default_text() -> String {
         keys.push_str(&format!("# {:<20} = [{}]   # {}\n", c.name(), chords.join(", "), c.describe()));
     }
     format!(
-        r#"# Plica configuration ({path})
+        r##"# Plica configuration ({path})
 # Plica writes this file only when you press Save in Preferences, keeping your
 # comments. Lines starting with # are comments.
 version = {SCHEMA_VERSION}
@@ -281,12 +378,30 @@ theme = "auto"           # auto | palette | dracula | terminal
 [files]
 recovery = true          # snapshot unsaved work for crash recovery
 
+[highlights]
+enabled = true           # word and phrase highlighting
+samples = true           # built-in TODO / FIXME / IMPORTANT / IDEA / DONE groups
+
+# Your own groups; earlier groups win where matches overlap. A group named
+# like a sample (e.g. "Todo") replaces it. Colours: "#rrggbb", a palette slot
+# "color0".."color15", or a role: foreground, background, accent, selection,
+# search, muted, warning. Slots and roles follow the live palette.
+# [[highlights.group]]
+# name = "Names"
+# terms = ["Alice", "Bob", "release day"]
+# fg = "color4"
+# bg = "color0"          # optional background ("" = none)
+# bold = true            # also: italic, underline
+# whole_word = true      # default true
+# case_sensitive = false # default false
+# file_types = ["md", "txt"]   # default: every file
+
 [keys]
 # Rebind commands: a key or a list of keys; [] unbinds. Examples:
 # save_as = ["ctrl+shift+s", "f12"]
 # quit = "ctrl+q"
 # Commands and their default keys:
-{keys}"#,
+{keys}"##,
         path = default_path().map(|p| p.display().to_string()).unwrap_or_else(|| "config.toml".into())
     )
 }
@@ -360,6 +475,45 @@ frobnicate = "ctrl+k"
             assert!(w.iter().any(|m| m.contains(needle)), "missing warning for {needle}: {w:?}");
         }
         assert!(!w.iter().any(|m| m.contains("unknown setting `editor.tab_width`")), "bad value is not 'unknown': {w:?}");
+    }
+
+    #[test]
+    fn highlight_groups() {
+        let (cfg, w) = parse(
+            r##"
+[highlights]
+samples = false
+[[highlights.group]]
+name = "Names"
+terms = ["Alice", "release day"]
+fg = "color4"
+bg = ""
+bold = true
+file_types = [".MD", "txt"]
+[[highlights.group]]
+terms = "solo"
+fg = "tomato"
+italic = "yes"
+[[highlights.group]]
+name = "Empty"
+terms = []
+"##,
+        );
+        let h = &cfg.highlights;
+        assert!(!h.samples);
+        assert_eq!(h.groups.len(), 2, "group without terms dropped");
+        let g = &h.groups[0];
+        assert_eq!(g.terms, ["Alice", "release day"]);
+        assert_eq!(g.fg, Some(Colour::Slot(4)));
+        assert_eq!(g.bg, None);
+        assert_eq!(g.file_types, ["md", "txt"]);
+        let g = &h.groups[1];
+        assert_eq!(g.name, "Group 2");
+        assert_eq!(g.fg, Some(Colour::Role(crate::highlight::Role::Accent)), "bad colour, nothing else: accent");
+        for needle in ["tomato", "italic", "Empty"] {
+            assert!(w.iter().any(|m| m.contains(needle)), "missing warning for {needle}: {w:?}");
+        }
+        assert_eq!(w.len(), 3, "{w:?}");
     }
 
     #[test]

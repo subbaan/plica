@@ -21,6 +21,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ drop.rs ──── recognise file drops delivered as pastes
         ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
         ├─ find.rs ──── search engine, match cache, find/replace bar commands
+        ├─ highlight.rs ─ word/phrase groups, colour specs, per-line matching
         ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
@@ -49,6 +50,15 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.2.2
+
+- **Highlights are matched per frame over the visible lines only**, never cached or run over the document. Each visible logical line is matched whole (so a phrase that soft-wraps still matches), except lines over 20 000 chars, where only the on-screen part ±512 chars is searched. Cost is (terms × visible text) per draw, which is small; it also means no invalidation logic for edits.
+- **Overlaps are resolved by painting a per-char mark array** for each visible line, lowest priority first, so the earlier group wins wherever it covers; lookup per glyph is O(1). Draw precedence: base < highlight < control-char substitute < find match < selection (the caret is the hardware cursor, always on top).
+- **Colours are resolved at draw time from the current `Theme`**, never stored as RGB, so palette-linked groups follow live palette changes with no extra plumbing. `Theme` now carries all 16 ANSI slots: a missing slot falls back to its normal/bright twin, then to Dracula's value (the user's ThemeWall file only defines color0, color1, color8, color15 in the sample; the live file defines all 16).
+- **Contrast repair for highlights:** with a background, text is pushed to 4.5:1 against it; with only a text colour, to 3:1 against the editor background (word highlights are emphasis, not body text). In terminal-colour mode highlights become attributes (bold if the group has none).
+- **Matching reuses `find::find_all_bytes`** (same whole-word and smart-lowercase rules as Find), so highlight and search agree on what a "word" is.
+- **The config template's raw string became `r##"…"##`** because `"#rrggbb"` in a comment ended an `r#"` string.
 
 ### 2026-10-12 · 0.2.1
 

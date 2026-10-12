@@ -7,6 +7,7 @@ mod dialog;
 mod document;
 mod drop;
 mod find;
+mod highlight;
 mod prefs;
 mod keymap;
 mod lineedit;
@@ -134,7 +135,7 @@ fn env_palette() -> Option<PathBuf> {
     std::env::var_os("PLICA_PALETTE").filter(|p| !p.is_empty()).map(|p| app::expand_tilde(&p.to_string_lossy()))
 }
 
-fn check_palette(path: &Path) -> Result<()> {
+fn check_palette(path: &Path, highlights: &highlight::Highlights) -> Result<()> {
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let report = theme::parse_kitty(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     for w in &report.warnings {
@@ -153,6 +154,19 @@ fn check_palette(path: &Path) -> Result<()> {
     for (name, fg, bg) in pairs {
         println!("contrast {name:<10} {fg} on {bg}: {:.2}", theme::contrast(fg, bg));
     }
+    // Highlight groups (all file types) as they would be drawn.
+    let all = highlight::Highlights { groups: highlights.groups.iter().map(|g| highlight::Group { file_types: Vec::new(), ..g.clone() }).collect(), ..highlights.clone() };
+    for g in all.active(None) {
+        let r = highlight::resolve(&g, &t);
+        let bg = r.bg.unwrap_or(t.editor_bg);
+        let fg = r.fg.unwrap_or(t.editor_fg);
+        let spec = |c: Option<highlight::Colour>| c.map_or("-".to_string(), |c| format!("{} = {}", c.name(), c.resolve(&t)));
+        let lifted = match g.fg {
+            Some(c) if c.resolve(&t) != fg => " (adjusted for contrast)",
+            _ => "",
+        };
+        println!("highlight {:<12} fg {} bg {}: drawn {fg} on {bg}{lifted}, contrast {:.2}", g.name, spec(g.fg), spec(g.bg), theme::contrast(fg, bg));
+    }
     Ok(())
 }
 
@@ -166,15 +180,14 @@ fn main() {
 
 fn run() -> Result<()> {
     let Some(args) = parse_args()? else { return Ok(()) };
-    if let Some(p) = &args.check_palette {
-        return check_palette(p);
-    }
-
     let config_path = args.config.clone().or_else(config::default_path);
     let (cfg, cfg_warnings) = match &config_path {
         Some(p) => config::load(p),
         None => (config::Config::default(), Vec::new()),
     };
+    if let Some(p) = &args.check_palette {
+        return check_palette(p, &cfg.highlights);
+    }
     if args.check_config {
         let shown = config_path.as_ref().map_or_else(|| "(no config path)".into(), |p| p.display().to_string());
         if cfg_warnings.is_empty() {
@@ -228,6 +241,7 @@ fn run() -> Result<()> {
     app.show_whitespace = cfg.show_whitespace;
     app.keymap = cfg.keymap();
     app.primary_selection = cfg.primary_selection;
+    app.highlights = cfg.highlights.clone();
     app.theme_choice = cfg.theme;
     app.palette_setting = cfg.palette.clone();
     app.recovery_enabled = cfg.recovery;

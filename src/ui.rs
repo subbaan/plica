@@ -116,6 +116,33 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let hi = all.partition_point(|&(s, _)| s <= last.end);
         matches = all[lo..hi.max(lo)].to_vec();
     }
+    // Word/phrase highlights for the visible lines only.
+    let groups = app.highlights.active(app.tab.doc.path.as_deref());
+    let hl_styles: Vec<Style> = groups.iter().map(|g| highlight_style(&p, &crate::highlight::resolve(g, &t))).collect();
+    let mut hl_lines: std::collections::HashMap<usize, (usize, Vec<u16>)> = std::collections::HashMap::new();
+    if !groups.is_empty() {
+        for row in &rows {
+            if hl_lines.contains_key(&row.line) {
+                continue;
+            }
+            let ls = app.tab.buf.line_start(row.line);
+            let le = app.tab.buf.line_end(row.line);
+            // Very long lines: match only around what is on screen.
+            let (ws, we) = if le - ls <= HL_LINE_LIMIT {
+                (ls, le)
+            } else {
+                let last = rows.iter().rev().find(|r| r.line == row.line).map_or(row.end, |r| r.end);
+                (row.start.saturating_sub(HL_MARGIN).max(ls), (last + HL_MARGIN).min(le))
+            };
+            let text: String = app.tab.buf.rope().slice(ws..we).into();
+            hl_lines.insert(row.line, (ws, crate::highlight::paint(&groups, &text)));
+        }
+    }
+    let hl_at = |line: usize, pos: usize| -> Option<Style> {
+        let (ws, marks) = hl_lines.get(&line)?;
+        let gi = *marks.get(pos.checked_sub(*ws)?)?;
+        hl_styles.get(gi as usize).copied()
+    };
     let in_match = |s: usize, e: usize| {
         let i = matches.partition_point(|&(_, me)| me <= s);
         matches.get(i).is_some_and(|&(ms, me)| s >= ms && e <= me)
@@ -148,6 +175,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 break;
             }
             let mut st = if is_caret_line { current_line } else { base };
+            if let Some(h) = hl_at(row.line, g.start) {
+                st = st.patch(h);
+            }
             if g.kind == GlyphKind::Substitute {
                 st = st.patch(sub_style);
             }
@@ -378,6 +408,35 @@ fn draw_tab_bar(buf: &mut TermBuf, app: &mut App, title: Rect, surface: Style, a
             x += w + 1;
         }
     }
+}
+
+/// Lines longer than this are highlighted only near the visible part.
+const HL_LINE_LIMIT: usize = 20_000;
+const HL_MARGIN: usize = 512;
+
+fn highlight_style(p: &Painter, r: &crate::highlight::Resolved) -> Style {
+    let mut m = Modifier::empty();
+    if r.bold {
+        m |= Modifier::BOLD;
+    }
+    if r.italic {
+        m |= Modifier::ITALIC;
+    }
+    if r.underline {
+        m |= Modifier::UNDERLINED;
+    }
+    if p.plain {
+        // No colours: a highlight must still show.
+        return Style::default().add_modifier(if m.is_empty() { Modifier::BOLD } else { m });
+    }
+    let mut s = Style::default().add_modifier(m);
+    if let Some(fg) = r.fg {
+        s = s.fg(p.c(fg));
+    }
+    if let Some(bg) = r.bg {
+        s = s.bg(p.c(bg));
+    }
+    s
 }
 
 fn put(buf: &mut TermBuf, x: u16, y: u16, sym: &str, width: usize, st: Style) {

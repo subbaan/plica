@@ -151,6 +151,7 @@ pub struct App {
     pub mouse_enabled: bool,
     /// X11/Wayland primary selection: select to copy, middle-click to paste.
     pub primary_selection: bool,
+    pub highlights: crate::highlight::Highlights,
     primary_due: Option<Instant>,
     pub show_help: bool,
     pub prompt: Option<Prompt>,
@@ -201,6 +202,7 @@ impl App {
             show_whitespace: false,
             mouse_enabled: true,
             primary_selection: true,
+            highlights: crate::highlight::Highlights::default(),
             primary_due: None,
             show_help: false,
             prompt: None,

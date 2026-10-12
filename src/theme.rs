@@ -246,6 +246,9 @@ pub struct Theme {
     pub current_line_bg: Rgb,
     pub warning: Rgb,
     pub substitute: Rgb,
+    /// ANSI slots 0..15 for palette-linked colours (missing slots fall back
+    /// to their normal/bright twin, then to Dracula's value).
+    pub ansi: [Rgb; 16],
 }
 
 pub fn resolve(p: &Palette) -> Theme {
@@ -290,6 +293,10 @@ pub fn resolve(p: &Palette) -> Theme {
         current_line_bg: bg.mix(fg, 0.05),
         warning: ensure_contrast(a(1).or(a(9)).unwrap_or(fg), surface_bg, 3.0),
         substitute: ensure_contrast(a(5).or(a(13)).unwrap_or(muted), bg, 3.0),
+        ansi: {
+            let d = dracula().ansi;
+            std::array::from_fn(|i| a(i).or(a(i ^ 8)).or(d[i]).unwrap_or(fg))
+        },
     }
 }
 
