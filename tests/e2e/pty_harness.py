@@ -316,6 +316,27 @@ check("no conflict after reload", "changed on disk" not in t.text(), t.text())
 t.send("\x11", 0.5)
 check("clean quit", not t.p.isalive())
 
+# ---------------------------------------------------------------- session 8: find & replace
+ff = os.path.join(WORK, "find.txt"); open(ff, "w").write("apple Apple apple pie\nbanana apple\n")
+t = Term([ff])
+t.send("\x06"); t.send("apple", 0.4)  # Ctrl+F
+check("find bar shows count", "1 of 4" in t.text(), t.text())
+bar_row = next(y for y in range(ROWS) if "Find:" in t.line(y))
+t.click(t.col_of(bar_row, " Aa ") + 1, bar_row); t.pump(0.3)
+check("click Aa toggles match case", "of 3" in t.line(bar_row), t.line(bar_row))
+t.click(t.col_of(bar_row, " ↓ ") + 1, bar_row); t.pump(0.3)
+check("click ↓ goes to next match", "2 of 3" in t.line(bar_row), t.line(bar_row))
+t.send("\x12", 0.3)  # Ctrl+R: replace mode, focus Replace field
+t.send("pear", 0.3)
+t.send("\x1ba", 0.4)  # Alt+A: replace all
+check("replace all", open(ff).read() == "apple Apple apple pie\nbanana apple\n" and "pear Apple pear pie" in t.text(), t.text())
+t.send("\x1b", 0.2)  # close bar
+t.send("\x1a", 0.3)  # undo
+check("replace all undoes in one step", "apple Apple apple pie" in t.text(), t.text())
+t.send("\x11", 0.3)
+if t.p.isalive(): t.send("n", 0.4)
+check("quit after find tests", not t.p.isalive())
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

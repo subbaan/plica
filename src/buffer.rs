@@ -73,7 +73,13 @@ pub struct Buffer {
     saved_top: Option<u64>,
     /// When true the next edit always starts a fresh undo step.
     break_coalescing: bool,
+    /// Unique per buffer, and bumped on every content change: together a
+    /// cache key for derived data (search matches).
+    id: u64,
+    version: u64,
 }
+
+static NEXT_BUFFER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Buffer {
     pub fn new() -> Self {
@@ -90,7 +96,14 @@ impl Buffer {
             next_tx_id: 1,
             saved_top: None,
             break_coalescing: false,
+            id: NEXT_BUFFER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            version: 0,
         }
+    }
+
+    /// (buffer id, content version): changes whenever the text changes.
+    pub fn cache_key(&self) -> (u64, u64) {
+        (self.id, self.version)
     }
 
     pub fn rope(&self) -> &Rope {
@@ -312,6 +325,7 @@ impl Buffer {
         if edits.is_empty() {
             return;
         }
+        self.version += 1;
         self.redo.clear();
         let now = Instant::now();
         if !self.break_coalescing
@@ -345,6 +359,7 @@ impl Buffer {
             }
         }
         self.sel = tx.sel_before;
+        self.version += 1;
         self.break_coalescing = true;
         self.preferred_col = None;
         self.redo.push(tx);
@@ -363,6 +378,7 @@ impl Buffer {
             }
         }
         self.sel = tx.sel_after;
+        self.version += 1;
         self.break_coalescing = true;
         self.preferred_col = None;
         self.undo.push(tx);

@@ -1,9 +1,10 @@
 //! Application state and command handling (single document for now).
 
-use crate::buffer::{Buffer, EditKind, Selection};
+use crate::buffer::{EditKind, Selection};
 use crate::clipboard::Clipboard;
 use crate::dialog::{Action, Button as DButton, Dialog};
 use crate::drop;
+use crate::find::{FindBar, FindHit, SearchOpts};
 use crate::tab::Tab;
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
 use crate::term::{self, Capabilities};
@@ -36,7 +37,6 @@ pub enum Level {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
-    Find,
     GotoLine,
     SaveAs,
     Open,
@@ -50,7 +50,6 @@ pub struct Prompt {
 impl PromptKind {
     pub fn label(self) -> &'static str {
         match self {
-            PromptKind::Find => "Find",
             PromptKind::GotoLine => "Go to line",
             PromptKind::SaveAs => "Save as",
             PromptKind::Open => "Open",
@@ -83,6 +82,7 @@ pub struct Regions {
     pub tab_bar: Rect,
     pub tab_hits: Vec<(Rect, TabHit)>,
     pub dialog_buttons: Vec<(Rect, usize)>,
+    pub find_hits: Vec<(Rect, FindHit)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +129,8 @@ pub struct App {
     pub show_help: bool,
     pub prompt: Option<Prompt>,
     pub last_find: String,
+    pub last_find_opts: SearchOpts,
+    pub find: Option<FindBar>,
     pub status: Option<(String, Level, Instant)>,
     pub quit: bool,
 
@@ -162,6 +164,8 @@ impl App {
             show_help: false,
             prompt: None,
             last_find: String::new(),
+            last_find_opts: SearchOpts::default(),
+            find: None,
             status: None,
             quit: false,
             rendered_rows: Vec::new(),
@@ -510,11 +514,10 @@ impl App {
                         }
                         _ => p.input.push_str(&text.replace(['\r', '\n'], " ")),
                     }
-                    if p.kind == PromptKind::Find {
-                        self.find_incremental();
-                    }
                 } else if let Some(paths) = dropped {
                     self.open_dropped(&paths);
+                } else if self.find.is_some() {
+                    self.find_insert_text(&text);
                 } else {
                     self.paste_text(&text);
                 }
@@ -554,6 +557,9 @@ impl App {
         }
         if self.prompt.is_some() {
             self.on_prompt_key(k);
+            return;
+        }
+        if self.find.is_some() && self.on_find_key(k) {
             return;
         }
 
@@ -608,9 +614,10 @@ impl App {
                 self.tab.buf.sel = Selection { anchor: 0, head: self.tab.buf.len_chars() };
                 self.tab.buf.break_undo_group();
             }
-            (_, Some('f')) if ctrl => self.open_prompt(PromptKind::Find),
+            (_, Some('f')) if ctrl => self.open_find(false),
+            (_, Some('h') | Some('r')) if ctrl => self.open_find(true),
             (_, Some('g')) if ctrl => self.open_prompt(PromptKind::GotoLine),
-            (KeyCode::F(3), _) => self.find_next(!shift),
+            (KeyCode::F(3), _) => self.find_step(!shift),
 
             (KeyCode::Esc, _) => {
                 self.tab.buf.sel = Selection::caret(self.tab.buf.sel.head);
@@ -1028,10 +1035,6 @@ impl App {
 
     fn open_prompt(&mut self, kind: PromptKind) {
         let input = match kind {
-            PromptKind::Find => {
-                let sel = self.tab.buf.selected_text();
-                if !sel.is_empty() && !sel.contains('\n') { sel } else { self.last_find.clone() }
-            }
             PromptKind::SaveAs => self.tab.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             _ => String::new(),
         };
@@ -1040,7 +1043,6 @@ impl App {
 
     fn on_prompt_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let Some(p) = &mut self.prompt else { return };
         let kind = p.kind;
         match k.code {
@@ -1051,11 +1053,6 @@ impl App {
             KeyCode::Enter => {
                 let input = p.input.clone();
                 match kind {
-                    PromptKind::Find => {
-                        self.last_find = input;
-                        self.find_next(!shift);
-                        return; // keep the bar open for repeated Enter
-                    }
                     PromptKind::GotoLine => self.goto_line(&input),
                     PromptKind::SaveAs if !input.is_empty() => self.save_as(&input),
                     PromptKind::Open if !input.is_empty() => self.open_path(&input),
@@ -1066,13 +1063,6 @@ impl App {
             }
             KeyCode::Backspace => {
                 p.input.pop();
-                if kind == PromptKind::Find {
-                    self.find_incremental();
-                }
-            }
-            KeyCode::F(3) => {
-                self.last_find = p.input.clone();
-                self.find_next(!shift);
             }
             KeyCode::Char('v') if ctrl => {
                 let t = self.clipboard.paste();
@@ -1082,9 +1072,6 @@ impl App {
             }
             KeyCode::Char(c) if !ctrl => {
                 p.input.push(c);
-                if kind == PromptKind::Find {
-                    self.find_incremental();
-                }
             }
             _ => {}
         }
@@ -1098,35 +1085,6 @@ impl App {
                 self.move_to(pos, false);
             }
             _ => self.warn("Not a line number"),
-        }
-    }
-
-    fn find_incremental(&mut self) {
-        let Some(p) = &self.prompt else { return };
-        self.last_find = p.input.clone();
-        // Search from the start of the current selection so typing extends the match.
-        let from = self.tab.buf.sel.start();
-        if let Some((s, e)) = find_in(&self.tab.buf, &self.last_find, from, true) {
-            self.tab.buf.sel = Selection { anchor: s, head: e };
-            self.tab.follow_caret = true;
-        }
-    }
-
-    pub fn find_next(&mut self, forward: bool) {
-        if self.last_find.is_empty() {
-            self.open_prompt(PromptKind::Find);
-            return;
-        }
-        let from = if forward { self.tab.buf.sel.end() } else { self.tab.buf.sel.start() };
-        match find_in(&self.tab.buf, &self.last_find, from, forward) {
-            Some((s, e)) => {
-                if (forward && s < from) || (!forward && s >= from) {
-                    self.info("Search wrapped");
-                }
-                self.tab.buf.sel = Selection { anchor: s, head: e };
-                self.tab.follow_caret = true;
-            }
-            None => self.warn(format!("Not found: {}", self.last_find)),
         }
     }
 
@@ -1154,6 +1112,10 @@ impl App {
                 }
                 if let Some(hit) = self.tab_hit_at(m.column, m.row) {
                     self.on_tab_bar_click(hit);
+                    return;
+                }
+                if let Some(&(_, hit)) = self.regions.find_hits.iter().find(|(r, _)| contains(*r, m.column, m.row)) {
+                    self.on_find_click(hit);
                     return;
                 }
                 if let Some(b) = self.button_at(m.column, m.row) {
@@ -1467,58 +1429,10 @@ pub fn expand_tilde(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
-fn smart_case(text: &str, query: &str) -> (String, String) {
-    if query.chars().any(char::is_uppercase) {
-        (text.to_string(), query.to_string())
-    } else {
-        (lower_same_len(text), lower_same_len(query))
-    }
-}
-
-/// All non-overlapping smart-case matches in `text`, as byte ranges.
-pub fn find_all(text: &str, query: &str) -> Vec<(usize, usize)> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-    let (hay, needle) = smart_case(text, query);
-    hay.match_indices(&needle).map(|(i, m)| (i, i + m.len())).collect()
-}
-
-/// Smart-case literal search: case-insensitive unless the query has capitals.
-/// Returns a char range. Wraps around the document.
-pub fn find_in(buf: &Buffer, query: &str, from: usize, forward: bool) -> Option<(usize, usize)> {
-    if query.is_empty() {
-        return None;
-    }
-    let (hay, needle) = smart_case(&buf.rope().to_string(), query);
-    let from_b = buf.rope().char_to_byte(from.min(buf.len_chars()));
-    let found = if forward {
-        hay[from_b..].find(&needle).map(|i| i + from_b).or_else(|| hay.find(&needle))
-    } else {
-        hay[..from_b].rfind(&needle).or_else(|| hay.rfind(&needle))
-    }?;
-    let s = buf.rope().byte_to_char(found);
-    let e = buf.rope().byte_to_char(found + needle.len());
-    Some((s, e))
-}
-
-/// Lowercase only where it keeps the UTF-8 length identical, so byte offsets
-/// in the lowered string still map onto the original text.
-fn lower_same_len(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            let mut l = c.to_lowercase();
-            match (l.next(), l.next()) {
-                (Some(lc), None) if lc.len_utf8() == c.len_utf8() => lc,
-                _ => c,
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::Buffer;
     use ratatui::crossterm::event::{KeyEventState, MouseEvent};
 
     fn app_with(text: &str, w: u16, h: u16) -> App {
@@ -1828,21 +1742,65 @@ mod tests {
     }
 
     #[test]
-    fn find_smart_case_and_wrap() {
-        let b = Buffer::from_str("Alpha beta ALPHA alpha");
-        assert_eq!(find_in(&b, "alpha", 1, true), Some((11, 16)));
-        assert_eq!(find_in(&b, "Alpha", 1, true), Some((0, 5))); // wraps
-        assert_eq!(find_in(&b, "alpha", 11, false), Some((0, 5)));
-        assert_eq!(find_in(&b, "zzz", 0, true), None);
+    fn find_bar_counts_steps_and_wraps() {
+        let mut a = app_with("cat Cat cat dog", 40, 10);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        type_str(&mut a, "cat");
+        assert_eq!(a.tab.buf.sel, Selection { anchor: 0, head: 3 });
+        assert_eq!(a.find_status(), "1 of 3");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.find_status(), "3 of 3");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.find_status(), "1 of 3", "wraps");
+        key(&mut a, KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(a.find_status(), "3 of 3", "Shift+Enter goes back");
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::ALT); // Match case
+        assert_eq!(a.find_status(), "2 of 2", "stays on the current match if it still matches");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.find.is_none());
+        key(&mut a, KeyCode::F(3), KeyModifiers::NONE);
+        assert!(a.find.is_some(), "F3 reopens with the last search and options");
+        assert!(a.find.as_ref().unwrap().opts.match_case);
     }
 
     #[test]
-    fn find_with_multibyte_text() {
-        let b = Buffer::from_str("café Ünïcode ünïcode");
-        // Lowercase query is case-insensitive, so "Ünïcode" matches first.
-        assert_eq!(find_in(&b, "ünïcode", 0, true), Some((5, 12)));
-        assert_eq!(find_in(&b, "ünï", 6, true), Some((13, 16)));
-        // Capitals make it case-sensitive.
-        assert_eq!(find_in(&b, "ÜNÏ", 0, true), None);
+    fn replace_one_and_all_with_undo() {
+        let mut a = app_with("a-b a-b a-b", 40, 10);
+        key(&mut a, KeyCode::Char('h'), KeyModifiers::CONTROL);
+        type_str(&mut a, "a-b");
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut a, "X");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE); // replace current, go next
+        assert_eq!(text(&a), "X a-b a-b");
+        assert_eq!(a.find_status(), "1 of 2");
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::ALT); // replace all
+        assert_eq!(text(&a), "X X X");
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(text(&a), "X a-b a-b", "replace all is one undo step");
+    }
+
+    #[test]
+    fn replace_all_in_selection_only() {
+        let mut a = app_with("x\nx\nx\nx\n", 40, 10);
+        a.tab.buf.sel = Selection { anchor: 2, head: 6 }; // lines 2-3
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(a.find.as_ref().unwrap().scope.is_some(), "multi-line selection enables In selection");
+        assert_eq!(a.find.as_ref().unwrap().focus, crate::find::Field::Find, "empty query: Find field first");
+        type_str(&mut a, "x");
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        type_str(&mut a, "yy");
+        key(&mut a, KeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(text(&a), "x\nyy\nyy\nx\n");
+    }
+
+    #[test]
+    fn whole_word_option() {
+        let mut a = app_with("cat concat cat", 40, 10);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        type_str(&mut a, "cat");
+        assert_eq!(a.find_status(), "1 of 3");
+        key(&mut a, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert_eq!(a.find_status(), "1 of 2");
     }
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 (2026-10-12): find and replace
+
+- New find bar (Ctrl+F) with replace mode (Ctrl+H, or Ctrl+R where the terminal sends Ctrl+H as Backspace). Shows "3 of 17"; Enter/F3 next, Shift+Enter/Shift+F3 previous, wrapping around.
+- Options: Match case (Alt+C), Whole word (Alt+W), In selection (Alt+L; switched on automatically when the bar opens with a multi-line selection). All are clickable chips, as are ↑ ↓, × and the Replace / All buttons.
+- Replace: Enter in the Replace field replaces the current match and moves on; Alt+A or Alt+Enter replaces all as one undo step.
+- All matches in view are highlighted while the bar is open.
+- **Behaviour change:** search is case-insensitive unless Match case is on (the previous smart-case rule is gone, matching Mousepad/Gedit). The last search and its options are remembered for F3.
+
 ## 0.1.2 (2026-10-12): dialogs and external changes
 
 - Real dialogs (keyboard: underlined letter, ←/→/Tab, Enter, Esc; or click a button) replace the "press again to confirm" warnings:

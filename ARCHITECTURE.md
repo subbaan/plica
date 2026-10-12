@@ -20,6 +20,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, palette debo
         ├─ clipboard.rs ─ internal + OSC 52 + wl-copy/xclip/xsel
         ├─ drop.rs ──── recognise file drops delivered as pastes
         ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
+        ├─ find.rs ──── search engine, match cache, find/replace bar commands
         └─ theme.rs ─── parse_kitty → Palette → resolve → Theme (semantic roles, contrast repair)
 ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → truecolour / 256 / plain
 ```
@@ -30,7 +31,7 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 - **Three offset spaces, never mixed:** char index into the rope (all internal positions, snapped to grapheme boundaries) · bytes (only in `document.rs` and search) · display cells (only in `layout.rs`/`ui.rs`).
 - **One width function:** layout uses ratatui's `CellWidth`, the same function the renderer uses.
 - **Hit-testing uses what was drawn:** `App::rendered_rows` holds the rows from the last frame.
-- **Nothing walks the whole document per keystroke** except find (O(n), acceptable at tens of MB).
+- **Nothing walks the whole document per keystroke** except find when the query or document changes (O(n), cached otherwise).
 - **Every UI region asks the Theme for a semantic role**, so a palette swap recolours everything.
 
 ### Event loop
@@ -42,6 +43,15 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.1.3
+
+- **Find has its own bar (`find.rs`), not the generic prompt:** it needs two fields, toggles, clickable controls and state that outlives a keypress. Its commands live in an `impl App` block in `find.rs` so `app.rs` stays manageable.
+- **Matches are cached per `(buffer id, version, query, options, scope)`.** `Buffer` gained a process-unique id and a version bumped on every change (edit, undo, redo); highlights, the "n of m" count, stepping and Replace All all read the cache, so moving between matches never rescans. Capped at 200 000 matches (count shows "+").
+- **Ctrl+R is a replace alias** because legacy (non-Kitty-protocol) terminals send Ctrl+H as Backspace.
+- **Smart-case search was replaced by an explicit Match case toggle** to match GUI-editor expectations.
+- **Regex search is deliberately not included yet** (plan: regex is an advanced, bounded option); literal + case + whole word cover the Phase 2 needs without a new dependency.
+- **In-selection scope is adjusted by each replacement's length change**, so replacing one at a time keeps the scope covering the same text.
 
 ### 2026-10-12 · 0.1.2
 

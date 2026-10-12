@@ -1,7 +1,8 @@
 //! Rendering. Everything here asks the `Theme` for semantic roles; only
 //! `Painter` knows how roles become terminal colours.
 
-use crate::app::{App, Button, Level, PromptKind, TabHit, ThemeSource, find_all};
+use crate::app::{App, Button, Level, TabHit, ThemeSource};
+use crate::find::FindHit;
 use crate::layout::GlyphKind;
 use crate::theme::Rgb;
 use ratatui::Frame;
@@ -72,7 +73,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let status = Rect { x: area.x, y: area.bottom() - 1, width: area.width, height: 1 };
     let prompt_h = u16::from(app.prompt.is_some());
     let prompt = Rect { x: area.x, y: status.y - prompt_h, width: area.width, height: prompt_h };
-    let editor = Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height - 2 - prompt_h };
+    let find_h = match &app.find {
+        Some(b) if b.replace_mode => 2,
+        Some(_) => 1,
+        None => 0,
+    }
+    .min(area.height.saturating_sub(4 + prompt_h));
+    let find_rect = Rect { x: area.x, y: prompt.y - find_h, width: area.width, height: find_h };
+    let editor = Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height - 2 - prompt_h - find_h };
 
     let gutter_w = if app.line_numbers { digits(app.tab.buf.len_lines()).max(3) as u16 + 2 } else { 1 };
     let gutter = Rect { width: gutter_w.min(editor.width / 2), ..editor };
@@ -99,15 +107,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let gutter_style = p.plain_or(p.style(t.gutter_fg, t.editor_bg), Modifier::DIM);
     let sub_style = p.plain_or(Style::default().fg(p.c(t.substitute)), Modifier::DIM);
 
-    // Visible search matches while the find bar is open.
+    // Visible search matches while the find bar is open (from its cache).
     let mut matches: Vec<(usize, usize)> = Vec::new();
-    if let (Some(pr), Some(first), Some(last)) = (&app.prompt, rows.first(), rows.last())
-        && pr.kind == PromptKind::Find
-        && !pr.input.is_empty()
-    {
-        matches = visible_matches(app, &pr.input, first.start, last.end);
+    if let (Some(bar), Some(first), Some(last)) = (app.find.as_mut(), rows.first(), rows.last()) {
+        let all = bar.matches(&app.tab.buf);
+        let lo = all.partition_point(|&(_, e)| e <= first.start);
+        let hi = all.partition_point(|&(s, _)| s <= last.end);
+        matches = all[lo..hi.max(lo)].to_vec();
     }
-    let in_match = |s: usize, e: usize| matches.iter().any(|&(ms, me)| s >= ms && e <= me);
+    let in_match = |s: usize, e: usize| {
+        let i = matches.partition_point(|&(_, me)| me <= s);
+        matches.get(i).is_some_and(|&(ms, me)| s >= ms && e <= me)
+    };
 
     let scroll_x = if app.wrap { 0 } else { app.tab.scroll_x };
     for (i, row) in rows.iter().enumerate() {
@@ -199,13 +210,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let accent = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::REVERSED | Modifier::BOLD);
     draw_tab_bar(buf, app, title, surface, accent, &p);
 
+    // ---- find bar ----
+    app.regions.find_hits.clear();
+    if app.find.is_some() && find_h > 0 {
+        let field = p.plain_or(p.style(t.editor_fg, t.editor_bg), Modifier::UNDERLINED);
+        if let Some(pos) = draw_find_bar(buf, app, find_rect, surface, accent, field) {
+            caret_pos = Some(pos);
+        }
+    }
+
     // ---- prompt ----
     if let Some(pr) = &app.prompt {
         buf.set_style(prompt, surface);
-        let hint = match pr.kind {
-            PromptKind::Find => "  Enter/F3 next · Shift+Enter prev · Esc close",
-            _ => "  Enter confirm · Esc cancel",
-        };
+        let hint = "  Enter confirm · Esc cancel";
         let label = format!(" {}: ", pr.kind.label());
         let lw = label.chars().count() as u16;
         buf.set_stringn(prompt.x, prompt.y, &label, prompt.width as usize, accent);
@@ -367,16 +384,75 @@ fn put(buf: &mut TermBuf, x: u16, y: u16, sym: &str, width: usize, st: Style) {
     }
 }
 
-fn visible_matches(app: &App, q: &str, start: usize, end: usize) -> Vec<(usize, usize)> {
-    // Search only the visible window, once per frame.
-    let rope = app.tab.buf.rope();
-    let window = rope.slice(start..end).to_string();
-    let base_b = rope.char_to_byte(start);
-    find_all(&window, q)
-        .into_iter()
-        .take(500)
-        .map(|(s, e)| (rope.byte_to_char(base_b + s), rope.byte_to_char(base_b + e)))
-        .collect()
+/// Find bar (one row; two in replace mode). Returns the caret position for
+/// the focused field.
+fn draw_find_bar(buf: &mut TermBuf, app: &mut App, r: Rect, surface: Style, accent: Style, field: Style) -> Option<Position> {
+    let status = app.find_status();
+    let bar = app.find.as_ref()?;
+    buf.set_style(r, surface);
+    let mut hits: Vec<(Rect, FindHit)> = Vec::new();
+    let label_w = 10u16; // " Replace: "
+    let chip = |on: bool| if on { accent } else { surface.add_modifier(Modifier::DIM) };
+
+    // Right side of row 1: toggles, prev/next, count, close.
+    let chips: [(&str, FindHit, bool); 3] = [
+        (" Aa ", FindHit::MatchCase, bar.opts.match_case),
+        (" W ", FindHit::WholeWord, bar.opts.whole_word),
+        (" Sel ", FindHit::InSelection, bar.scope.is_some()),
+    ];
+    let count = format!(" {status} ");
+    let right_w: u16 = chips.iter().map(|c| c.0.len() as u16 + 1).sum::<u16>() + 6 + count.chars().count() as u16 + 3;
+    let field_w = r.width.saturating_sub(label_w + right_w + 1).max(8);
+    let y = r.y;
+    let mut caret = None;
+
+    let mut draw_field = |buf: &mut TermBuf, y: u16, label: &str, text: &str, focused: bool, hit: FindHit| {
+        buf.set_stringn(r.x, y, label, label_w as usize, if focused { accent } else { surface });
+        let fx = r.x + label_w;
+        buf.set_style(Rect { x: fx, y, width: field_w, height: 1 }, field);
+        let n = text.chars().count();
+        let shown: String = text.chars().skip(n.saturating_sub(field_w.saturating_sub(1) as usize)).collect();
+        let (end, _) = buf.set_stringn(fx, y, &shown, field_w as usize, field);
+        hits.push((Rect { x: fx, y, width: field_w, height: 1 }, hit));
+        if focused {
+            caret = Some(Position { x: end.min(fx + field_w - 1), y });
+        }
+    };
+    let focus_find = bar.focus == crate::find::Field::Find;
+    draw_field(buf, y, " Find:    ", &bar.query, focus_find, FindHit::FindField);
+    if bar.replace_mode && r.height > 1 {
+        draw_field(buf, y + 1, " Replace: ", &bar.replacement, !focus_find, FindHit::ReplaceField);
+    }
+
+    let mut x = r.x + label_w + field_w + 1;
+    for (label, hit, on) in chips {
+        let w = label.len() as u16;
+        buf.set_stringn(x, y, label, w as usize, chip(on));
+        hits.push((Rect { x, y, width: w, height: 1 }, hit));
+        x += w + 1;
+    }
+    for (label, hit) in [(" ↑ ", FindHit::Prev), (" ↓ ", FindHit::Next)] {
+        buf.set_stringn(x, y, label, 3, surface.add_modifier(Modifier::BOLD));
+        hits.push((Rect { x, y, width: 3, height: 1 }, hit));
+        x += 3;
+    }
+    let (cx, _) = buf.set_stringn(x, y, &count, r.right().saturating_sub(x) as usize, surface);
+    let close_x = r.right().saturating_sub(3).max(cx);
+    buf.set_stringn(close_x, y, " × ", 3, surface.add_modifier(Modifier::BOLD));
+    hits.push((Rect { x: close_x, y, width: 3, height: 1 }, FindHit::Close));
+
+    if bar.replace_mode && r.height > 1 {
+        let mut x = r.x + label_w + field_w + 1;
+        for (label, hit) in [(" Replace ", FindHit::ReplaceOne), (" All ", FindHit::ReplaceAll)] {
+            let w = label.len() as u16;
+            buf.set_stringn(x, y + 1, label, w as usize, surface.add_modifier(Modifier::BOLD | Modifier::REVERSED));
+            hits.push((Rect { x, y: y + 1, width: w, height: 1 }, hit));
+            x += w + 1;
+        }
+        buf.set_stringn(x + 1, y + 1, "Enter: replace · Alt+A: all", r.right().saturating_sub(x + 1) as usize, surface.add_modifier(Modifier::DIM));
+    }
+    app.regions.find_hits = hits;
+    caret
 }
 
 fn status_right(app: &App, compact: bool) -> String {
@@ -441,7 +517,9 @@ fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
         "Ctrl+PgUp/PgDn or Ctrl+Tab  Switch tabs   Alt+1..9  Go to tab".into(),
         "Ctrl+Z  Undo            Ctrl+Y / Ctrl+Shift+Z  Redo".into(),
         "Ctrl+C/X/V  Copy/Cut/Paste      Ctrl+A  Select all".into(),
-        "Ctrl+F  Find   F3 / Shift+F3  Next/prev   Ctrl+G  Go to line".into(),
+        "Ctrl+F  Find   Ctrl+H / Ctrl+R  Replace   F3 / Shift+F3  Next/prev".into(),
+        "  in the bar: Alt+C case · Alt+W whole word · Alt+L in selection · Alt+A all".into(),
+        "Ctrl+G  Go to line".into(),
         "Ctrl+←/→ (or Alt+←/→)  Word left/right".into(),
         "Tab / Shift+Tab  Indent/outdent lines   Ctrl+↑/↓  Scroll".into(),
         "Alt+Z  Wrap   Alt+L  Line numbers   Alt+W  Whitespace   Alt+M  Mouse".into(),

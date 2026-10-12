@@ -4,6 +4,7 @@ mod clipboard;
 mod dialog;
 mod document;
 mod drop;
+mod find;
 mod layout;
 mod tab;
 mod term;
