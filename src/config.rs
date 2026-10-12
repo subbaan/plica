@@ -217,7 +217,7 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
 
 /// One `[[highlights.group]]`. A group without usable terms is dropped
 /// (with a warning); other bad fields keep their defaults.
-fn parse_group(v: &Value, i: usize, w: &mut Vec<String>) -> Option<Group> {
+pub(crate) fn parse_group(v: &Value, i: usize, w: &mut Vec<String>) -> Option<Group> {
     let Some(t) = v.as_table() else {
         w.push(format!("`highlights.group` entry {} should be a table", i + 1));
         return None;
@@ -395,6 +395,9 @@ samples = true           # built-in TODO / FIXME / IMPORTANT / IDEA / DONE group
 # whole_word = true      # default true
 # case_sensitive = false # default false
 # file_types = ["md", "txt"]   # default: every file
+#
+# Alt+H (or F8) highlights the word under the caret in the current document
+# only; those rules are kept in documents.toml next to this file.
 
 [keys]
 # Rebind commands: a key or a list of keys; [] unbinds. Examples:

@@ -152,6 +152,7 @@ pub struct App {
     /// X11/Wayland primary selection: select to copy, middle-click to paste.
     pub primary_selection: bool,
     pub highlights: crate::highlight::Highlights,
+    pub doc_rules: crate::dochl::DocRules,
     primary_due: Option<Instant>,
     pub show_help: bool,
     pub prompt: Option<Prompt>,
@@ -203,6 +204,7 @@ impl App {
             mouse_enabled: true,
             primary_selection: true,
             highlights: crate::highlight::Highlights::default(),
+            doc_rules: crate::dochl::DocRules::default(),
             primary_due: None,
             show_help: false,
             prompt: None,
@@ -868,6 +870,7 @@ impl App {
             Command::ScrollDown => return self.scroll_rows(1),
             Command::Help => self.show_help = true,
             Command::Preferences => self.open_prefs(),
+            Command::HighlightWord => self.highlight_word(),
         }
         self.tab.follow_caret = true;
     }
@@ -1191,6 +1194,11 @@ impl App {
                 self.tab.buf.mark_saved();
                 self.tab.disk_conflict = false;
                 self.info(format!("Saved as {}", self.tab.doc.display_name()));
+                if let (Some(from), Some(to)) = (old.as_deref(), self.tab.doc.path.clone())
+                    && let Err(e) = self.doc_rules.carry_over(from, &to)
+                {
+                    self.warn(format!("Document highlights not copied: {e:#}"));
+                }
                 true
             }
             Err(e) => {
@@ -1200,6 +1208,43 @@ impl App {
                 self.warn(format!("Save failed: {e:#}"));
                 false
             }
+        }
+    }
+
+    /// Groups for the active tab, in priority order: this document's own,
+    /// then the config's, then the samples.
+    pub fn active_highlights(&self) -> Vec<crate::highlight::Group> {
+        if !self.highlights.enabled {
+            return Vec::new();
+        }
+        let path = self.tab.doc.path.as_deref();
+        let mut v: Vec<_> = path
+            .map(|p| self.doc_rules.groups(p).iter().filter(|g| g.enabled && !g.terms.is_empty()).cloned().collect())
+            .unwrap_or_default();
+        v.extend(self.highlights.active(path));
+        v
+    }
+
+    /// Toggle the selected text (or the word at the caret) in this
+    /// document's "Marked" highlight group.
+    fn highlight_word(&mut self) {
+        let Some(path) = self.tab.doc.path.clone() else {
+            self.warn("Save the file first: document highlights are kept by file path");
+            return;
+        };
+        let sel = self.tab.buf.sel;
+        let (s, e) = if sel.is_empty() { self.tab.buf.word_at(sel.head) } else { (sel.start(), sel.end()) };
+        let term: String = self.tab.buf.rope().slice(s..e).into();
+        let term = term.trim();
+        if term.is_empty() || term.contains('\n') || !term.chars().any(crate::buffer::is_word_char) {
+            self.warn("Select a word or phrase on one line to highlight");
+            return;
+        }
+        let label = self.keymap.label(Command::HighlightWord);
+        match self.doc_rules.toggle_marked(&path, term) {
+            Ok(true) => self.info(format!("Highlighting \u{201c}{term}\u{201d} in this document ({label} again to remove)")),
+            Ok(false) => self.info(format!("Removed highlight \u{201c}{term}\u{201d}")),
+            Err(e) => self.warn(format!("Could not save document highlights: {e:#}")),
         }
     }
 
@@ -2014,6 +2059,26 @@ mod tests {
         key(&mut a, KeyCode::F(3), KeyModifiers::NONE);
         assert!(a.find.is_some(), "F3 reopens with the last search and options");
         assert!(a.find.as_ref().unwrap().opts.match_case);
+    }
+
+    #[test]
+    fn highlight_word_toggles_document_rule() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("n.txt");
+        std::fs::write(&f, "ask Alice now\n").unwrap();
+        let mut a = app_with("", 40, 10);
+        a.doc_rules = crate::dochl::DocRules::load(Some(d.path().join("documents.toml"))).0;
+        a.highlight_word();
+        assert!(a.status.as_ref().unwrap().0.contains("Save the file first"));
+        assert!(a.open_file(&f));
+        a.tab.buf.sel = Selection::caret(6); // inside "Alice"
+        a.highlight_word();
+        let names: Vec<_> = a.active_highlights().iter().map(|g| g.name.clone()).collect();
+        assert_eq!(names[0], crate::dochl::MARKED, "document group first: {names:?}");
+        assert_eq!(a.active_highlights()[0].terms, ["Alice"]);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "ask Alice now\n", "file untouched");
+        a.highlight_word();
+        assert_ne!(a.active_highlights()[0].name, crate::dochl::MARKED, "second press removes it");
     }
 
     #[test]

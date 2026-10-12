@@ -64,6 +64,7 @@ commands! {
     ScrollDown => "scroll_down", "Scroll down a line", ["ctrl+down"];
     Help => "help", "Help", ["f1"];
     Preferences => "preferences", "Preferences", ["f9", "ctrl+,"];
+    HighlightWord => "highlight_word", "Highlight word in this document (again: remove)", ["alt+h", "f8"];
 }
 
 /// A key plus modifiers, normalised so equivalent events compare equal.

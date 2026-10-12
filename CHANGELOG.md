@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.3 (2026-10-12): document highlights
+
+- **Alt+H** (or **F8**) highlights the selected text, or the word under the caret, everywhere in the current document; press it again on the same word to remove it. Rebindable as `highlight_word`.
+- Document-specific rules are kept in `documents.toml` next to `config.toml`, keyed by the file's full path (symlinks resolve to the same file), never inside your files. They use the same group format as `[[highlights.group]]`, so you can edit them by hand; Plica rewrites only the entry of the document you change and keeps your comments.
+- Document groups take priority over config groups, which take priority over the samples.
+- Save As carries a document's highlights over to the new name.
+
 ## 0.2.2 (2026-10-12): word and phrase highlighting
 
 - **Highlight groups** in `config.toml` (`[[highlights.group]]`): a list of words or phrases with a text colour, optional background, and bold / italic / underline. Whole-word (default on) and case-sensitive (default off) matching per group; `file_types = ["md"]` limits a group to some file types. Earlier groups win where matches overlap.

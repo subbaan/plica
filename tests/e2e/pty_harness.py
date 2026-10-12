@@ -442,8 +442,19 @@ check("case-sensitive sample: lowercase todo not highlighted", t.cell(xt, 2).fg.
 write_hl_palette("#c678dd")
 t.pump(0.8)
 check("linked highlight follows live palette", t.cell(xa, 1).fg.lower() == "c678dd", t.cell(xa, 1).fg)
+xb = t.col_of(1, "about")
+t.click(xb + 1, 1); t.send("\x1bh", 0.4)  # Alt+H: highlight word in this document
+check("Alt+H marks the word with the accent background", t.cell(xb, 1).bg.lower() == "c678dd" and t.cell(xb + 4, 1).bg.lower() == "c678dd", t.cell(xb, 1).bg)
+docs_toml = os.path.join(cfg_dir, "documents.toml")
+check("document rule stored outside the file", os.path.exists(docs_toml) and os.path.realpath(fh) in open(docs_toml).read())
 t.send("\x11", 0.5)
 check("highlighting never touches the file", open(fh).read() == hl_text and not t.p.isalive())
+t = Term(["--palette", hl_pal, fh])
+check("document highlight persists across restarts", t.cell(xb, 1).bg.lower() == "c678dd", t.cell(xb, 1).bg)
+t.click(xb + 1, 1); t.send("\x1b[19~", 0.4)  # F8 (fallback key) removes it
+check("F8 toggles the document highlight off", t.cell(xb, 1).bg.lower() != "c678dd" and "about" not in open(docs_toml).read(), t.cell(xb, 1).bg)
+t.send("\x11", 0.5)
+os.remove(docs_toml)
 os.remove(cfg_file)
 
 print(f"\nwork dir: {WORK}")

@@ -21,6 +21,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ drop.rs ──── recognise file drops delivered as pastes
         ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
         ├─ find.rs ──── search engine, match cache, find/replace bar commands
+        ├─ dochl.rs ─── per-document highlight rules (documents.toml)
         ├─ highlight.rs ─ word/phrase groups, colour specs, per-line matching
         ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
@@ -50,6 +51,12 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.2.3
+
+- **Document-specific highlights are keyed by canonical path** (resolves the plan's open question; content fingerprints break on every edit, and per-document sidecar files would litter the user's folders). Stored in `documents.toml` beside the config file (derived from the config path, so `--config` and the e2e harness's temp `XDG_CONFIG_HOME` are respected). *Known limitation:* moving or renaming a file outside Plica loses its rules; Save As copies them.
+- **The file on disk is the source of truth for document rules.** A toggle re-reads `documents.toml`, edits only that document's `[[document]]` entry with `toml_edit` (other entries and comments are kept), writes it atomically via `Document::save`, then reloads the whole map. Two Plica instances editing different documents therefore don't overwrite each other's rules.
+- **Highlight word defaults to Alt+H with F8 as fallback**: there is no GUI-editor convention for this, Alt+H is free in Kitty, but XFCE Terminal's menu bar (when shown) uses Alt+H for its Help menu.
 
 ### 2026-10-12 · 0.2.2
 

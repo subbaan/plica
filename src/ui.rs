@@ -117,7 +117,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         matches = all[lo..hi.max(lo)].to_vec();
     }
     // Word/phrase highlights for the visible lines only.
-    let groups = app.highlights.active(app.tab.doc.path.as_deref());
+    let groups = app.active_highlights();
     let hl_styles: Vec<Style> = groups.iter().map(|g| highlight_style(&p, &crate::highlight::resolve(g, &t))).collect();
     let mut hl_lines: std::collections::HashMap<usize, (usize, Vec<u16>)> = std::collections::HashMap::new();
     if !groups.is_empty() {

@@ -7,6 +7,7 @@ mod dialog;
 mod document;
 mod drop;
 mod find;
+mod dochl;
 mod highlight;
 mod prefs;
 mod keymap;
@@ -242,6 +243,11 @@ fn run() -> Result<()> {
     app.keymap = cfg.keymap();
     app.primary_selection = cfg.primary_selection;
     app.highlights = cfg.highlights.clone();
+    let (doc_rules, doc_warnings) = dochl::DocRules::load(config_path.as_ref().and_then(|p| p.parent()).map(|d| d.join("documents.toml")));
+    app.doc_rules = doc_rules;
+    if let Some(w) = doc_warnings.first() {
+        app.warn(w.clone());
+    }
     app.theme_choice = cfg.theme;
     app.palette_setting = cfg.palette.clone();
     app.recovery_enabled = cfg.recovery;
