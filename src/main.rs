@@ -19,6 +19,7 @@ mod layout;
 mod recovery;
 mod tab;
 mod table;
+mod table_border;
 mod table_edit;
 mod term;
 mod theme;

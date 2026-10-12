@@ -36,6 +36,26 @@ pub enum Align {
     Right,
 }
 
+/// Which text format a table is written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    Markdown,
+    /// `+---+` rules and `|` bars.
+    Ascii,
+    /// Box-drawing rules and `│` bars.
+    Unicode,
+}
+
+impl Style {
+    pub fn label(self) -> &'static str {
+        match self {
+            Style::Markdown => "Markdown",
+            Style::Ascii => "ASCII",
+            Style::Unicode => "Unicode box",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     Header,
@@ -78,6 +98,14 @@ pub struct Table {
     /// The delimiter row has spaces inside its pipes (`| --- |`).
     pub delim_spaced: bool,
     pub indent: String,
+    pub style: Style,
+    /// First and last line of the table's text (bordered tables: the outer
+    /// rules, which are not rows).
+    pub extent: (usize, usize),
+    /// Rule layout of a bordered table (None for Markdown).
+    pub border: Option<crate::table_border::Border>,
+    /// The line ending inside the table.
+    pub le: String,
 }
 
 /// One row split into cells: char ranges relative to the line.
@@ -242,6 +270,9 @@ impl Table {
         if line >= rope.len_lines() {
             return None;
         }
+        if let Some(t) = crate::table_border::at(rope, line) {
+            return Some(t);
+        }
         let first = line_chars(rope, line);
         split_row(&first)?;
         let mut a = line;
@@ -281,15 +312,62 @@ impl Table {
             let parts = split_row(&chars).expect("block line");
             rows.push(make_row(rope, l, RowKind::Body, &chars, &parts));
         }
-        Some(Table { rows, aligns, lead: hp.lead, trail: hp.trail, spaced, delim_spaced, indent: " ".repeat(hp.indent) })
+        let le = line_ending_of(rope, h);
+        Some(Table {
+            rows,
+            aligns,
+            lead: hp.lead,
+            trail: hp.trail,
+            spaced,
+            delim_spaced,
+            indent: " ".repeat(hp.indent),
+            style: Style::Markdown,
+            extent: (h, b),
+            border: None,
+            le: le.to_string(),
+        })
     }
 
     pub fn first_line(&self) -> usize {
-        self.rows[0].line
+        self.extent.0
     }
 
     pub fn last_line(&self) -> usize {
-        self.rows[self.rows.len() - 1].line
+        self.extent.1
+    }
+
+    /// Is the first row a header (shown bold)? Always for Markdown.
+    pub fn has_header(&self) -> bool {
+        self.border.is_none_or(|b| b.header)
+    }
+
+    fn bordered(&self) -> Option<crate::table_border::Border> {
+        self.border.filter(|_| self.style != Style::Markdown)
+    }
+
+    /// Re-render a bordered table from `grid` / `aligns`.
+    fn re_render(&self, rope: &Rope, grid: &[Vec<String>], aligns: &[Align]) -> (Ops, Vec<Vec<usize>>) {
+        self.replace_with(rope, self.style, self.border.expect("bordered"), grid, aligns)
+    }
+
+    /// Grid row of table row `r` (header 0, body rows from 1).
+    fn grid_index(r: usize) -> usize {
+        r.saturating_sub(1)
+    }
+
+    /// The whole table rewritten in another format, as one replacement.
+    /// Converting to Markdown makes the first row the header.
+    pub fn convert(&self, rope: &Rope, to: Style) -> Ops {
+        let grid = self.grid(rope);
+        let border = self.border.unwrap_or(crate::table_border::Border { header: true, header_double: false, row_rules: false });
+        let grid: Vec<Vec<String>> = match (self.style, to) {
+            (Style::Markdown, Style::Markdown) => grid,
+            (Style::Markdown, _) => grid.iter().map(|r| r.iter().map(|v| unescape(v)).collect()).collect(),
+            (_, Style::Markdown) => grid.iter().map(|r| r.iter().map(|v| escape(v)).collect()).collect(),
+            _ => grid,
+        };
+        let border = if self.style == Style::Markdown { crate::table_border::Border { header: true, ..border } } else { border };
+        self.replace_with(rope, to, border, &grid, &self.aligns).0
     }
 
     /// Columns: the most cells in any row.
@@ -313,7 +391,12 @@ impl Table {
     }
 
     pub fn row_of_line(&self, line: usize) -> Option<usize> {
-        line.checked_sub(self.first_line()).filter(|&i| i < self.rows.len())
+        if self.style == Style::Markdown {
+            return line.checked_sub(self.first_line()).filter(|&i| i < self.rows.len());
+        }
+        // Rules aren't rows; the virtual separator never matches (the
+        // header, at the same line, comes first).
+        self.rows.iter().position(|r| r.line == line && !(r.kind == RowKind::Delimiter && r.cells.is_empty()))
     }
 
     /// (row, column) of the cell holding char position `pos`. A position on
@@ -417,6 +500,9 @@ impl Table {
     /// Re-align every row (the Format table command). Rows already in
     /// shape are left alone; short rows gain empty cells.
     pub fn format(&self, rope: &Rope) -> Ops {
+        if self.bordered().is_some() {
+            return self.re_render(rope, &self.grid(rope), &self.aligns).0;
+        }
         let widths = self.inner_widths(rope, None);
         self.rows
             .iter()
@@ -449,6 +535,17 @@ impl Table {
     /// replacements (positions in the old text) and where the new content
     /// starts in the new text.
     pub fn edit_cell(&self, rope: &Rope, r: usize, c: usize, new: &str, realign: bool) -> (Ops, usize) {
+        if self.bordered().is_some() {
+            // A bordered table is always kept lined up.
+            let mut grid = self.grid(rope);
+            let g = Self::grid_index(r);
+            if grid[g].len() <= c {
+                grid[g].resize(c + 1, String::new());
+            }
+            grid[g][c] = new.to_string();
+            let (ops, starts) = self.re_render(rope, &grid, &self.aligns);
+            return (ops, starts[g][c]);
+        }
         let ncols = self.cols();
         let cell = &self.rows[r].cells[c];
         let last_open = c + 1 == ncols && !self.trail;
@@ -488,6 +585,12 @@ impl Table {
     /// Insert an empty row before row `at` (2 ..= rows.len(); body rows
     /// only). `le` is the document's line ending.
     pub fn insert_row(&self, rope: &Rope, at: usize, le: &str) -> Ops {
+        if self.bordered().is_some() {
+            let mut grid = self.grid(rope);
+            let g = Self::grid_index(at.clamp(2, self.rows.len())).clamp(1, grid.len());
+            grid.insert(g, vec![String::new(); self.rows[0].cells.len()]);
+            return self.re_render(rope, &grid, &self.aligns).0;
+        }
         let row = self.empty_row(rope);
         let at = at.clamp(2, self.rows.len());
         if at < self.rows.len() {
@@ -500,6 +603,11 @@ impl Table {
     /// Delete body row `r`, line terminator included.
     pub fn delete_row(&self, rope: &Rope, r: usize) -> Option<Ops> {
         let row = self.rows.get(r).filter(|row| row.kind == RowKind::Body)?;
+        if self.bordered().is_some() {
+            let mut grid = self.grid(rope);
+            grid.remove(Self::grid_index(r));
+            return Some(self.re_render(rope, &grid, &self.aligns).0);
+        }
         let op = if row.line + 1 < rope.len_lines() {
             let next = rope.line_to_char(row.line + 1);
             (row.start, next - row.start, String::new())
@@ -518,6 +626,11 @@ impl Table {
         if a.kind != RowKind::Body || b.kind != RowKind::Body {
             return None;
         }
+        if self.bordered().is_some() {
+            let mut grid = self.grid(rope);
+            grid.swap(Self::grid_index(r), Self::grid_index(t));
+            return Some((self.re_render(rope, &grid, &self.aligns).0, t));
+        }
         let ta = Self::text(rope, &(a.start..a.end));
         let tb = Self::text(rope, &(b.start..b.end));
         Some((vec![(a.start, a.end - a.start, tb), (b.start, b.end - b.start, ta)], t))
@@ -526,6 +639,9 @@ impl Table {
     /// Insert an empty column at index `at` (0 ..= columns) in every row
     /// that reaches it. Other cells keep their exact text.
     pub fn insert_col(&self, at: usize) -> Ops {
+        if self.bordered().is_some() {
+            unreachable!("bordered tables use insert_col_in")
+        }
         let ncols = self.cols() + 1;
         let mut ops = Vec::new();
         for row in &self.rows {
@@ -557,6 +673,9 @@ impl Table {
         if self.rows[0].cells.len() < 2 || c >= self.rows[0].cells.len() {
             return None;
         }
+        if self.bordered().is_some() {
+            unreachable!("bordered tables use delete_col_in")
+        }
         let mut ops = Vec::new();
         for row in &self.rows {
             let n = row.cells.len();
@@ -581,6 +700,18 @@ impl Table {
         if t >= self.rows[0].cells.len() {
             return None;
         }
+        if self.bordered().is_some() {
+            let mut grid = self.grid(rope);
+            for row in &mut grid {
+                if row.len() > c.max(t) {
+                    row.swap(c, t);
+                }
+            }
+            let mut aligns = self.aligns.clone();
+            aligns.resize(self.cols(), Align::None);
+            aligns.swap(c, t);
+            return Some((self.re_render(rope, &grid, &aligns).0, t));
+        }
         let mut ops = Vec::new();
         for row in &self.rows {
             let (Some(a), Some(b)) = (row.cells.get(c), row.cells.get(t)) else { continue };
@@ -595,6 +726,12 @@ impl Table {
     /// Set column `c`'s alignment: the delimiter cell gets the colons, and
     /// if the column lines up its cells are re-padded (same width).
     pub fn set_align(&self, rope: &Rope, c: usize, align: Align) -> Ops {
+        if self.bordered().is_some() {
+            let mut aligns = self.aligns.clone();
+            aligns.resize(self.cols().max(c + 1), Align::None);
+            aligns[c] = align;
+            return self.re_render(rope, &self.grid(rope), &aligns).0;
+        }
         let t = self;
         let ncols = t.cols();
         let (l, r) = t.sides(c, ncols);
@@ -622,6 +759,44 @@ impl Table {
         ops
     }
 
+    /// Insert an empty column at `at`, any table style.
+    pub fn insert_col_in(&self, rope: &Rope, at: usize) -> Ops {
+        if self.bordered().is_none() {
+            return self.insert_col(at);
+        }
+        let mut grid = self.grid(rope);
+        for row in &mut grid {
+            if row.len() >= at {
+                row.insert(at, String::new());
+            }
+        }
+        let mut aligns = self.aligns.clone();
+        aligns.resize(self.cols(), Align::None);
+        aligns.insert(at.min(aligns.len()), Align::None);
+        self.re_render(rope, &grid, &aligns).0
+    }
+
+    /// Delete column `c`, any table style (None for the only column).
+    pub fn delete_col_in(&self, rope: &Rope, c: usize) -> Option<Ops> {
+        if self.bordered().is_none() {
+            return self.delete_col(c);
+        }
+        if self.rows[0].cells.len() < 2 || c >= self.rows[0].cells.len() {
+            return None;
+        }
+        let mut grid = self.grid(rope);
+        for row in &mut grid {
+            if row.len() > c {
+                row.remove(c);
+            }
+        }
+        let mut aligns = self.aligns.clone();
+        if c < aligns.len() {
+            aligns.remove(c);
+        }
+        Some(self.re_render(rope, &grid, &aligns).0)
+    }
+
     /// Cell contents as a grid: the header, then the body rows (the
     /// delimiter row is not data).
     pub fn grid(&self, rope: &Rope) -> Vec<Vec<String>> {
@@ -639,6 +814,11 @@ impl Table {
     /// up before, all rows are re-padded to keep it so. Other rows keep
     /// their exact text.
     pub fn rewrite(&self, rope: &Rope, grid: &[Vec<String>], touched: &[bool], le: &str) -> Ops {
+        if self.bordered().is_some() {
+            let mut aligns = self.aligns.clone();
+            aligns.resize(grid.iter().map(Vec::len).max().unwrap_or(0), Align::None);
+            return self.re_render(rope, grid, &aligns).0;
+        }
         let formatted = self.format(rope).is_empty();
         let old_cols = self.cols();
         let ncols = grid.iter().map(Vec::len).max().unwrap_or(0).max(old_cols);
@@ -695,6 +875,59 @@ impl Table {
         let n = self.rows[0].cells.len().max(1);
         self.row_text(RowKind::Body, &[], &widths[..n.min(widths.len())])
     }
+}
+
+/// The terminator of `line` ("\r\n" or "\n"; "\n" for the last line).
+pub fn line_ending_of(rope: &Rope, line: usize) -> &'static str {
+    let l = rope.line(line);
+    let n = l.len_chars();
+    if n >= 2 && l.char(n - 2) == '\r' && l.char(n - 1) == '\n' { "\r\n" } else { "\n" }
+}
+
+/// A fresh Markdown table for `grid` (first row = header), lined up, with
+/// the common `| a |` / `| --- |` style. Returns the text (no final line
+/// break) and where each cell's content starts, per grid row.
+pub fn render_markdown(indent: &str, le: &str, grid: &[Vec<String>], aligns: &[Align]) -> (String, Vec<Vec<usize>>) {
+    let cols = grid.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let widths: Vec<usize> = (0..cols).map(|c| grid.iter().filter_map(|r| r.get(c)).map(|v| text_width(v)).max().unwrap_or(0).max(3)).collect();
+    let align = |c: usize| aligns.get(c).copied().unwrap_or(Align::None);
+    let mut out = String::new();
+    let mut offset = 0usize;
+    let mut starts = Vec::with_capacity(grid.len());
+    let row_line = |row: &[String], offset: usize, starts: &mut Vec<Vec<usize>>| -> String {
+        let mut line = format!("{indent}|");
+        let mut cs = Vec::with_capacity(cols);
+        for (c, &w) in widths.iter().enumerate() {
+            let v = row.get(c).map_or("", String::as_str);
+            let (pl, pr) = Table::pad_split(v, w, align(c));
+            line.push(' ');
+            line.push_str(&" ".repeat(pl));
+            cs.push(offset + line.chars().count());
+            line.push_str(v);
+            line.push_str(&" ".repeat(pr + 1));
+            line.push('|');
+        }
+        starts.push(cs);
+        line
+    };
+    for (g, row) in grid.iter().enumerate() {
+        let line = row_line(row, offset, &mut starts);
+        offset += line.chars().count() + le.chars().count();
+        out.push_str(&line);
+        if g == 0 {
+            let d: Vec<String> = widths.iter().enumerate().map(|(c, &w)| format!(" {} ", Table::dashes(w, align(c)))).collect();
+            let dl = format!("{le}{indent}|{}|", d.join("|"));
+            offset += dl.chars().count();
+            out.push_str(&dl);
+        }
+        if g + 1 < grid.len() {
+            out.push_str(le);
+        }
+    }
+    if grid.len() == 1 {
+        // (the delimiter was already added after the header)
+    }
+    (out, starts)
 }
 
 /// Several inserts at the same position (new rows appended at the end)

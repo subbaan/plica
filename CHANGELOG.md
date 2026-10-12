@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.3 (2026-10-12): plain-text tables, inserting and converting
+
+The start of Phase 5.
+
+- **Bordered plain-text tables** are now tables too, edited exactly like Markdown ones (Tab, Enter, typing, the table menu, cell selection, copy and paste):
+
+  ```
+  +--------+------+      ┌────────┬──────┐
+  | Device | Type |      │ Device │ Type │
+  +========+======+      ├────────┼──────┤
+  | MPC    | Samp |      │ MPC    │ Samp │
+  +--------+------+      └────────┴──────┘
+  ```
+
+  They always stay lined up, borders included. A `|` inside a cell is plain text. Right- and centre-aligned columns are recognised from their padding and kept. Tables without a header rule, and tables with a rule between every row, keep that shape.
+- **Insert a table:** Alt+T (or F6) outside a table offers a new Markdown, Unicode box or ASCII table. It goes on its own lines, with the caret in the first header cell.
+- **Convert** a table between Markdown, Unicode box and ASCII from the table menu, in one undoable step. Cell text is carried over exactly (Markdown's `\|` escaping is added or removed as needed).
+- The status bar says `Table`, `ASCII table` or `Box table`, and the menu's title names the table's format.
+- Plain text laid out in columns with spaces is still never treated as a table: only tables with complete borders count.
+
 ## 0.4.2 (2026-10-12): Enter in tables
 
 - **Enter in a table** adds a row below and puts the caret in its **first** cell, ready to type the next row (it used to stay in the same column). The table menu's "Insert row below" still keeps the column.

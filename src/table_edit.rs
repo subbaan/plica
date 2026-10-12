@@ -11,7 +11,7 @@
 use crate::app::{App, TableAction};
 use crate::buffer::{EditKind, Selection};
 use crate::keymap::Command;
-use crate::table::{RowKind, Table};
+use crate::table::{RowKind, Style, Table};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::rc::Rc;
 
@@ -76,7 +76,13 @@ impl App {
         for r in (r0..=r1).filter(|&r| r != 1) {
             let row = &t.rows[r];
             let cells: Vec<String> = (c0..=c1)
-                .map(|c| row.cells.get(c).map_or_else(String::new, |cell| crate::table::unescape(&rope.slice(cell.content.clone()).to_string())))
+                .map(|c| {
+                    row.cells.get(c).map_or_else(String::new, |cell| {
+                        let v = rope.slice(cell.content.clone()).to_string();
+                        // Only Markdown escapes pipes.
+                        if t.style == Style::Markdown { crate::table::unescape(&v) } else { v }
+                    })
+                })
                 .collect();
             lines.push(cells.join("\t"));
         }
@@ -113,7 +119,11 @@ impl App {
     /// left corner at the selected cells or the caret's cell. Rows and
     /// columns are added as needed; nothing pasted is dropped.
     fn table_paste_grid(&mut self, t: &Table, text: &str) -> bool {
-        let data = crate::table::parse_paste(text);
+        let mut data = crate::table::parse_paste(text);
+        if t.style != Style::Markdown {
+            // Bordered tables hold cell text as is.
+            data = data.into_iter().map(|r| r.iter().map(|v| crate::table::unescape(v)).collect()).collect();
+        }
         if data.is_empty() {
             return false;
         }
@@ -356,8 +366,11 @@ impl App {
         // Whitespace after the edit point is padding unless text follows it.
         // A pipe that would split the cell is escaped (so typing `|` gives
         // `\|`, and a backslash typed before `\|` can't break the row).
-        let new = crate::table::sanitize(&if right.trim().is_empty() { left_trimmed.to_string() } else { format!("{left_trimmed}{}", right.trim_end()) });
-        let caret_off = crate::table::sanitize(left_trimmed).chars().count().min(new.chars().count());
+        // (Markdown only: bordered tables split by column, so `|` is text.)
+        let md = t.style == Style::Markdown;
+        let safe = |s: &str| if md { crate::table::sanitize(s) } else { s.to_string() };
+        let new = safe(&if right.trim().is_empty() { left_trimmed.to_string() } else { format!("{left_trimmed}{}", right.trim_end()) });
+        let caret_off = safe(left_trimmed).chars().count().min(new.chars().count());
         let (ops, start) = t.edit_cell(rope, r, c, &new, self.table_realign);
         let caret = start + caret_off;
         // Like plain typing: a typed space starts a new undo step.
@@ -455,13 +468,12 @@ impl App {
 
     /// Insert an empty row after row `r` and put the caret in its column `c`.
     fn insert_row_after(&mut self, t: &Table, r: usize, c: usize) {
-        let row = t.empty_row(self.tab.buf.rope());
-        let at = t.rows[r].end;
-        let text = format!("{}{row}", self.tab.doc.line_ending.as_str());
-        self.tab.buf.edit(vec![(at, 0, text)], EditKind::Other, Some(Selection::caret(at)), false);
-        let line = t.rows[r].line + 1;
-        if let Some(nt) = self.tab.table_at(line)
-            && let Some(cell) = nt.rows[r + 1].cells.get(c).or(nt.rows[r + 1].cells.last())
+        let ops = t.insert_row(self.tab.buf.rope(), r + 1, self.tab.doc.line_ending.as_str());
+        let caret = self.tab.buf.sel;
+        self.tab.buf.edit(ops, EditKind::Other, Some(caret), false);
+        if let Some(nt) = self.tab.table_at(t.first_line())
+            && let Some(row) = nt.rows.get(r + 1)
+            && let Some(cell) = row.cells.get(c).or(row.cells.last())
         {
             self.tab.buf.sel = Selection::caret(cell.content.start);
         }
@@ -473,6 +485,8 @@ impl App {
     /// step, then put the caret in the cell it concerns.
     pub fn table_action(&mut self, a: TableAction) {
         match a {
+            TableAction::New(style) => return self.insert_table(style),
+            TableAction::Convert(style) => return self.convert_table(style),
             TableAction::Format => return self.format_table(),
             TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll => return self.select_cells(a),
             _ => {}
@@ -487,7 +501,7 @@ impl App {
         let body_r = r.max(2);
         // (ops, target cell, message when refused)
         let (ops, target, refused): (Option<crate::table::Ops>, (usize, usize), &str) = match a {
-            TableAction::Format | TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll => unreachable!(),
+            TableAction::Format | TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll | TableAction::New(_) | TableAction::Convert(_) => unreachable!(),
             TableAction::RowAbove => (Some(t.insert_row(rope, body_r, le)), (body_r, c), ""),
             TableAction::RowBelow => (Some(t.insert_row(rope, r.max(1) + 1, le)), (r.max(1) + 1, c), ""),
             TableAction::DeleteRow => (t.delete_row(rope, r), (r.min(t.rows.len().saturating_sub(2)).max(2), c), "Only body rows can be deleted (not the header or the --- row)"),
@@ -495,9 +509,9 @@ impl App {
                 Some((ops, to)) => (Some(ops), (to, c), ""),
                 None => (None, (r, c), "Can't move this row further"),
             },
-            TableAction::ColLeft => (Some(t.insert_col(c)), (r, c), ""),
-            TableAction::ColRight => (Some(t.insert_col(c + 1)), (r, c + 1), ""),
-            TableAction::DeleteCol => (t.delete_col(c), (r, c.saturating_sub(usize::from(c + 1 >= t.rows[0].cells.len()))), "A table needs at least one column"),
+            TableAction::ColLeft => (Some(t.insert_col_in(rope, c)), (r, c), ""),
+            TableAction::ColRight => (Some(t.insert_col_in(rope, c + 1)), (r, c + 1), ""),
+            TableAction::DeleteCol => (t.delete_col_in(rope, c), (r, c.saturating_sub(usize::from(c + 1 >= t.rows[0].cells.len()))), "A table needs at least one column"),
             TableAction::MoveColLeft | TableAction::MoveColRight => match t.move_col(rope, c, a == TableAction::MoveColLeft) {
                 Some((ops, to)) => (Some(ops), (r, to), ""),
                 None => (None, (r, c), "Can't move this column further"),
@@ -522,6 +536,58 @@ impl App {
             self.tab.buf.sel = Selection::caret(cell.content.start);
         }
         self.tab.follow_caret = true;
+    }
+
+    /// Rewrite the table under the caret in another format (one undo step).
+    pub fn convert_table(&mut self, to: Style) {
+        let Some(t) = self.caret_table() else { return };
+        if t.style == to {
+            return;
+        }
+        let rope = self.tab.buf.rope();
+        let spot = t.cell_at(rope, self.tab.buf.sel.head).filter(|(r, _)| t.rows[*r].kind != RowKind::Delimiter);
+        let ops = t.convert(rope, to);
+        let caret = self.tab.buf.sel;
+        self.tab.buf.edit(ops, EditKind::Other, Some(Selection::caret(caret.head.min(rope.len_chars()))), false);
+        self.tab.buf.break_undo_group();
+        if let Some(nt) = self.tab.table_at(t.first_line()) {
+            let (r, c) = spot.unwrap_or((0, 0));
+            self.select_cell_in(&nt, r, c);
+            self.tab.buf.sel = Selection::caret(self.tab.buf.sel.start());
+        }
+        let note = if t.style != Style::Markdown && to == Style::Markdown && !t.has_header() { " (its first row is now the header)" } else { "" };
+        self.info(format!("Converted to a {} table{note} (Ctrl+Z undoes)", to.label()));
+        self.tab.follow_caret = true;
+    }
+
+    /// Insert a new empty 3×2 table (header + one row) at the caret, on its
+    /// own lines, with the caret in the first header cell.
+    pub fn insert_table(&mut self, style: Style) {
+        let le = self.tab.doc.line_ending.as_str().to_string();
+        let grid = vec![vec![String::new(); 3]; 2];
+        let aligns = [crate::table::Align::None; 3];
+        let border = crate::table_border::Border { header: true, header_double: false, row_rules: false };
+        let (text, starts) = match style {
+            Style::Markdown => crate::table::render_markdown("", &le, &grid, &aligns),
+            _ => crate::table_border::render(style, border, "", &le, &grid, &aligns),
+        };
+        let buf = &self.tab.buf;
+        let line = buf.line_of(buf.sel.head);
+        let (ls, le_pos) = (buf.line_start(line), buf.line_end(line));
+        let blank = buf.rope().slice(ls..le_pos).chars().all(char::is_whitespace);
+        // On a blank line, there; otherwise after the line, with a blank
+        // line between (a Markdown table can't follow a paragraph line).
+        let (at, del, prefix, suffix) = if blank {
+            let next_blank = line + 1 >= buf.len_lines() || buf.line_end(line + 1) == buf.line_start(line + 1);
+            (ls, le_pos - ls, String::new(), if next_blank { String::new() } else { le.clone() })
+        } else {
+            (le_pos, 0, format!("{le}{le}"), String::new())
+        };
+        let first = starts[0][0] + at + prefix.chars().count();
+        self.tab.buf.edit(vec![(at, del, format!("{prefix}{text}{suffix}"))], EditKind::Other, Some(Selection::caret(first)), false);
+        self.tab.buf.break_undo_group();
+        self.tab.follow_caret = true;
+        self.info(format!("New {} table: type a header, Tab to the next cell, Enter for a new row", style.label()));
     }
 
     /// Format table: line up every row of the table under the caret, as one
@@ -682,7 +748,7 @@ mod tests {
         a.rendered_rows = a.visible_rows(12);
         let (x, y) = (a.regions.text.x + 3, a.regions.text.y + 4);
         a.handle_event(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: x, row: y, modifiers: KeyModifiers::NONE }));
-        assert!(a.picker.as_ref().is_some_and(|p| p.title == "Table"));
+        assert!(a.picker.as_ref().is_some_and(|p| p.title == "Markdown table"));
         assert_eq!(a.tab.buf.line_of(a.tab.buf.sel.head), 4);
     }
 
@@ -762,6 +828,57 @@ mod tests {
     }
 
     #[test]
+    fn insert_and_convert_tables() {
+        use crate::app::TableAction as A;
+        use crate::table::Style;
+        let mut a = app_with("Some prose.\n", 60, 12);
+        key(&mut a, KeyCode::Char('t'), KeyModifiers::ALT);
+        assert_eq!(a.picker.as_ref().map(|p| p.title.as_str()), Some("Insert table"), "Alt+T outside a table offers new tables");
+        a.picker = None;
+        a.table_action(A::New(Style::Unicode));
+        let cells = |a: &mut crate::app::App, vals: &[&str]| {
+            for (i, v) in vals.iter().enumerate() {
+                if i > 0 {
+                    key(a, KeyCode::Tab, KeyModifiers::NONE);
+                }
+                type_str(a, v);
+            }
+        };
+        cells(&mut a, &["Name", "Qty", "Note"]);
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        cells(&mut a, &["Pads", "16"]);
+        let unicode = "Some prose.\n\n┌──────┬─────┬──────┐\n│ Name │ Qty │ Note │\n├──────┼─────┼──────┤\n│ Pads │ 16  │      │\n└──────┴─────┴──────┘\n";
+        assert_eq!(text(&a), unicode, "{}", text(&a));
+        // Through every format and back: the data survives.
+        a.table_action(A::Convert(Style::Ascii));
+        assert!(text(&a).contains("| Pads | 16  |      |\n+------+-----+------+"), "{}", text(&a));
+        a.table_action(A::Convert(Style::Markdown));
+        assert!(text(&a).contains("| Name | Qty | Note |\n| ---- | --- | ---- |\n"), "{}", text(&a));
+        a.table_action(A::Convert(Style::Unicode));
+        assert_eq!(text(&a), unicode);
+        for _ in 0..2 {
+            key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        }
+        assert!(text(&a).contains("+------+"), "each conversion is one undo step: {}", text(&a));
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(text(&a), unicode);
+    }
+
+    #[test]
+    fn pipes_are_plain_text_in_bordered_tables() {
+        let src = "+---+---+\n| a | b |\n+---+---+\n";
+        let mut a = app_with(src, 60, 12);
+        a.clipboard = crate::clipboard::Clipboard::internal_only();
+        caret_at(&mut a, "b |");
+        a.tab.buf.sel = crate::buffer::Selection::caret(a.tab.buf.sel.head + 1);
+        type_str(&mut a, "|c");
+        assert_eq!(text(&a), "+---+-----+\n| a | b|c |\n+---+-----+\n");
+        a.table_action(crate::app::TableAction::SelectAll);
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.clipboard.paste(), "a\tb|c\n");
+    }
+
+    #[test]
     fn typed_spaces_inside_a_cell_are_kept() {
         let mut a = app_with(T, 60, 12);
         caret_at(&mut a, "Samp");
@@ -800,7 +917,18 @@ mod tests {
             let le = if crlf { "\r\n" } else { "\n" };
             let before = format!("Intro | with a pipe{le}{le}");
             let after = format!("{le}After.{le}{le}| other | table |{le}|---|---|{le}| 1 | 2 |{le}");
-            let doc = format!("{before}{}{after}", lines.join(le));
+            // A third of the rounds use bordered tables.
+            let table_text = match round % 3 {
+                0 => lines.join(le),
+                k => {
+                    let grid: Vec<Vec<String>> = (0..=rows).map(|_| (0..cols).map(|_| words[rnd(words.len())].to_string()).collect()).collect();
+                    let border = crate::table_border::Border { header: rnd(3) > 0, header_double: rnd(2) == 0, row_rules: rnd(4) == 0 };
+                    let aligns: Vec<Align> = (0..cols).map(|_| [Align::None, Align::Right, Align::Center][rnd(3)]).collect();
+                    let style = if k == 1 { crate::table::Style::Ascii } else { crate::table::Style::Unicode };
+                    crate::table_border::render(style, border, "", le, &grid, &aligns).0
+                }
+            };
+            let doc = format!("{before}{table_text}{after}");
             let mut a = app_with(&doc, 40, 12);
             a.tab.doc.line_ending = if crlf { crate::document::LineEnding::CrLf } else { crate::document::LineEnding::Lf };
             if round % 3 == 0 {
@@ -811,10 +939,13 @@ mod tests {
                 let start_line = 2;
                 let t = a.tab.table_at(start_line).unwrap_or_else(|| panic!("table lost (round {round} step {step}):\n{}", text(&a)));
                 let rope = a.tab.buf.rope().clone();
-                let prefix: String = rope.slice(..t.rows[0].start).into();
-                let suffix: String = rope.slice(t.rows[t.rows.len() - 1].end..).into();
+                let (es, ee) = t.extent_chars(&rope);
+                let prefix: String = rope.slice(..es).into();
+                let suffix: String = rope.slice(ee..).into();
+                // Cell text as data (Markdown escapes pipes, bordered doesn't).
                 let contents = |t: &Table, rope: &ropey::Rope| -> Vec<String> {
-                    let mut v: Vec<String> = t.grid(rope).into_iter().flatten().filter(|s| !s.is_empty()).collect();
+                    let md = t.style == crate::table::Style::Markdown;
+                    let mut v: Vec<String> = t.grid(rope).into_iter().flatten().filter(|s| !s.is_empty()).map(|s| if md { crate::table::unescape(&s) } else { s }).collect();
                     v.sort();
                     v
                 };
@@ -829,8 +960,8 @@ mod tests {
                 let pre = text(&a);
                 let old_content: String = rope.slice(t.rows[r].cells[c].content.clone()).into();
                 let word = words[rnd(words.len())];
-                let op = rnd(14);
-                let reflow_only = matches!(op, 0 | 7 | 8 | 9);
+                let op = rnd(15);
+                let reflow_only = matches!(op, 0 | 7 | 8 | 9 | 14);
                 match op {
                     0 => a.format_table(),
                     1 => type_str(&mut a, word),
@@ -848,6 +979,7 @@ mod tests {
                         key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
                     }
                     12 => type_str(&mut a, "|"),
+                    14 => a.table_action(A::Convert([crate::table::Style::Markdown, crate::table::Style::Ascii, crate::table::Style::Unicode][rnd(3)])),
                     _ => key(&mut a, KeyCode::Delete, KeyModifiers::NONE),
                 }
                 let post = text(&a);
@@ -871,7 +1003,8 @@ mod tests {
                     // Pasted data reads back exactly.
                     10 => {
                         let got: String = a.tab.buf.rope().slice(nt.rows[r].cells[c].content.clone()).into();
-                        assert_eq!(crate::table::unescape(&got), word, "pasted value: {ctx}");
+                        let data = if nt.style == crate::table::Style::Markdown { crate::table::unescape(&got) } else { got };
+                        assert_eq!(data, word, "pasted value: {ctx}");
                     }
                     _ => {}
                 }

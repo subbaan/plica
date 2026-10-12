@@ -150,6 +150,8 @@ pub enum TableAction {
     SelectRow,
     SelectCol,
     SelectAll,
+    Convert(crate::table::Style),
+    New(crate::table::Style),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1546,10 +1548,18 @@ impl App {
 
     /// The table menu (its actions also have their own commands).
     pub fn table_menu(&mut self) {
-        if self.caret_table().is_none() {
-            self.warn("Put the caret in a Markdown table first (a header row, then a row like |---|---|)");
+        use crate::table::Style;
+        let Some(cur) = self.caret_table() else {
+            // Not in a table: offer to insert one.
+            let item = |label: &str, detail: &str, style| picker::Item { label: label.to_string(), detail: detail.to_string(), current: false, value: PickChoice::Table(TableAction::New(style)) };
+            let items = vec![
+                item("New Markdown table", "| a | b |", Style::Markdown),
+                item("New Unicode box table", "┌───┬───┐", Style::Unicode),
+                item("New ASCII table", "+---+---+", Style::Ascii),
+            ];
+            self.picker = Some(Picker::new("Insert table", items));
             return;
-        }
+        };
         let item = |label: &str, cmd: Option<Command>, value| picker::Item {
             label: label.to_string(),
             detail: cmd.map(|c| self.keymap.label(c)).filter(|l| l != "unbound").unwrap_or_default(),
@@ -1577,7 +1587,18 @@ impl App {
             item("Select column", None, TableAction::SelectCol),
             item("Select table (Ctrl+C copies as tab-separated)", None, TableAction::SelectAll),
         ];
-        self.picker = Some(Picker::new("Table", items));
+        let mut items = items;
+        for style in [Style::Markdown, Style::Unicode, Style::Ascii] {
+            if style != cur.style {
+                items.push(picker::Item {
+                    label: format!("Convert to {} table", style.label()),
+                    detail: String::new(),
+                    current: false,
+                    value: PickChoice::Table(TableAction::Convert(style)),
+                });
+            }
+        }
+        self.picker = Some(Picker::new(format!("{} table", cur.style.label()), items));
     }
 
     /// Read the active file again, decoded as `e` (one undoable step).

@@ -150,9 +150,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     for row in &rows {
         if let std::collections::hash_map::Entry::Vacant(e) = table_lines.entry(row.line)
             && let Some(tb) = app.tab.table_at(row.line)
-            && let Some(r) = tb.row_of_line(row.line)
         {
-            e.insert((tb.rows[r].kind, tb.pipes(r)));
+            match tb.row_of_line(row.line) {
+                // A header row is bold only if the table has a header.
+                Some(0) if !tb.has_header() => e.insert((crate::table::RowKind::Body, tb.pipes(0))),
+                Some(r) if tb.rows[r].kind != crate::table::RowKind::Delimiter => e.insert((tb.rows[r].kind, tb.pipes(r))),
+                // Rules (and the Markdown --- row) in the border colour.
+                _ => e.insert((crate::table::RowKind::Delimiter, Vec::new())),
+            };
         }
     }
     let table_style = |line: usize, pos: usize| -> Option<Style> {
@@ -634,8 +639,13 @@ fn status_right(app: &App, compact: bool) -> String {
     } else if !app.tab.buf.sel.is_empty() {
         parts.push(format!("Sel {}", app.tab.buf.sel.end() - app.tab.buf.sel.start()));
     }
-    if app.caret_table().is_some() {
-        parts.push(if app.table_keys_live().is_some() { "Table".into() } else { "Table (keys off)".into() });
+    if let Some(tb) = app.caret_table() {
+        let kind = match tb.style {
+            crate::table::Style::Markdown => "Table",
+            crate::table::Style::Ascii => "ASCII table",
+            crate::table::Style::Unicode => "Box table",
+        };
+        parts.push(if app.table_keys_live().is_some() { kind.into() } else { format!("{kind} (keys off)") });
     }
     parts.push(encoding_label(&app.tab.doc));
     let le = app.tab.doc.line_ending.label();

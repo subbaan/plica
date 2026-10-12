@@ -27,7 +27,8 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
         ├─ picker.rs ── filterable list popup (encoding and table menus)
         ├─ table.rs ─── Markdown table recognition, TableModel with source spans, format/edit ops
-        ├─ table_edit.rs ─ App: typing in cells, Tab/Enter navigation, Format table
+        ├─ table_border.rs ─ bordered ASCII/Unicode tables: recognition, rendering, minimal replace
+        ├─ table_edit.rs ─ App: typing in cells, Tab/Enter navigation, menu actions, insert/convert
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
         ├─ config.rs ── config.toml loading/validation, defaults text
@@ -56,6 +57,14 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.4.3
+
+- **Plain-text table grammar (plan §14 open question): bordered only.** ASCII `+---+` / `|` and Unicode box tables ship. Border-less, space-aligned tables don't, because they can't be told apart from prose laid out in columns, which the Phase 5 gate forbids misreading. A bordered table must be complete: top and bottom rules, and every bar and joint at the top rule's joint columns (by display width). A broken one is plain text.
+- **Column boundaries come from positions, not separators.** A `|` inside an ASCII cell is just text, so bordered tables need no escaping. Cell text copies and pastes as is, and conversion to or from Markdown adds or removes `\|`.
+- **One model, two writers.** A bordered table presents the same shape as a Markdown one: `[header, separator, body…]`. The separator is the header rule, or a *virtual* empty row at the header's line when there is none. The outer rules and any rules between rows belong to `Table::extent` but aren't rows, so `first_line`/`last_line` come from the extent. All App code (navigation, cell selection, paste, the fuzz test) works unchanged. Markdown keeps its minimal per-cell edits. A bordered table is re-rendered from its cell grid on every edit (it must stay lined up), and `minimal_op` writes back only the changed middle of the text.
+- **Alignment is read from padding** in bordered tables, which have no syntax for it. A column is right- or centre-aligned when every padded cell agrees and at least one shows it, otherwise left. Rendering pads accordingly, so it survives edits and conversion.
+- **New tables** are rendered by the same writers (`render_markdown`, `table_border::render`). On a non-blank line the new table goes after that line, with a blank line between, because a Markdown table directly under a paragraph line isn't one.
 
 ### 2026-10-12 · 0.4.2
 
