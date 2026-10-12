@@ -446,9 +446,10 @@ impl App {
 
     fn table_new_row(&mut self, t: &Table) -> bool {
         let rope = self.tab.buf.rope();
-        let Some((r, c)) = t.cell_at(rope, self.tab.buf.sel.head) else { return false };
-        // Rows go below the delimiter at the earliest.
-        self.insert_row_after(t, r.max(1), c);
+        let Some((r, _)) = t.cell_at(rope, self.tab.buf.sel.head) else { return false };
+        // Rows go below the delimiter at the earliest; typing continues in
+        // the new row's first cell, like Tab at the end of a row.
+        self.insert_row_after(t, r.max(1), 0);
         true
     }
 
@@ -618,7 +619,7 @@ mod tests {
         caret_at(&mut a, "Type");
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         type_str(&mut a, "x");
-        assert!(text(&a).contains("| ---- |\n|        | x    |\n| MPC"), "{}", text(&a));
+        assert!(text(&a).contains("| ---- |\n| x      |      |\n| MPC"), "first cell of the new row: {}", text(&a));
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
         assert!(text(&a).contains("x\t"), "plain Tab after Esc: {}", text(&a));

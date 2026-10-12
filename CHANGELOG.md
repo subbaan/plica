@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 (2026-10-12): Enter in tables
+
+- **Enter in a table** adds a row below and puts the caret in its **first** cell, ready to type the next row (it used to stay in the same column). The table menu's "Insert row below" still keeps the column.
+
 ## 0.4.1 (2026-10-12): faster find
 
 - **Find is about 5× faster in large files.** Typing a query in a 35 MB file now takes about 270 ms for the whole query instead of about 1.4 s, and uses less memory. Highlighting long lines benefits too.

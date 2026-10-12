@@ -1560,7 +1560,7 @@ impl App {
         let items = vec![
             item("Format table", Some(Command::FormatTable), TableAction::Format),
             item("Insert row above", None, TableAction::RowAbove),
-            item("Insert row below (Enter)", None, TableAction::RowBelow),
+            item("Insert row below", None, TableAction::RowBelow),
             item("Delete row", None, TableAction::DeleteRow),
             item("Move row up (Alt+↑)", None, TableAction::RowUp),
             item("Move row down (Alt+↓)", None, TableAction::RowDown),

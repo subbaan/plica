@@ -57,6 +57,10 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.4.2
+
+- **Enter in a table starts the next row at its first cell** (user feedback: the same column felt wrong after Enter at the end of a row). This matches Tab in the last cell and row-by-row data entry. The menu's "Insert row below" keeps the column, for filling in one column.
+
 ### 2026-10-12 · 0.4.1
 
 - **Find keeps its haystack.** `FindBar` holds the searched text and its lowercased copy (`Hay`), keyed by buffer version and scope. Typing a query then only searches; before, every keystroke copied the rope to a `String` and lowercased all of it. `lower_same_len` has an ASCII fast path (a whole-ASCII string uses `to_ascii_lowercase`; otherwise ASCII chars skip the Unicode tables). Measured with `perf`: the smart-case lowercasing was 85% of find's time. 35 MB "find a late line" (7 keystrokes) went from 1380 ms (1000 ms at 0.3.1; the hot code hadn't changed, the difference was codegen) to 268 ms. The haystack is dropped when the find bar closes. This supersedes the earlier ~140 ms-per-keystroke find limitation.
