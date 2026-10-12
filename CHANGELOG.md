@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4 (2026-10-12): table menus, help and speed
+
+- **Table button** in the title bar (when the window is wide enough): the table menu inside a table, or "insert a table" outside one. It is highlighted while the caret is in a table.
+- **How tables work:** a short guide in both table menus.
+- **Click the `---` under a column** (or a bordered table's header rule) to select that column's cells.
+- **Borders are protected:** in a bordered table, typing on a border line does nothing (Tab or Enter there moves into the next row). Esc still gives plain keys.
+- **Faster large tables:** typing that widens a column of a 50 000-row table takes about 130–190 ms instead of 400+ ms. A long run of pipe lines that isn't a table is checked once instead of once per line.
+
 ## 0.4.3 (2026-10-12): plain-text tables, inserting and converting
 
 The start of Phase 5.

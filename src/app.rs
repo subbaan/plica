@@ -97,6 +97,7 @@ enum DragUnit {
 pub enum Button {
     Prefs,
     Save,
+    Table,
     Wrap,
     Mouse,
     Help,
@@ -152,6 +153,7 @@ pub enum TableAction {
     SelectAll,
     Convert(crate::table::Style),
     New(crate::table::Style),
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1557,6 +1559,8 @@ impl App {
                 item("New Unicode box table", "┌───┬───┐", Style::Unicode),
                 item("New ASCII table", "+---+---+", Style::Ascii),
             ];
+            let mut items = items;
+            items.push(picker::Item { label: "How tables work".into(), detail: String::new(), current: false, value: PickChoice::Table(TableAction::Help) });
             self.picker = Some(Picker::new("Insert table", items));
             return;
         };
@@ -1588,6 +1592,7 @@ impl App {
             item("Select table (Ctrl+C copies as tab-separated)", None, TableAction::SelectAll),
         ];
         let mut items = items;
+        items.push(item("How tables work", None, TableAction::Help));
         for style in [Style::Markdown, Style::Unicode, Style::Ascii] {
             if style != cur.style {
                 items.push(picker::Item {
@@ -1813,6 +1818,9 @@ impl App {
                 }
                 let Some(pos) = self.pos_at_screen(m.column, m.row) else { return };
                 let count = self.click_count(m.column, m.row);
+                if count == 1 && !shift && !alt && !contains(self.regions.gutter, m.column, m.row) && self.click_selects_column(pos) {
+                    return;
+                }
                 if contains(self.regions.gutter, m.column, m.row) {
                     // Gutter: select whole lines; drag extends by lines.
                     let range = self.line_range(pos);
@@ -2044,6 +2052,7 @@ impl App {
                 self.after_save = None;
                 self.save_active(false);
             }
+            Button::Table => self.table_menu(),
             Button::Wrap => self.toggle_wrap(),
             Button::Mouse => self.toggle_mouse(),
             Button::Help => self.show_help = true,

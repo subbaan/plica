@@ -130,9 +130,8 @@ fn split_indent(chars: &[char]) -> (usize, &[char]) {
     (indent, &chars[indent..end])
 }
 
-fn line_kind(rope: &Rope, line: usize, style: Style, indent: usize) -> Option<Line> {
-    let chars = chars_of(rope, line);
-    let (i, t) = split_indent(&chars);
+fn line_kind(chars: &[char], style: Style, indent: usize) -> Option<Line> {
+    let (i, t) = split_indent(chars);
     if i != indent {
         return None;
     }
@@ -142,6 +141,10 @@ fn line_kind(rope: &Rope, line: usize, style: Style, indent: usize) -> Option<Li
 /// Char offsets (in `t`) of the chars at the given display columns, or
 /// None if a column falls inside a wide char or past the end.
 fn at_columns(t: &[char], cols: &[usize]) -> Option<Vec<usize>> {
+    if t.iter().all(|c| c.is_ascii() && !c.is_ascii_control()) {
+        // One column per char.
+        return cols.iter().all(|&c| c < t.len()).then(|| cols.to_vec());
+    }
     let s: String = t.iter().collect();
     let mut out = Vec::with_capacity(cols.len());
     let (mut col, mut idx) = (0usize, 0usize);
@@ -164,25 +167,54 @@ fn at_columns(t: &[char], cols: &[usize]) -> Option<Vec<usize>> {
     (want.next().is_none()).then_some(out)
 }
 
-/// The bordered table containing `line`, if any.
-pub fn at(rope: &Rope, line: usize) -> Option<Table> {
+/// The bordered table containing `line`, or the range of lines around it
+/// known not to hold one (so a failed block isn't re-scanned line by line).
+pub fn scan(rope: &Rope, line: usize) -> Result<Table, (usize, usize)> {
+    let single = Err((line, line));
     let chars = chars_of(rope, line);
     let (indent, t) = split_indent(&chars);
-    let style = family_of(*t.first()?)?;
-    classify(t, style)?;
+    let Some(style) = t.first().and_then(|&c| family_of(c)) else { return single };
+    if classify(t, style).is_none() {
+        return single;
+    }
+    // Each line is read once: `lines[i]` is line `a + i`.
     let n = rope.len_lines();
+    let mut above: Vec<Vec<char>> = Vec::new();
     let mut a = line;
-    while a > 0 && line_kind(rope, a - 1, style, indent).is_some() {
+    while a > 0 {
+        let c = chars_of(rope, a - 1);
+        if line_kind(&c, style, indent).is_none() {
+            break;
+        }
+        above.push(c);
         a -= 1;
     }
+    above.reverse();
+    let mut lines = above;
+    lines.push(chars.clone());
     let mut b = line;
-    while b + 1 < n && line_kind(rope, b + 1, style, indent).is_some() {
+    while b + 1 < n {
+        let c = chars_of(rope, b + 1);
+        if line_kind(&c, style, indent).is_none() {
+            break;
+        }
+        lines.push(c);
         b += 1;
     }
+    let kinds: Vec<Line> = lines.iter().map(|c| line_kind(c, style, indent).expect("block line")).collect();
+    // A failed ASCII block fails for every line in it; a Unicode block only
+    // if it holds a single ┌ … └ pair (else lines may pick other pairs).
+    let tops = kinds.iter().filter(|k| **k == Line::Top).count();
+    let bottoms = kinds.iter().filter(|k| **k == Line::Bottom).count();
+    let miss = if style == Style::Ascii || (tops <= 1 && bottoms <= 1) { (a, b) } else { (line, line) };
+    build(rope, line, style, indent, &lines, &kinds, a, b).ok_or(miss)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build(rope: &Rope, line: usize, style: Style, indent: usize, lines: &[Vec<char>], kinds: &[Line], a: usize, b: usize) -> Option<Table> {
     // The table around `line`: ASCII rules don't say top or bottom, so the
     // whole block must start and end with one; Unicode tables are the
     // nearest ┌ above and └ below.
-    let kinds: Vec<Line> = (a..=b).map(|l| line_kind(rope, l, style, indent).expect("block line")).collect();
     let (top, bottom) = match style {
         Style::Ascii => {
             let rule = |k: Line| matches!(k, Line::AsciiRule { .. });
@@ -208,15 +240,14 @@ pub fn at(rope: &Rope, line: usize) -> Option<Table> {
         return None;
     }
     // Column boundaries from the top rule's joints.
-    let top_chars = chars_of(rope, top);
-    let (_, tt) = split_indent(&top_chars);
+    let (_, tt) = split_indent(&lines[top - a]);
     let mut joints = Vec::new();
     let mut col = 0;
     for (i, ch) in tt.iter().enumerate() {
         if i == 0 || i + 1 == tt.len() || matches!(ch, '+' | '┬') {
             joints.push(col);
         }
-        col += text_width(&ch.to_string());
+        col += if ch.is_ascii() { 1 } else { text_width(&ch.to_string()) };
     }
     if joints.len() < 2 {
         return None;
@@ -226,8 +257,8 @@ pub fn at(rope: &Rope, line: usize) -> Option<Table> {
     let mut rules: Vec<(usize, Line, Vec<Cell>)> = Vec::new();
     for (k, kind) in kinds.iter().enumerate() {
         let l = top + k;
-        let lc = chars_of(rope, l);
-        let (_, t) = split_indent(&lc);
+        let lc = &lines[l - a];
+        let (_, t) = split_indent(lc);
         let offs = at_columns(t, &joints)?;
         if offs.len() != joints.len() || offs[offs.len() - 1] + 1 != t.len() {
             return None;
@@ -274,7 +305,7 @@ pub fn at(rope: &Rope, line: usize) -> Option<Table> {
     let le = crate::table::line_ending_of(rope, top);
     let row = |l: usize, kind: RowKind, cells: Vec<Cell>| {
         let s = rope.line_to_char(l);
-        let len = chars_of(rope, l).len();
+        let len = lines[l - a].len();
         Row { line: l, kind, start: s, end: s + len, cells, lead: true, trail: true }
     };
     let mut rows = Vec::with_capacity(rows_raw.len() + 1);

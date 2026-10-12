@@ -58,6 +58,12 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.4.4
+
+- **Failed table recognition returns the range it rules out.** `Table::scan` gives `Err((a, b))`: the lines around the asked one that can't hold a table in either format. Markdown now scans the whole block for its first header + delimiter pair (not just up to the asked line), so its answer holds for every line of the block. The cache keeps single-line misses in a HashSet and longer ranges in a short list. *Found by profiling:* a 50 000-row ASCII table broken by an edit made every visible line re-scan the whole block twice (bordered, then Markdown), about 1 s per frame.
+- **Bordered rule lines refuse edits** (they are drawn by Plica). Typing there would break the table, and with it the cheap path above.
+- **Width fast paths:** `layout::text_width` returns the byte length for printable ASCII. Bordered parsing reads each line once and maps joint columns directly for ASCII lines. Markdown realign computes only the edited column's width (`inner_width`) and reads widths from rope chunks without copying. Profiled before and after; 50k-row typing that widens a column: Markdown 390 → 190 ms, ASCII 450 → 130 ms.
+
 ### 2026-10-12 · 0.4.3
 
 - **Plain-text table grammar (plan §14 open question): bordered only.** ASCII `+---+` / `|` and Unicode box tables ship. Border-less, space-aligned tables don't, because they can't be told apart from prose laid out in columns, which the Phase 5 gate forbids misreading. A bordered table must be complete: top and bottom rules, and every bar and joint at the top rule's joint columns (by display width). A broken one is plain text.

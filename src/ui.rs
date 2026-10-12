@@ -400,9 +400,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_tab_bar(buf: &mut TermBuf, app: &mut App, title: Rect, surface: Style, accent: Style, p: &Painter) {
     buf.set_style(title, surface);
-    let buttons: [(&str, Button, bool); 5] = [
+    let buttons: [(&str, Button, bool); 6] = [
         (" Prefs ", Button::Prefs, app.prefs.is_some()),
         (" Save ", Button::Save, app.tab.buf.is_dirty()),
+        (" Table ", Button::Table, app.caret_table().is_some()),
         (" Wrap ", Button::Wrap, app.wrap),
         (" Mouse ", Button::Mouse, app.mouse_enabled),
         (" Help F1 ", Button::Help, false),

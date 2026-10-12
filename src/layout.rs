@@ -94,6 +94,10 @@ impl VisualRow {
 /// aligning table cells, whose real column isn't known).
 pub fn text_width(s: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
+    if s.bytes().all(|b| (0x20..0x7f).contains(&b) || b == b'\t') {
+        // Printable ASCII (tabs count 1 here): one cell per byte.
+        return s.len();
+    }
     s.graphemes(true).map(|g| shape(g, 0, 1).1).sum()
 }
 

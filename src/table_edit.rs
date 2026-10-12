@@ -291,6 +291,26 @@ impl App {
                 _ => {}
             }
         }
+        // On a bordered table's rule line, editing keys would break the
+        // border: they do nothing there (Esc still gives plain keys).
+        let on_rule = t.style != Style::Markdown && {
+            let rope = self.tab.buf.rope();
+            let line = rope.char_to_line(self.tab.buf.sel.head);
+            t.row_of_line(line).is_none_or(|r| t.rows[r].kind == RowKind::Delimiter)
+        };
+        if on_rule && !ctrl && !alt && matches!(k.code, KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Delete | KeyCode::Enter | KeyCode::Tab) {
+            if k.code == KeyCode::Tab || k.code == KeyCode::Enter {
+                // Tab/Enter from a rule: go to the next row's first cell.
+                let line = self.tab.buf.line_of(self.tab.buf.sel.head);
+                if let Some(r) = (0..t.rows.len()).find(|&r| t.rows[r].line > line && t.rows[r].kind != RowKind::Delimiter) {
+                    self.select_cell_in(&t, r, 0);
+                    self.tab.follow_caret = true;
+                }
+            } else {
+                self.info("Borders are drawn by Plica: put the caret in a cell (Esc for plain keys)");
+            }
+            return true;
+        }
         let done = match k.code {
             KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right if shift && !ctrl && !alt => self.table_shift_arrow(&t, k.code),
             KeyCode::Esc if sel_empty && !ctrl && !alt => {
@@ -485,6 +505,7 @@ impl App {
     /// step, then put the caret in the cell it concerns.
     pub fn table_action(&mut self, a: TableAction) {
         match a {
+            TableAction::Help => return self.table_help(),
             TableAction::New(style) => return self.insert_table(style),
             TableAction::Convert(style) => return self.convert_table(style),
             TableAction::Format => return self.format_table(),
@@ -501,7 +522,7 @@ impl App {
         let body_r = r.max(2);
         // (ops, target cell, message when refused)
         let (ops, target, refused): (Option<crate::table::Ops>, (usize, usize), &str) = match a {
-            TableAction::Format | TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll | TableAction::New(_) | TableAction::Convert(_) => unreachable!(),
+            TableAction::Format | TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll | TableAction::New(_) | TableAction::Convert(_) | TableAction::Help => unreachable!(),
             TableAction::RowAbove => (Some(t.insert_row(rope, body_r, le)), (body_r, c), ""),
             TableAction::RowBelow => (Some(t.insert_row(rope, r.max(1) + 1, le)), (r.max(1) + 1, c), ""),
             TableAction::DeleteRow => (t.delete_row(rope, r), (r.min(t.rows.len().saturating_sub(2)).max(2), c), "Only body rows can be deleted (not the header or the --- row)"),
@@ -536,6 +557,43 @@ impl App {
             self.tab.buf.sel = Selection::caret(cell.content.start);
         }
         self.tab.follow_caret = true;
+    }
+
+    /// A short guide to tables (from the table menus).
+    pub fn table_help(&mut self) {
+        let menu = self.keymap.label(Command::TableMenu);
+        let lines = vec![
+            "Markdown: a header row, then a |---|---| row.".to_string(),
+            "Plain text: full borders, +---+ or ┌───┐.".into(),
+            String::new(),
+            format!("{menu}, right-click, Table button: insert,"),
+            "rows and columns, align, convert formats.".into(),
+            "Tab / Shift+Tab: next / previous cell; Tab at".into(),
+            "the end and Enter add a row.".into(),
+            "Typing keeps the columns lined up.".into(),
+            "Select cells: drag across them, Shift+arrows at".into(),
+            "a cell's edge, or click the --- under a column.".into(),
+            "Ctrl+C copies cells for a spreadsheet; paste".into(),
+            "spreadsheet cells into a table to fill it.".into(),
+            "Esc: plain keys in this table.".into(),
+        ];
+        self.dialog = Some(crate::dialog::Dialog::new("How tables work", lines, vec![crate::dialog::Button::new("&OK", crate::dialog::Action::Cancel)]));
+    }
+
+    /// A click on the `---` row (or a bordered table's header rule) selects
+    /// the column below it.
+    pub fn click_selects_column(&mut self, pos: usize) -> bool {
+        let line = self.tab.buf.line_of(pos);
+        let Some(t) = self.tab.table_at(line) else { return false };
+        let Some(r) = t.row_of_line(line) else { return false };
+        let row = &t.rows[r];
+        if row.kind != RowKind::Delimiter || row.cells.is_empty() {
+            return false;
+        }
+        let c = row.cells.iter().position(|cell| pos <= cell.span.end).unwrap_or(row.cells.len() - 1);
+        let last_row = t.rows.len() - 1;
+        self.set_cell_sel(&t, (0, c), (last_row, c));
+        true
     }
 
     /// Rewrite the table under the caret in another format (one undo step).
@@ -876,6 +934,35 @@ mod tests {
         a.table_action(crate::app::TableAction::SelectAll);
         key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(a.clipboard.paste(), "a\tb|c\n");
+    }
+
+    #[test]
+    fn bordered_rules_are_protected_and_failed_blocks_cached() {
+        let src = "+---+---+\n| a | b |\n+===+===+\n| 1 | 2 |\n+---+---+\n";
+        let mut a = app_with(src, 60, 12);
+        caret_at(&mut a, "+===");
+        type_str(&mut a, "Q");
+        key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(text(&a), src, "typing on a rule changes nothing");
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(a.tab.buf.selected_text(), "1", "Tab from a rule goes to the next row");
+        // A long run of pipe lines that is no table is found once.
+        let body: String = (0..2000).map(|i| format!("| {i} | x |\n")).collect();
+        let b = app_with(&body, 60, 12);
+        assert!(b.tab.table_at(5).is_none());
+        let rope = b.tab.buf.rope();
+        assert_eq!(crate::table::Table::scan(rope, 1000).err(), Some((0, 1999)));
+    }
+
+    #[test]
+    fn clicking_the_delimiter_selects_a_column_and_help_opens() {
+        let mut a = app_with(T, 60, 12);
+        let pos = a.tab.buf.rope().byte_to_char(text(&a).find("| ---- |").unwrap() + 3);
+        assert!(a.click_selects_column(pos));
+        assert_eq!(a.cell_sel_live().unwrap().1.rect(), (0, 1, 2, 1));
+        assert!(!a.click_selects_column(a.tab.buf.rope().byte_to_char(text(&a).find("MPC").unwrap())), "other rows: normal click");
+        a.table_action(crate::app::TableAction::Help);
+        assert_eq!(a.dialog.as_ref().map(|d| d.title.as_str()), Some("How tables work"));
     }
 
     #[test]

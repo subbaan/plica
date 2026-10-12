@@ -126,17 +126,21 @@ impl Tab {
         if let Some(t) = c.tables.iter().find(|t| (t.first_line()..=t.last_line()).contains(&line)) {
             return Some(t.clone());
         }
-        if c.misses.contains(&line) {
+        if c.miss_lines.contains(&line) || c.miss_ranges.iter().any(|&(a, b)| (a..=b).contains(&line)) {
             return None;
         }
-        match Table::at(self.buf.rope(), line) {
-            Some(t) => {
+        match Table::scan(self.buf.rope(), line) {
+            Ok(t) => {
                 let t = Rc::new(t);
                 c.tables.push(t.clone());
                 Some(t)
             }
-            None => {
-                c.misses.insert(line);
+            Err((a, b)) if a == b => {
+                c.miss_lines.insert(a);
+                None
+            }
+            Err(range) => {
+                c.miss_ranges.push(range);
                 None
             }
         }
@@ -176,5 +180,8 @@ pub fn detect_indent(buf: &Buffer, tab_width: usize) -> String {
 struct TableCache {
     key: (u64, u64),
     tables: Vec<Rc<Table>>,
-    misses: std::collections::HashSet<usize>,
+    /// Lines known to hold no table, and longer ranges of them (a run of
+    /// pipe lines that isn't a table is recorded once, not line by line).
+    miss_lines: std::collections::HashSet<usize>,
+    miss_ranges: Vec<(usize, usize)>,
 }

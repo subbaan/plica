@@ -266,15 +266,31 @@ pub fn in_fence(rope: &Rope, line: usize) -> bool {
 impl Table {
     /// The table containing `line`, if any. Costs O(table size) plus a
     /// fence scan of the text above it.
+    #[cfg(test)]
     pub fn at(rope: &Rope, line: usize) -> Option<Table> {
+        Self::scan(rope, line).ok()
+    }
+
+    /// The table containing `line` (bordered or Markdown), or the range of
+    /// lines around it known to hold none, so a long run of pipe lines that
+    /// isn't a table is scanned once, not once per line.
+    pub fn scan(rope: &Rope, line: usize) -> Result<Table, (usize, usize)> {
         if line >= rope.len_lines() {
-            return None;
+            return Err((line, line));
         }
-        if let Some(t) = crate::table_border::at(rope, line) {
-            return Some(t);
-        }
+        let bordered = match crate::table_border::scan(rope, line) {
+            Ok(t) => return Ok(t),
+            Err(r) => r,
+        };
+        // Not a table here for either format: the lines both agree on.
+        Self::markdown_at(rope, line).map_err(|m| (bordered.0.max(m.0), bordered.1.min(m.1)))
+    }
+
+    fn markdown_at(rope: &Rope, line: usize) -> Result<Table, (usize, usize)> {
         let first = line_chars(rope, line);
-        split_row(&first)?;
+        if split_row(&first).is_none() {
+            return Err((line, line));
+        }
         let mut a = line;
         while a > 0 && split_row(&line_chars(rope, a - 1)).is_some() {
             a -= 1;
@@ -287,7 +303,7 @@ impl Table {
         // pipe lines above it are prose.
         let mut header = None;
         let mut prev = split_row(&line_chars(rope, a)).map(|p| (line_chars(rope, a), p));
-        for k in a + 1..=b.min(line + 1) {
+        for k in a + 1..=b {
             let chars = line_chars(rope, k);
             let parts = split_row(&chars).expect("block line");
             let (pc, pp) = prev.take().expect("previous line");
@@ -300,9 +316,12 @@ impl Table {
             }
             prev = Some((chars, parts));
         }
-        let (h, hc, hp, dc, dp, aligns) = header?;
-        if line < h || in_fence(rope, h) {
-            return None;
+        let Some((h, hc, hp, dc, dp, aligns)) = header else { return Err((a, b)) };
+        if in_fence(rope, h) {
+            return Err((a, b));
+        }
+        if line < h {
+            return Err((a, h - 1));
         }
         let spaced = hp.cells.iter().any(|r| r.end > r.start && hc[r.start] == ' ');
         let delim_spaced = dp.cells.iter().any(|r| r.end > r.start && dc[r.start] == ' ');
@@ -313,7 +332,7 @@ impl Table {
             rows.push(make_row(rope, l, RowKind::Body, &chars, &parts));
         }
         let le = line_ending_of(rope, h);
-        Some(Table {
+        Ok(Table {
             rows,
             aligns,
             lead: hp.lead,
@@ -433,22 +452,22 @@ impl Table {
     /// Widest content per column (at least `min_inner`), optionally with
     /// one cell's content replaced.
     fn inner_widths(&self, rope: &Rope, over: Option<(usize, usize, &str)>) -> Vec<usize> {
-        let ncols = self.cols();
-        (0..ncols)
-            .map(|c| {
-                self.rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, r)| r.kind != RowKind::Delimiter)
-                    .filter_map(|(i, r)| match over {
-                        Some((or, oc, t)) if or == i && oc == c => Some(text_width(t)),
-                        _ => r.cells.get(c).map(|cell| text_width(&Self::text(rope, &cell.content))),
-                    })
-                    .max()
-                    .unwrap_or(0)
-                    .max(self.min_inner(c, ncols))
+        (0..self.cols()).map(|c| self.inner_width(rope, c, over)).collect()
+    }
+
+    /// `inner_widths` for one column.
+    fn inner_width(&self, rope: &Rope, c: usize, over: Option<(usize, usize, &str)>) -> usize {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind != RowKind::Delimiter)
+            .filter_map(|(i, r)| match over {
+                Some((or, oc, t)) if or == i && oc == c => Some(text_width(t)),
+                _ => r.cells.get(c).map(|cell| slice_width(rope, &cell.content)),
             })
-            .collect()
+            .max()
+            .unwrap_or(0)
+            .max(self.min_inner(c, self.cols()))
     }
 
     /// Left and right padding that places `text` in `width` cells.
@@ -520,7 +539,7 @@ impl Table {
         let mut w = None;
         for r in &self.rows {
             if let Some(cell) = r.cells.get(c) {
-                let cw = text_width(&Self::text(rope, &cell.span));
+                let cw = slice_width(rope, &cell.span);
                 if *w.get_or_insert(cw) != cw {
                     return false;
                 }
@@ -557,8 +576,8 @@ impl Table {
         // The column's current inner width, from any other row.
         let other = self.rows.iter().enumerate().find_map(|(i, row)| (i != r).then(|| row.cells.get(c)).flatten()).expect("aligned column");
         let inner_old = text_width(&Self::text(rope, &other.span)).saturating_sub(l + rr);
-        let widest_old = self.inner_widths(rope, None)[c];
-        let needed = self.inner_widths(rope, Some((r, c, new)))[c];
+        let widest_old = self.inner_width(rope, c, None);
+        let needed = self.inner_width(rope, c, Some((r, c, new)));
         let inner = if widest_old < inner_old { needed.max(inner_old) } else { needed };
         let mut ops = Vec::new();
         let mut delta: isize = 0;
@@ -1055,6 +1074,16 @@ pub fn parse_paste(text: &str) -> Vec<Vec<String>> {
             .filter(|cells| !cells.iter().all(|c| delimiter_align(&c.chars().collect::<Vec<_>>()).is_some()))
             .collect(),
         _ => lines.iter().map(|l| l.split('\t').map(escape).collect()).collect(),
+    }
+}
+
+/// `text_width` of a range of the rope, without copying it when it is
+/// plain ASCII in one chunk.
+fn slice_width(rope: &Rope, r: &Range<usize>) -> usize {
+    let sl = rope.slice(r.clone());
+    match sl.as_str() {
+        Some(s) => text_width(s),
+        None => text_width(&sl.to_string()),
     }
 }
 
