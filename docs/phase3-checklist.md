@@ -13,5 +13,6 @@ Run in **Kitty** (and spot-check **XFCE Terminal**):
 5. **Themes and contrast:** Preferences → Appearance: step through the built-in themes and look at the preview strip; turn on High contrast. Try `./plica --theme solarized-light` in a light terminal.
 6. **Text fields:** in Save As and Find, use ←/→, Home/End, Ctrl+Backspace and click to place the cursor.
 7. **Teardown:** after each quit, the terminal behaves normally.
+8. **Encodings (0.3.1):** make a test copy, e.g. `printf 'caf\xe9 cr\xe8me\n' > /tmp/l1.txt`, and open it. It shows "café crème", the status bar says `windows-1252?`. Edit, save, and `xxd /tmp/l1.txt` still shows single-byte `e9`. Type ✓ and save: Plica offers UTF-8 instead. Click the encoding in the status bar (or Alt+E / F7): Reopen with… and Save with… lists filter as you type. Try a real old file of yours, if you have one, on a copy.
 
 Record anything odd in `ARCHITECTURE.md` (log).

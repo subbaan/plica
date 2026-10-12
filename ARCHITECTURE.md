@@ -16,7 +16,8 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ tab.rs ───── Tab = Buffer + Document + indent style + viewport
         ├─ buffer.rs ── ropey Rope, grapheme navigation, Selection, transactions, undo/redo
         ├─ layout.rs ── per-line VisualRow/Glyph layout: wrap, tabs, widths, hit-testing
-        ├─ document.rs ─ load (UTF-8 only), atomic save, line-ending detection, disk stamps
+        ├─ document.rs ─ load/decode, atomic save, line-ending detection, disk stamps
+        ├─ encoding.rs ─ encoding detection, lossless decode/encode, raw-byte placeholders
         ├─ clipboard.rs ─ internal + OSC 52 + wl-copy/xclip/xsel
         ├─ drop.rs ──── recognise file drops delivered as pastes
         ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
@@ -24,6 +25,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ dochl.rs ─── per-document highlight rules (documents.toml)
         ├─ highlight.rs ─ word/phrase groups, colour specs, per-line matching
         ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
+        ├─ picker.rs ── filterable list popup (encoding menus)
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
         ├─ config.rs ── config.toml loading/validation, defaults text
@@ -36,7 +38,7 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 
 ### Core invariants
 
-- **Text is the canonical model.** Highlights and (future) tables are views computed from the rope; on-disk bytes are exactly the rope (plus a remembered BOM).
+- **Text is the canonical model.** Highlights and (future) tables are views computed from the rope; on-disk bytes are the rope encoded in the document's encoding (plus a remembered BOM); `encoding.rs` guarantees that round trip or marks the document inexact.
 - **Three offset spaces, never mixed:** char index into the rope (all internal positions, snapped to grapheme boundaries) · bytes (only in `document.rs` and search) · display cells (only in `layout.rs`/`ui.rs`).
 - **One width function:** layout uses ratatui's `CellWidth`, the same function the renderer uses.
 - **Hit-testing uses what was drawn:** `App::rendered_rows` holds the rows from the last frame.
@@ -52,6 +54,17 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.3.1
+
+- **Encodings: encoding_rs + chardetng.** Both are Mozilla's (Firefox's decoder and detector), pure Rust, MIT/Apache. encoding_rs covers the WHATWG set (UTF-8, UTF-16, ~35 legacy encodings); chardetng guesses legacy encodings well from short text. iconv-style breadth (EBCDIC, CP437, UTF-32) was left out: rare for text files, and each would need its own encoder.
+- **Detection order** (`encoding::detect`): BOM → BOM-less UTF-16 (zero-byte pattern in the first 8 KiB) → valid UTF-8 → NUL bytes = binary, refused → the document's previous encoding (reload) → mostly-valid UTF-8 → the configured fallback or chardetng's guess. *UTF-16 before UTF-8:* ASCII text in UTF-16 is valid UTF-8 (full of NULs), so the UTF-8 check alone takes it.
+- **Valid UTF-8 is never copied:** `detect` takes the `Vec<u8>` and turns it into the `String` in place (the BOM is drained first). Only other encodings go through the decoder and the verification below. The 35 MB perf file is unchanged; a 37 MB Windows-1252 file opens in about 0.8 s.
+- **Every non-UTF-8 decode is verified by re-encoding.** The text is encoded again and compared with the file's bytes. Some decodes don't round-trip: Shift_JIS has duplicate mappings, and GBK's decoder reads GB18030's four-byte forms but its encoder can't write them, so GBK retries as GB18030. A mismatch marks the document `inexact`: it shows ⚠ and saving over the original asks first (Save As doesn't), rather than refusing the file.
+- **Undecodable bytes become placeholder chars** U+10FC00 + byte (Supplementary Private Use Area B), drawn as `\xNN` (layout `Substitute`, 4 cells) and written back as the raw byte. This keeps a UTF-8 file with one stray Latin-1 byte editable and byte-exact. Placeholders count as bytes only when the document was decoded with some (`Encoding::raw`). If a file genuinely contains those code points, the round-trip check fails, so it is caught at load. "Mostly UTF-8" means at least as many valid multi-byte chars as invalid bytes. Latin-1 text almost never forms valid UTF-8 sequences, so it is still guessed as legacy.
+- **Saving never substitutes.** encoding_rs's ordinary `encode` writes HTML numeric references (`&#10003;`) for unmappable chars. Plica uses the `_without_replacement` encoder, which fails with `encoding::Unmappable` (char + byte offset) before anything is written. The app selects that char and offers "Save as UTF-8"; the save chain (close tab / quit) continues after converting. UTF-16 is encoded by hand, because encoding_rs only decodes it.
+- **Reload keeps a chosen legacy encoding for pure-ASCII files** (`Options::prefer`). Otherwise a Windows-1250 document that happens to be ASCII would reload as UTF-8, and newly typed č would silently change the file's encoding. A file that becomes real UTF-8 still reloads as UTF-8.
+- **The picker is generic** (`Picker<T>`, filter by every word in label + detail). It is built for the encoding menus and ready for later lists.
 
 ### 2026-10-12 · 0.3.0
 
@@ -175,7 +188,7 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 - **Invalid palette keeps the last-known-good colours.** A palette must define valid `foreground` and `background`, otherwise it is rejected whole; bad optional values are warnings.
 - **Contrast repair:** roles are nudged toward white/black until they meet WCAG targets (4.5 for text, 2.5 for muted). The user's ThemeWall `color8` (`#505253`) is lifted to `#848686` for muted text.
 - **Atomic save:** temp file in the same directory → fsync → rename → fsync dir; mode and owner copied; new files honour the umask (read from `/proc/self/status` so the process umask is never changed). *Workarounds:* symlinks are resolved so the link survives; files with **hard links are written in place**, because rename would split the link. ACLs/xattrs are not preserved (known limitation).
-- **UTF-8 only:** other encodings are refused at load with the offset of the first bad byte, rather than risk lossy round-trips.
+- **UTF-8 only:** other encodings are refused at load with the offset of the first bad byte, rather than risk lossy round-trips. *(Superseded in 0.3.1: other encodings are decoded with a verified round trip.)*
 - **Line endings are never rewritten.** The rope holds the file's exact text; Enter and paste insert the document's dominant ending. *Problem:* terminals often deliver pasted newlines as CR, so pastes are normalised to the document's ending.
 - **Undo grouping:** typing coalesces until a 1.5 s pause, a whitespace insert, caret movement or save. *Bug found by e2e:* typing over a selection put the first key in its own step; now the replacement and the following keys are one step.
 - **Dirty tracking compares undo-stack identity**, not a revision counter, so undoing back to the saved state clears the ● marker.

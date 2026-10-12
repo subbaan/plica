@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.1 (2026-10-12): text encodings
+
+- **Files in other encodings open and save back unchanged.** Plica detects the encoding when it opens a file and saves in that same encoding, so a Windows-1252, Shift_JIS or UTF-16 file stays one. Supported: UTF-8 (with or without BOM), UTF-16 LE/BE (with or without BOM), and about 35 legacy encodings: Western, Central European, Cyrillic, Greek, Turkish, Hebrew, Arabic, Baltic, Vietnamese, Thai, Japanese, Chinese and Korean.
+- Detection: a byte-order mark decides; otherwise valid UTF-8 is UTF-8, UTF-16 without a BOM is recognised, and anything else is guessed with Firefox's detector (chardetng). The status bar shows the encoding, with `?` after a guess.
+- **Encoding menu:** click the encoding in the status bar, or press **Alt+E** / **F7** (rebindable as `encoding`). **Reopen with…** reads the file again in another encoding when the text looks wrong (undo brings the old text back). **Save with…** writes it in another encoding: UTF-8 with or without BOM, UTF-16, or any legacy one. Both open a list you can filter by typing ("cyr", "japan", "1252") and choose from with the arrows or a click.
+- **No silent damage:**
+  - If you type a character the file's encoding can't store (say ✓ in a Windows-1252 file), saving stops before writing anything, selects that character, and offers to save as UTF-8 instead.
+  - Bytes that aren't valid in the file's encoding (a stray Latin-1 byte in a UTF-8 file, for example) are shown as `\xE9` and written back exactly as they were.
+  - Every non-UTF-8 file is checked when it opens: re-encoding the text must give back the same bytes. If it doesn't, the status bar shows ⚠ and saving over the original asks first (Save As is always allowed).
+  - Binary files and UTF-32 are still refused, with a clear message.
+- `--encoding NAME` opens files in a given encoding instead of detecting it (e.g. `--encoding latin1`, `shift_jis`, `utf-16le`).
+- `[files] fallback_encoding` (also under Preferences → Files & Recovery → Other encodings) uses a fixed encoding instead of guessing for files that aren't UTF-8 or UTF-16.
+- Crash-recovery snapshots remember the document's encoding, so restored work saves the way it was opened.
+
 ## 0.3.0 (2026-10-12): Phase 3, shared colours and highlighting
 
 Completes Phase 3 (text field cursor 0.2.1, highlight groups 0.2.2, document highlights 0.2.3, Highlights in Preferences 0.2.4, themes / high contrast / overrides 0.2.5, and this release). Manual gate checklist: `docs/phase3-checklist.md`.

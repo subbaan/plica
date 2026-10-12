@@ -10,6 +10,8 @@ use crate::config::{IndentMode, ThemeChoice};
 use crate::prefs::{PrefsHit, PrefsState};
 use crate::keymap::{Command, Keymap};
 use crate::lineedit::LineEdit;
+use crate::encoding::{self, Encoding};
+use crate::picker::{self, Picker};
 use crate::tab::{Tab, TabOpts};
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
 use crate::term::{self, Capabilities};
@@ -114,6 +116,19 @@ pub struct Regions {
     pub find_hits: Vec<(Rect, FindHit)>,
     /// The prompt's text field (empty when no prompt is shown).
     pub prompt_field: Rect,
+    /// The encoding name in the status bar (click: encoding menu).
+    pub status_encoding: Rect,
+    /// The picker popup, its filter field and its list rows.
+    pub picker_box: Rect,
+    pub picker_field: Rect,
+    pub picker_list: Rect,
+}
+
+/// What a choice in the picker does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickChoice {
+    Reopen(Encoding),
+    SaveWith(Encoding),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +198,9 @@ pub struct App {
     last_mouse: (u16, u16),
     last_click: Option<(Instant, u16, u16, u8)>,
     pub dialog: Option<Dialog>,
+    pub picker: Option<Picker<PickChoice>>,
+    /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
+    pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     pub recovery: Option<Recovery>,
     pub recovery_enabled: bool,
     pub prefs: Option<PrefsState>,
@@ -236,6 +254,8 @@ impl App {
             last_mouse: (0, 0),
             last_click: None,
             dialog: None,
+            picker: None,
+            fallback_encoding: None,
             recovery: None,
             recovery_enabled: true,
             prefs: None,
@@ -252,7 +272,7 @@ impl App {
     // ---- tabs ----------------------------------------------------------------------
 
     pub fn tab_opts(&self) -> TabOpts {
-        TabOpts { tab_width: self.tab_width, indent: self.indent_mode }
+        TabOpts { tab_width: self.tab_width, indent: self.indent_mode, fallback_encoding: self.fallback_encoding }
     }
 
     pub fn tab_count(&self) -> usize {
@@ -432,6 +452,26 @@ impl App {
                 self.recovery_offer.clear();
                 self.info("Recovered work kept; it will be offered again next time");
             }
+            Action::SaveInexact => {
+                self.tab.doc.inexact = false;
+                if self.save_active(false) == SaveOutcome::Saved {
+                    self.continue_after_save();
+                }
+            }
+            Action::SaveUtf8 => {
+                self.use_utf8();
+                if self.save_active(false) == SaveOutcome::Saved {
+                    self.continue_after_save();
+                }
+            }
+            Action::SaveAsUtf8(path) => {
+                self.use_utf8();
+                if self.save_as_path(path) {
+                    self.continue_after_save();
+                }
+            }
+            Action::EncReopen => self.open_encoding_picker(false),
+            Action::EncSave => self.open_encoding_picker(true),
         }
     }
 
@@ -486,6 +526,9 @@ impl App {
                 self.tab.buf.transact(vec![(0, len, s.text.clone())]);
                 self.tab.buf.sel = Selection::caret(0);
             }
+            if let Some(e) = s.encoding {
+                self.tab.doc.encoding = e;
+            }
             restored += 1;
         }
         if let Some(r) = &self.recovery {
@@ -514,7 +557,7 @@ impl App {
                 let idle = now.duration_since(tab.changed_at) >= SNAPSHOT_IDLE;
                 let overdue = now.duration_since(tab.snap_at) >= SNAPSHOT_MAX_AGE;
                 if stale && (force || idle || overdue) {
-                    r.write(tab.uid, tab.doc.path.as_deref(), &tab.doc.display_name(), tab.buf.rope());
+                    r.write(tab.uid, tab.doc.path.as_deref(), &tab.doc.display_name(), tab.doc.encoding, tab.buf.rope());
                     tab.snap_key = Some(key);
                     tab.snap_at = now;
                 }
@@ -622,7 +665,7 @@ impl App {
             return;
         }
         if !tab.buf.is_dirty() {
-            match tab.reload_from_disk() {
+            match tab.reload_from_disk(None) {
                 Ok(()) => self.info(format!("Reloaded {name} (changed on disk; Ctrl+Z restores)")),
                 Err(e) => self.warn(format!("Could not reload {name}: {e:#}")),
             }
@@ -649,7 +692,7 @@ impl App {
 
     fn reload_active(&mut self) {
         let name = self.tab.doc.display_name();
-        match self.tab.reload_from_disk() {
+        match self.tab.reload_from_disk(None) {
             Ok(()) => self.info(format!("Reloaded {name} (Ctrl+Z restores your version)")),
             Err(e) => self.warn(format!("Could not reload {name}: {e:#}")),
         }
@@ -775,6 +818,15 @@ impl App {
             }
             return;
         }
+        if let Some(p) = &mut self.picker {
+            let page = (self.regions.picker_list.height as usize).max(1);
+            match p.on_key(&k, page) {
+                picker::Outcome::Open => {}
+                picker::Outcome::Cancel => self.picker = None,
+                picker::Outcome::Chosen(c) => self.pick_done(c),
+            }
+            return;
+        }
         if self.show_help {
             self.show_help = false;
             return;
@@ -892,6 +944,7 @@ impl App {
             Command::Help => self.show_help = true,
             Command::Preferences => self.open_prefs(),
             Command::HighlightWord => self.highlight_word(),
+            Command::Encoding => self.encoding_menu(),
         }
         self.tab.follow_caret = true;
     }
@@ -1153,6 +1206,24 @@ impl App {
             self.open_prompt(PromptKind::SaveAs);
             return SaveOutcome::Waiting;
         }
+        if self.tab.doc.inexact {
+            let name = self.tab.doc.display_name();
+            let enc = self.tab.doc.encoding.label();
+            self.dialog = Some(Dialog::new(
+                "Not decoded exactly",
+                vec![
+                    format!("{name} couldn't be read exactly as {enc}."),
+                    "Saving over it would change bytes you haven't edited.".into(),
+                    format!("Save As writes a copy; {} reopens it in another encoding.", self.keymap.label(Command::Encoding)),
+                ],
+                vec![
+                    DButton::new("Save &Anyway", Action::SaveInexact),
+                    DButton::new("Save &As…", Action::SaveAs),
+                    DButton::new("&Cancel", Action::Cancel),
+                ],
+            ));
+            return SaveOutcome::Waiting;
+        }
         if !force && self.tab.doc.changed_on_disk() {
             let name = self.tab.doc.display_name();
             let gone = !self.tab.doc.path.as_ref().is_some_and(|p| p.exists());
@@ -1182,6 +1253,11 @@ impl App {
                 SaveOutcome::Saved
             }
             Err(e) => {
+                if let Some(u) = e.downcast_ref::<encoding::Unmappable>() {
+                    // Keep `after_save`: converting continues the chain.
+                    self.unmappable_dialog(&u.clone(), Action::SaveUtf8);
+                    return SaveOutcome::Waiting;
+                }
                 self.after_save = None;
                 self.warn(format!("Save failed: {e:#}"));
                 SaveOutcome::Failed
@@ -1189,9 +1265,38 @@ impl App {
         }
     }
 
+    /// A char the document's encoding can't store: select it and offer to
+    /// save as UTF-8 instead (`then`).
+    fn unmappable_dialog(&mut self, u: &encoding::Unmappable, then: Action) {
+        let rope = self.tab.buf.rope();
+        let c = rope.byte_to_char(u.offset.min(rope.len_bytes()));
+        let line = rope.char_to_line(c);
+        let col = c - rope.line_to_char(line) + 1;
+        self.tab.buf.sel = Selection { anchor: c, head: self.tab.buf.next_grapheme(c) };
+        self.tab.follow_caret = true;
+        self.dialog = Some(Dialog::new(
+            format!("Can't save in {}", self.tab.doc.encoding.label()),
+            vec![format!("{u} (line {}, column {col}; selected).", line + 1), "Save as UTF-8 instead, or change the text?".into()],
+            vec![DButton::new("Save as &UTF-8", then), DButton::new("&Cancel", Action::Cancel)],
+        ));
+    }
+
+    /// Switch the active document to UTF-8 (keeping any raw-byte placeholders).
+    fn use_utf8(&mut self) {
+        let raw = self.tab.doc.encoding.raw;
+        self.tab.doc.encoding = Encoding { raw, ..Encoding::UTF8 };
+    }
+
     /// Save As from the prompt: confirm before replacing another file.
     fn save_as(&mut self, input: &str) {
         let path = std::path::absolute(expand_tilde(input)).unwrap_or_else(|_| expand_tilde(input));
+        if self.tab.doc.inexact && self.tab.shows(&path) {
+            // Saving over the original: ask as a plain save would.
+            if self.save_active(false) == SaveOutcome::Saved {
+                self.continue_after_save();
+            }
+            return;
+        }
         if path.exists() && !self.tab.shows(&path) {
             let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
             self.dialog = Some(Dialog::new(
@@ -1223,8 +1328,12 @@ impl App {
                 true
             }
             Err(e) => {
-                self.tab.doc.path = old;
+                let path = std::mem::replace(&mut self.tab.doc.path, old);
                 self.tab.doc.stamp = old_stamp;
+                if let (Some(u), Some(path)) = (e.downcast_ref::<encoding::Unmappable>(), path) {
+                    self.unmappable_dialog(&u.clone(), Action::SaveAsUtf8(path));
+                    return false;
+                }
                 self.after_save = None;
                 self.warn(format!("Save failed: {e:#}"));
                 false
@@ -1269,6 +1378,123 @@ impl App {
         }
     }
 
+    /// Tell the user anything unusual about how the active tab was read:
+    /// its encoding was guessed, bytes were kept raw, decoding wasn't exact,
+    /// or line endings are mixed.
+    pub fn announce_open(&mut self) {
+        use crate::encoding::How;
+        let d = &self.tab.doc;
+        let name = d.display_name();
+        let enc = d.encoding.label();
+        let key = self.keymap.label(Command::Encoding);
+        if d.inexact {
+            self.warn(format!("{name} isn't exact as {enc}: saving over it will ask first ({key}: try another encoding)"));
+        } else if d.raw_bytes > 0 {
+            let n = d.raw_bytes;
+            self.warn(format!("{name}: {n} byte{} not valid {enc}, shown as \\xNN and saved unchanged", if n == 1 { " is" } else { "s are" }));
+        } else if d.mixed_line_endings {
+            self.warn("File has mixed line endings; they are preserved as-is");
+        } else {
+            match d.how {
+                How::Guess => self.info(format!("Opened as {enc} (a guess; {key} to change)")),
+                How::Fallback => self.info(format!("Opened as {enc} (fallback encoding; {key} to change)")),
+                How::Utf16Pattern => self.info(format!("Opened as {enc} (no byte-order mark)")),
+                How::Bom | How::Utf8 | How::Chosen | How::Kept => {}
+            }
+        }
+    }
+
+    /// The encoding menu: reopen the file as another encoding, or save it in one.
+    fn encoding_menu(&mut self) {
+        use crate::encoding::How;
+        let d = &self.tab.doc;
+        let mut what = d.encoding.label();
+        match d.how {
+            How::Guess => what.push_str(" (guessed)"),
+            How::Fallback => what.push_str(" (fallback)"),
+            How::Utf16Pattern => what.push_str(" (no byte-order mark)"),
+            _ => {}
+        }
+        if d.inexact {
+            what.push_str(", not decoded exactly");
+        } else if d.raw_bytes > 0 {
+            what.push_str(&format!(", {} raw byte(s)", d.raw_bytes));
+        }
+        let mut lines = vec![format!("{} is {what}.", d.display_name())];
+        let mut buttons = Vec::new();
+        if d.path.as_ref().is_some_and(|p| p.exists()) {
+            lines.push("Reopen with: read the file again in another encoding.".into());
+            buttons.push(DButton::new("&Reopen with…", Action::EncReopen));
+        }
+        lines.push("Save with: write it in another encoding.".into());
+        buttons.push(DButton::new("&Save with…", Action::EncSave));
+        buttons.push(DButton::new("&Cancel", Action::Cancel));
+        self.dialog = Some(Dialog::new("Encoding", lines, buttons));
+    }
+
+    fn open_encoding_picker(&mut self, saving: bool) {
+        let cur = self.tab.doc.encoding;
+        let items = encoding::menu(saving)
+            .into_iter()
+            .map(|(e, detail)| picker::Item {
+                label: e.label(),
+                detail,
+                current: e.enc == cur.enc && (!saving || e.bom == cur.bom),
+                value: if saving { PickChoice::SaveWith(e) } else { PickChoice::Reopen(e) },
+            })
+            .collect();
+        let title = if saving { "Save with encoding" } else { "Reopen with encoding" };
+        self.picker = Some(Picker::new(title, items));
+    }
+
+    fn pick_done(&mut self, c: PickChoice) {
+        self.picker = None;
+        match c {
+            PickChoice::Reopen(e) => self.reopen_as(e),
+            PickChoice::SaveWith(e) => self.save_with(e),
+        }
+    }
+
+    /// Read the active file again, decoded as `e` (one undoable step).
+    fn reopen_as(&mut self, e: Encoding) {
+        let name = self.tab.doc.display_name();
+        let dirty = self.tab.buf.is_dirty();
+        match self.tab.reload_from_disk(Some(e)) {
+            Ok(()) => {
+                let undo = if dirty { " (Ctrl+Z brings back your edits)" } else { "" };
+                self.info(format!("Reopened {name} as {}{undo}", self.tab.doc.encoding.label()));
+                if self.tab.doc.inexact || self.tab.doc.raw_bytes > 0 {
+                    self.announce_open();
+                }
+            }
+            Err(err) => self.warn(format!("Could not reopen {name}: {err:#}")),
+        }
+    }
+
+    /// Save the active document in encoding `e` from now on.
+    fn save_with(&mut self, e: Encoding) {
+        let text = self.tab.buf.rope().to_string();
+        let raw = e.enc == self.tab.doc.encoding.enc && self.tab.doc.encoding.raw;
+        let e = Encoding { raw, ..e };
+        if let Err(u) = e.encode(&text) {
+            self.unmappable_dialog(&u, Action::SaveUtf8);
+            // The dialog's offer is about the target encoding.
+            if let Some(d) = &mut self.dialog {
+                d.title = format!("Can't save in {}", e.label());
+                d.lines[1] = "Change the text, or choose another encoding.".into();
+                d.buttons.retain(|b| b.action == Action::Cancel);
+            }
+            return;
+        }
+        let old = std::mem::replace(&mut self.tab.doc.encoding, e);
+        self.after_save = None;
+        match self.save_active(false) {
+            SaveOutcome::Saved => self.info(format!("Saved {} as {}", self.tab.doc.display_name(), e.label())),
+            SaveOutcome::Failed => self.tab.doc.encoding = old,
+            SaveOutcome::Waiting => {}
+        }
+    }
+
     fn open_path(&mut self, path: &str) {
         self.open_file(&expand_tilde(path));
     }
@@ -1281,14 +1507,12 @@ impl App {
             self.info(format!("{} is already open", self.tab.doc.display_name()));
             return true;
         }
-        match Tab::open(path, self.tab_opts()) {
+        match Tab::open(path, self.tab_opts(), None) {
             Ok((tab, is_new)) => {
                 self.add_tab(tab);
                 let name = self.tab.doc.display_name();
                 self.info(if is_new { format!("New file {name}") } else { format!("Opened {name}") });
-                if self.tab.doc.mixed_line_endings {
-                    self.warn("File has mixed line endings; they are preserved as-is");
-                }
+                self.announce_open();
                 true
             }
             Err(e) => {
@@ -1391,6 +1615,10 @@ impl App {
             p.input.click((m.column - self.regions.prompt_field.x) as usize);
             return;
         }
+        if self.picker.is_some() && self.dialog.is_none() {
+            self.on_picker_mouse(m);
+            return;
+        }
         match m.kind {
             _ if self.dialog.is_some() => {
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind
@@ -1425,6 +1653,10 @@ impl App {
                 }
                 if let Some(b) = self.button_at(m.column, m.row) {
                     self.press_button(b);
+                    return;
+                }
+                if contains(self.regions.status_encoding, m.column, m.row) {
+                    self.encoding_menu();
                     return;
                 }
                 if contains(self.regions.scrollbar, m.column, m.row) {
@@ -1588,6 +1820,28 @@ impl App {
     fn tab_hit_at(&self, x: u16, y: u16) -> Option<TabHit> {
         // Close markers are listed before their tab, so they win.
         self.regions.tab_hits.iter().find(|(r, _)| contains(*r, x, y)).map(|(_, h)| *h)
+    }
+
+    fn on_picker_mouse(&mut self, m: MouseEvent) {
+        let Some(p) = &mut self.picker else { return };
+        let (x, y) = (m.column, m.row);
+        let r = &self.regions;
+        match m.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if contains(r.picker_field, x, y) {
+                    p.filter.click((x - r.picker_field.x) as usize);
+                } else if contains(r.picker_list, x, y) {
+                    if let picker::Outcome::Chosen(c) = p.click((y - r.picker_list.y) as usize) {
+                        self.pick_done(c);
+                    }
+                } else if !contains(r.picker_box, x, y) {
+                    self.picker = None;
+                }
+            }
+            MouseEventKind::ScrollUp => p.wheel(false),
+            MouseEventKind::ScrollDown => p.wheel(true),
+            _ => {}
+        }
     }
 
     fn button_at(&self, x: u16, y: u16) -> Option<Button> {
@@ -1758,7 +2012,7 @@ mod tests {
     fn app_with(text: &str, w: u16, h: u16) -> App {
         let caps = Capabilities { keyboard_enhanced: true, truecolor: true };
         let theme = theme::resolve(&theme::dracula());
-        let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto });
+        let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto, fallback_encoding: None });
         let mut a = App::new(tab, theme, ThemeSource::Builtin(theme::Builtin::Dracula), caps);
         a.clipboard = Clipboard::internal_only();
         a.regions.text = Rect { x: 5, y: 1, width: w, height: h };
@@ -2379,5 +2633,90 @@ mod tests {
         let saved = std::fs::read_to_string(&cfg).unwrap();
         assert!(saved.contains("tab_width = 5") && saved.contains("# Plica configuration"), "{saved}");
         assert!(!cfg.with_extension("toml.bak").exists(), "no backup of a file that didn't exist");
+    }
+
+    #[test]
+    fn legacy_file_saves_back_and_unmappable_offers_utf8() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("latin1.txt");
+        let original = b"Caf\xe9 cr\xe8me br\xfbl\xe9e et d\xe9j\xe0 vu, na\xefve.\n";
+        std::fs::write(&f, original).unwrap();
+        let mut a = app_with("", 40, 10);
+        assert!(a.open_file(&f));
+        assert_eq!(a.tab.doc.encoding.label(), "windows-1252");
+        assert!(a.status.as_ref().unwrap().0.contains("a guess"), "{:?}", a.status);
+        // Typing a char windows-1252 has (é) saves fine, in windows-1252.
+        key(&mut a, KeyCode::End, KeyModifiers::CONTROL);
+        type_str(&mut a, "é");
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(std::fs::read(&f).unwrap(), [&original[..], b"\xe9"].concat());
+        // ✓ isn't in windows-1252: nothing is written, the char is
+        // selected, and the dialog offers UTF-8.
+        type_str(&mut a, "✓");
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let dlg = a.dialog.as_ref().expect("unmappable dialog");
+        assert!(dlg.title.contains("windows-1252") && dlg.lines[0].contains("line 2"), "{dlg:?}");
+        assert_eq!(a.tab.buf.selected_text(), "✓");
+        assert_eq!(std::fs::read(&f).unwrap(), [&original[..], b"\xe9"].concat());
+        key(&mut a, KeyCode::Char('u'), KeyModifiers::NONE); // Save as UTF-8
+        assert!(a.dialog.is_none());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "Café crème brûlée et déjà vu, naïve.\né✓");
+        assert!(a.tab.doc.encoding.is_utf8() && !a.tab.buf.is_dirty());
+    }
+
+    #[test]
+    fn reopen_and_save_with_another_encoding_via_picker() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("ru.txt");
+        let (koi, _, _) = encoding_rs::KOI8_R.encode("Привет, мир");
+        std::fs::write(&f, &koi).unwrap();
+        let mut a = app_with("", 60, 12);
+        assert!(a.open_file(&f));
+        // Whatever the guess was, reopen explicitly as KOI8-R from the menu.
+        key(&mut a, KeyCode::Char('e'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(a.picker.is_some());
+        type_str(&mut a, "koi8-r");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.picker.is_none());
+        assert_eq!(text(&a), "Привет, мир");
+        assert_eq!(a.tab.doc.encoding.label(), "KOI8-R");
+        // Save with UTF-16 LE (BOM): the file is rewritten.
+        key(&mut a, KeyCode::F(7), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+        type_str(&mut a, "little");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let bytes = std::fs::read(&f).unwrap();
+        assert!(bytes.starts_with(b"\xFF\xFE"), "{bytes:?}");
+        assert_eq!(crate::document::load(&f).unwrap().text, "Привет, мир");
+        assert_eq!(a.tab.doc.encoding.label(), "UTF-16 LE BOM");
+        // Save with an encoding that lacks the text: refused, file unchanged.
+        a.save_with(Encoding::parse("windows-1252").unwrap());
+        assert!(a.dialog.as_ref().unwrap().title.contains("windows-1252"));
+        assert_eq!(std::fs::read(&f).unwrap(), bytes);
+        assert_eq!(a.tab.doc.encoding.label(), "UTF-16 LE BOM");
+    }
+
+    #[test]
+    fn inexact_file_asks_before_saving_over_it() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("bad16.txt");
+        // UTF-16 LE BOM with an unpaired surrogate, then an odd trailing byte.
+        let original = b"\xFF\xFEa\x00\x00\xD8b\x00z";
+        std::fs::write(&f, original).unwrap();
+        let mut a = app_with("", 60, 12);
+        assert!(a.open_file(&f));
+        // Raw placeholders keep it exact, so no warning dialog is needed.
+        assert!(!a.tab.doc.inexact, "{:?}", a.tab.doc.encoding);
+        a.tab.doc.inexact = true; // as if decoding had been lossy
+        type_str(&mut a, "x");
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(a.dialog.as_ref().unwrap().title, "Not decoded exactly");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(std::fs::read(&f).unwrap(), original);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE); // Save Anyway
+        assert!(a.dialog.is_none() && !a.tab.buf.is_dirty());
+        assert_ne!(std::fs::read(&f).unwrap(), original);
     }
 }

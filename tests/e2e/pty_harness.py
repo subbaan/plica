@@ -563,6 +563,74 @@ check("gate: edits to the new link target are followed", t.cell(10, 4).bg.lower(
 t.send("\x11", 0.4)
 if t.p.isalive(): t.send("n", 0.4)
 
+# ---------------------------------------------------------------- session 14: text encodings
+edir = os.path.join(WORK, "enc"); os.makedirs(edir)
+lat = os.path.join(edir, "latin1.txt")
+lat_bytes = "Café crème brûlée, déjà vu et naïveté.\n".encode("cp1252")
+open(lat, "wb").write(lat_bytes)
+t = Term([lat])
+check("enc: windows-1252 file decoded", "Café crème brûlée" in t.text(), t.text())
+check("enc: guess announced", "windows-1252" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x1b[1;5F")  # Ctrl+End
+t.send("é")
+t.send("\x13", 0.4)
+check("enc: saved back in windows-1252", open(lat, "rb").read() == lat_bytes + b"\xe9", open(lat, "rb").read())
+# A char windows-1252 lacks: dialog, nothing written; then save as UTF-8.
+t.send("✓")
+t.send("\x13", 0.4)
+check("enc: unmappable char stops the save", "Can't save in windows-1252" in t.text() and open(lat, "rb").read() == lat_bytes + b"\xe9", t.text())
+t.send("u", 0.4)
+check("enc: converted to UTF-8 on request", open(lat, "rb").read() == (lat_bytes.decode("cp1252") + "é✓").encode(), open(lat, "rb").read())
+# Encoding menu from the status bar (after the message has gone).
+t.pump(5.5)
+y = ROWS - 1
+x = t.col_of(y, "UTF-8")
+t.click(x + 1, y)
+check("enc: status bar opens the encoding menu", "Reopen with" in t.text() and "Save with" in t.text(), t.text())
+t.send("s", 0.3)
+check("enc: picker lists encodings", "Save with encoding" in t.text() and "Filter:" in t.text(), t.text())
+t.send("16 le", 0.3)
+t.send("\r", 0.5)
+data = open(lat, "rb").read()
+check("enc: saved as UTF-16 LE with BOM", data.startswith(b"\xff\xfe") and data[2:].decode("utf-16-le").startswith("Café"), data[:12])
+t.send("\x11", 0.4)
+check("enc: clean quit", not t.p.isalive())
+
+# Stray bytes in UTF-8 are shown as \xNN and survive an edit.
+stray = os.path.join(edir, "stray.txt")
+open(stray, "wb").write("naïve – ".encode() + b"\xe9t\xe9\n")
+t = Term([stray])
+check("enc: stray bytes drawn as \\xNN", "naïve – \\xE9t\\xE9" in t.text(), t.text())
+t.send("\x1b[1;5F"); t.send("ok")
+t.send("\x13", 0.4)
+check("enc: stray bytes written back unchanged", open(stray, "rb").read() == "naïve – ".encode() + b"\xe9t\xe9\nok", open(stray, "rb").read())
+t.send("\x11", 0.4)
+
+# Shift_JIS guessed; --encoding forces; F7 reopen via the picker.
+sj = os.path.join(edir, "sjis.txt")
+open(sj, "wb").write("日本語のテキストファイルです。文字コードの判定テスト。\n".encode("shift_jis"))
+t = Term([sj])
+check("enc: Shift_JIS decoded", "日本語のテキスト" in t.text(), t.text())
+t.send("\x11", 0.4)
+ru = os.path.join(edir, "ru.txt")
+open(ru, "wb").write("Привет, мир\n".encode("koi8_r"))
+t = Term(["--encoding", "koi8-r", ru])
+check("enc: --encoding forces the decoder", "Привет, мир" in t.text(), t.text())
+t.send("\x1b[18~", 0.3)  # F7
+t.send("r", 0.3)
+t.send("1251", 0.3)
+t.send("\r", 0.5)
+check("enc: reopen with another encoding", "Привет" not in t.text() and "windows-1251" in t.line(ROWS - 1), t.text())
+t.send("\x1a", 0.3)  # Ctrl+Z back to the KOI8-R text
+check("enc: reopen is undoable", "Привет, мир" in t.text(), t.text())
+t.send("\x11", 0.4)
+if t.p.isalive(): t.send("n", 0.4)
+
+# Binary files are refused with a clear message.
+binf = os.path.join(edir, "prog.bin"); open(binf, "wb").write(b"\x7fELF\x02\x01\x00\x00\xff\xfe\x80\x81")
+out = pexpect.run(BIN, args=[binf], env=dict(os.environ, XDG_STATE_HOME=os.path.join(WORK, "state"), XDG_CONFIG_HOME=os.path.join(WORK, "config")), timeout=5).decode()
+check("enc: binary file refused", "binary" in out, out)
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

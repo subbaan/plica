@@ -30,6 +30,16 @@ pub enum Action {
     DiscardRecovery,
     /// Keep recovery snapshots for the next start.
     RecoveryLater,
+    /// Save over a file that wasn't decoded exactly, confirmed.
+    SaveInexact,
+    /// Switch the document to UTF-8 and save (its encoding lacks a char).
+    SaveUtf8,
+    /// The same for a Save As to this path.
+    SaveAsUtf8(PathBuf),
+    /// Pick an encoding to read the file again with.
+    EncReopen,
+    /// Pick an encoding to save the file in.
+    EncSave,
 }
 
 #[derive(Debug, Clone)]

@@ -68,6 +68,8 @@ pub struct Config {
     pub high_contrast: bool,
     pub colour_overrides: Vec<(OverrideRole, Colour)>,
     pub recovery: bool,
+    /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
+    pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     pub keymap_overrides: Vec<(Command, Vec<Chord>)>,
     pub highlights: Highlights,
 }
@@ -87,6 +89,7 @@ impl Default for Config {
             high_contrast: false,
             colour_overrides: Vec::new(),
             recovery: true,
+            fallback_encoding: None,
             keymap_overrides: Vec::new(),
             highlights: Highlights::default(),
         }
@@ -206,6 +209,18 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
             }),
             "files" => section(val, "files", &mut w, |k, v, w| match k {
                 "recovery" => known(boolean(v, "files.recovery", w).map(|b| cfg.recovery = b)),
+                "fallback_encoding" => {
+                    match v.as_str().map(str::trim) {
+                        Some("auto") => cfg.fallback_encoding = None,
+                        Some(name) => match crate::encoding::Encoding::parse(name) {
+                            Some(e) if !e.is_utf16() => cfg.fallback_encoding = Some(e.enc),
+                            Some(_) => w.push("`files.fallback_encoding` can't be UTF-16 (it is detected by itself)".into()),
+                            None => w.push(format!("unknown encoding `{name}` in `files.fallback_encoding` (e.g. auto, windows-1252, shift_jis)")),
+                        },
+                        None => w.push("`files.fallback_encoding` should be a name like \"auto\" or \"windows-1252\"".into()),
+                    }
+                    true
+                }
                 _ => false,
             }),
             "highlights" => section(val, "highlights", &mut w, |k, v, w| match k {
@@ -432,6 +447,10 @@ high_contrast = false    # raise text contrast to 7:1 (WCAG AAA)
 
 [files]
 recovery = true          # snapshot unsaved work for crash recovery
+# Encoding for files that aren't valid UTF-8 or UTF-16: "auto" guesses
+# (windows-1252, Shift_JIS, …); or name one, e.g. "windows-1250", "koi8-r".
+# Files are always saved back in the encoding they were read in.
+fallback_encoding = "auto"
 
 [highlights]
 enabled = true           # word and phrase highlighting
@@ -603,5 +622,18 @@ terms = []
         let (cfg, w) = parse("version = 7\n[editor]\nwrap = false\n");
         assert!(!cfg.wrap);
         assert!(w[0].contains("newer"));
+    }
+
+    #[test]
+    fn fallback_encoding() {
+        let (cfg, w) = parse("[files]\nfallback_encoding = \"latin1\"\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(cfg.fallback_encoding.map(|e| e.name()), Some("windows-1252"));
+        assert!(parse("[files]\nfallback_encoding = \"auto\"\n").0.fallback_encoding.is_none());
+        for bad in ["klingon", "utf-16le"] {
+            let (cfg, w) = parse(&format!("[files]\nfallback_encoding = \"{bad}\"\n"));
+            assert!(cfg.fallback_encoding.is_none());
+            assert_eq!(w.len(), 1, "{w:?}");
+        }
     }
 }

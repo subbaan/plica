@@ -1,7 +1,8 @@
 //! File identity, loading and safe saving.
 //!
-//! - Only valid UTF-8 is opened (a UTF-8 BOM is remembered and restored).
-//!   Anything else is refused rather than risk silent corruption.
+//! - Files are decoded from their own encoding and saved back in it
+//!   (`encoding.rs` detects it and guarantees the round trip, or marks the
+//!   document inexact so saving over the original asks first).
 //! - Line endings are never rewritten: the buffer holds the file's exact
 //!   bytes. `LineEnding` only decides what Enter inserts.
 //! - Saves are atomic (temp file in the same directory, fsync, rename, fsync
@@ -14,7 +15,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const BOM: &[u8] = b"\xEF\xBB\xBF";
+use crate::encoding::{self, Encoding, How};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineEnding {
@@ -55,7 +56,14 @@ impl DiskStamp {
 pub struct Document {
     pub path: Option<PathBuf>,
     pub line_ending: LineEnding,
-    pub has_bom: bool,
+    pub encoding: Encoding,
+    /// Decoding wasn't exact: saving over the file would change bytes the
+    /// user never edited, so it asks first.
+    pub inexact: bool,
+    /// How the encoding was chosen at the last load.
+    pub how: How,
+    /// Undecodable bytes kept as placeholders at the last load.
+    pub raw_bytes: usize,
     pub mixed_line_endings: bool,
     pub stamp: Option<DiskStamp>,
 }
@@ -82,54 +90,46 @@ pub fn detect_line_ending(text: &str) -> (LineEnding, bool) {
     (le, crlf > 0 && lf > 0)
 }
 
+#[cfg(test)]
 pub fn load(path: &Path) -> Result<Loaded> {
+    load_with(path, &encoding::Options::default())
+}
+
+pub fn load_with(path: &Path, opts: &encoding::Options) -> Result<Loaded> {
     // Absolute paths keep tab identity and watcher events (always absolute)
     // comparable, whatever the working directory was.
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let path = abs.as_path();
     match fs::metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Loaded {
-                doc: Document {
-                    path: Some(path.to_path_buf()),
-                    line_ending: LineEnding::Lf,
-                    has_bom: false,
-                    mixed_line_endings: false,
-                    stamp: None,
-                },
-                text: String::new(),
-                is_new: true,
-            });
+            let mut doc = Document::untitled();
+            doc.path = Some(path.to_path_buf());
+            if let Some(f) = opts.force {
+                doc.encoding = f;
+            }
+            return Ok(Loaded { doc, text: String::new(), is_new: true });
         }
         Err(e) => return Err(e).with_context(|| format!("cannot open {}", path.display())),
         Ok(m) if m.is_dir() => bail!("{} is a directory", path.display()),
         Ok(m) if !m.is_file() => bail!("{} is not a regular file", path.display()),
         Ok(_) => {}
     }
-    let mut bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
     let meta = fs::metadata(path)?;
-    let has_bom = bytes.starts_with(BOM);
-    if has_bom {
-        bytes.drain(..BOM.len());
-    }
-    let text = match String::from_utf8(bytes) {
-        Ok(t) => t,
-        Err(e) => bail!(
-            "{} is not valid UTF-8 (first bad byte at offset {}); refusing to open it to avoid corrupting it",
-            path.display(),
-            e.utf8_error().valid_up_to() + if has_bom { BOM.len() } else { 0 }
-        ),
-    };
-    let (line_ending, mixed) = detect_line_ending(&text);
+    let d = encoding::detect(bytes, opts).map_err(|e| anyhow::anyhow!("{} {e}; not opening it", path.display()))?;
+    let (line_ending, mixed) = detect_line_ending(&d.text);
     Ok(Loaded {
         doc: Document {
             path: Some(path.to_path_buf()),
             line_ending,
-            has_bom,
+            encoding: d.encoding,
+            inexact: !d.exact,
+            how: d.how,
+            raw_bytes: d.raw,
             mixed_line_endings: mixed,
             stamp: Some(DiskStamp::of(&meta)),
         },
-        text,
+        text: d.text,
         is_new: false,
     })
 }
@@ -139,7 +139,10 @@ impl Document {
         Self {
             path: None,
             line_ending: LineEnding::Lf,
-            has_bom: false,
+            encoding: Encoding::UTF8,
+            inexact: false,
+            how: How::Utf8,
+            raw_bytes: 0,
             mixed_line_endings: false,
             stamp: None,
         }
@@ -163,7 +166,9 @@ impl Document {
         }
     }
 
-    /// Atomically write `text` to the document path.
+    /// Atomically write `text` to the document path, in its encoding. A
+    /// char the encoding can't store fails with `encoding::Unmappable`
+    /// before anything is written.
     pub fn save(&mut self, text: &str) -> Result<()> {
         let path = self.path.clone().context("no file name")?;
         let target = resolve_symlinks(&path)?;
@@ -174,11 +179,7 @@ impl Document {
             bail!("{} is not a regular file; not overwriting", target.display());
         }
 
-        let mut data = Vec::with_capacity(text.len() + 3);
-        if self.has_bom {
-            data.extend_from_slice(BOM);
-        }
-        data.extend_from_slice(text.as_bytes());
+        let data = self.encoding.encode(text)?;
 
         // A rename would split hard links apart; write those in place instead.
         if let Some(m) = &existing
@@ -191,6 +192,7 @@ impl Document {
             atomic_write(&target, &data, existing.as_ref())?;
         }
         self.stamp = fs::metadata(&target).ok().map(|m| DiskStamp::of(&m));
+        self.inexact = false;
         Ok(())
     }
 }
@@ -275,7 +277,7 @@ mod tests {
         fs::write(&p, original).unwrap();
         fs::set_permissions(&p, fs::Permissions::from_mode(0o640)).unwrap();
         let mut l = load(&p).unwrap();
-        assert!(l.doc.has_bom);
+        assert!(l.doc.encoding.bom);
         assert_eq!(l.doc.line_ending, LineEnding::CrLf);
         l.doc.save(&l.text).unwrap();
         assert_eq!(fs::read(&p).unwrap(), original);
@@ -284,12 +286,26 @@ mod tests {
     }
 
     #[test]
-    fn refuses_invalid_utf8() {
+    fn other_encodings_round_trip_and_binary_is_refused() {
         let d = tmpdir();
         let p = d.path().join("latin1.txt");
-        fs::write(&p, b"caf\xe9").unwrap();
-        let err = load(&p).err().unwrap().to_string();
-        assert!(err.contains("not valid UTF-8"), "{err}");
+        let original = b"Caf\xe9 cr\xe8me br\xfbl\xe9e, d\xe9j\xe0 vu.\r\n";
+        fs::write(&p, original).unwrap();
+        let mut l = load(&p).unwrap();
+        assert_eq!(l.doc.encoding.label(), "windows-1252");
+        assert_eq!(l.doc.line_ending, LineEnding::CrLf);
+        assert!(l.text.starts_with("Café crème"));
+        l.doc.save(&l.text).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), original);
+        // A char the encoding lacks fails before anything is written.
+        let err = l.doc.save("✓").unwrap_err();
+        assert!(err.downcast_ref::<encoding::Unmappable>().is_some(), "{err}");
+        assert_eq!(fs::read(&p).unwrap(), original);
+
+        let b = d.path().join("prog");
+        fs::write(&b, b"\x7fELF\x00\x01\xff\xfe\x80").unwrap();
+        let err = load(&b).err().unwrap().to_string();
+        assert!(err.contains("binary"), "{err}");
     }
 
     #[test]

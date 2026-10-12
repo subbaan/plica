@@ -13,10 +13,12 @@
 //! path: /home/me/notes.txt      (empty for Untitled; %-escaped)
 //! name: notes.txt
 //! time: 1760270000              (unix seconds)
+//! encoding: windows-1252        (the document's, for saving after restore)
 //!
 //! ...text...
 //! ```
 
+use crate::encoding::Encoding;
 use ropey::Rope;
 use std::fs;
 use std::io::Write;
@@ -47,6 +49,8 @@ pub struct Snapshot {
     pub name: String,
     pub time: u64,
     pub text: String,
+    /// Missing in snapshots from Plica before 0.3.1.
+    pub encoding: Option<Encoding>,
 }
 
 pub fn default_dir() -> Option<PathBuf> {
@@ -89,13 +93,14 @@ impl Recovery {
         self.dir.join(format!("{}-{tab_uid}.{EXT}", self.session))
     }
 
-    pub fn write(&self, tab_uid: u64, doc_path: Option<&Path>, name: &str, text: &Rope) {
+    pub fn write(&self, tab_uid: u64, doc_path: Option<&Path>, name: &str, encoding: Encoding, text: &Rope) {
         let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let path = doc_path.map(|p| escape(&p.to_string_lossy())).unwrap_or_default();
         let header = format!(
-            "{MAGIC}\npid: {}\npath: {path}\nname: {}\ntime: {time}\n\n",
+            "{MAGIC}\npid: {}\npath: {path}\nname: {}\ntime: {time}\nencoding: {}\n\n",
             std::process::id(),
-            escape(name)
+            escape(name),
+            encoding.config_name()
         );
         let _ = self.tx.send(Job::Write { file: self.file_for(tab_uid), header, text: text.clone() });
     }
@@ -156,7 +161,7 @@ fn parse(file: &Path) -> Option<(u32, Snapshot)> {
     if lines.next()? != MAGIC {
         return None;
     }
-    let (mut pid, mut path, mut name, mut time) = (0u32, String::new(), String::new(), 0u64);
+    let (mut pid, mut path, mut name, mut time, mut encoding) = (0u32, String::new(), String::new(), 0u64, None);
     for l in lines {
         let (k, v) = l.split_once(": ").unwrap_or((l.trim_end_matches(':'), ""));
         match k {
@@ -164,11 +169,12 @@ fn parse(file: &Path) -> Option<(u32, Snapshot)> {
             "path" => path = unescape(v),
             "name" => name = unescape(v),
             "time" => time = v.parse().unwrap_or(0),
+            "encoding" => encoding = Encoding::parse(v),
             _ => {}
         }
     }
     let doc_path = (!path.is_empty()).then(|| PathBuf::from(path));
-    Some((pid, Snapshot { file: file.to_path_buf(), doc_path, name, time, text: text.to_string() }))
+    Some((pid, Snapshot { file: file.to_path_buf(), doc_path, name, time, text: text.to_string(), encoding }))
 }
 
 /// Is a process with this pid alive *and* a Plica (guards against pid reuse)?
@@ -203,7 +209,8 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let r = Recovery::new(d.path().join("rec")).unwrap();
         let text = Rope::from_str("line one\n\nline three, after a blank line\r\n");
-        r.write(7, Some(Path::new("/tmp/odd%name\nx.txt")), "x.txt", &text);
+        let enc = Encoding::parse("shift_jis").unwrap();
+        r.write(7, Some(Path::new("/tmp/odd%name\nx.txt")), "x.txt", enc, &text);
         r.flush();
         let files: Vec<_> = fs::read_dir(d.path().join("rec")).unwrap().map(|e| e.unwrap().path()).collect();
         assert_eq!(files.len(), 1, "no temp file left: {files:?}");
@@ -213,6 +220,7 @@ mod tests {
         assert_eq!(pid, std::process::id());
         assert_eq!(s.text, text.to_string(), "text after the header is exact");
         assert_eq!(s.doc_path.as_deref(), Some(Path::new("/tmp/odd%name\nx.txt")));
+        assert_eq!(s.encoding, Some(enc));
         // Our own snapshots are never orphans; a fresh session sees them
         // only once the writing process is gone (here it is the test binary,
         // whose comm is not "plica", so it counts as gone).
@@ -234,7 +242,7 @@ mod tests {
     fn remove_after_write_is_ordered() {
         let d = tempfile::tempdir().unwrap();
         let r = Recovery::new(d.path().to_path_buf()).unwrap();
-        r.write(1, None, "Untitled", &Rope::from_str("x"));
+        r.write(1, None, "Untitled", Encoding::UTF8, &Rope::from_str("x"));
         r.remove(1);
         r.flush();
         assert_eq!(fs::read_dir(d.path()).unwrap().count(), 0);

@@ -98,6 +98,10 @@ fn shape(g: &str, col: usize, tab_width: usize) -> (Cow<'static, str>, usize, Gl
         let w = tab_width - (col % tab_width);
         return (Cow::Borrowed(" "), w, GlyphKind::Tab);
     }
+    if let Some(b) = crate::encoding::raw_byte(first) {
+        // A byte kept from a file that wasn't valid in its encoding.
+        return (Cow::Owned(format!("\\x{b:02X}")), 4, GlyphKind::Substitute);
+    }
     if first.is_control() && chars.next().is_none() {
         let sym: Cow<'static, str> = match first as u32 {
             0..=0x1f => Cow::Owned(format!("^{}", char::from_u32(first as u32 + 0x40).unwrap_or('?'))),
@@ -252,6 +256,15 @@ mod tests {
         let row = &layout_line(&rope, 0, opts(None))[0];
         let cols: Vec<usize> = row.glyphs.iter().map(|g| g.col).collect();
         assert_eq!(cols, vec![0, 1, 4, 5, 8, 12]);
+    }
+
+    #[test]
+    fn raw_byte_placeholders_show_as_hex() {
+        let rope = Rope::from_str("a\u{10FCE9}b");
+        let row = &layout_line(&rope, 0, LayoutOpts { tab_width: 4, wrap_width: None })[0];
+        assert_eq!(row.glyphs[1].symbol, "\\xE9");
+        assert_eq!(row.glyphs[1].width, 4);
+        assert_eq!(row.glyphs[2].col, 5);
     }
 
     #[test]

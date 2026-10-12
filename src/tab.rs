@@ -2,6 +2,7 @@
 
 use crate::buffer::Buffer;
 use crate::document::{self, Document};
+use crate::encoding::{self, Encoding};
 use crate::config::IndentMode;
 use std::path::Path;
 
@@ -10,6 +11,8 @@ use std::path::Path;
 pub struct TabOpts {
     pub tab_width: usize,
     pub indent: IndentMode,
+    /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
+    pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
 }
 
 pub struct Tab {
@@ -28,6 +31,8 @@ pub struct Tab {
     pub disk_conflict: bool,
     /// Process-unique id (names this tab's recovery snapshot).
     pub uid: u64,
+    /// The configured fallback encoding, for reloads.
+    pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     /// Recovery bookkeeping: buffer key last seen / snapshotted, and when.
     pub seen_key: (u64, u64),
     pub changed_at: std::time::Instant,
@@ -56,6 +61,7 @@ impl Tab {
             follow_caret: true,
             disk_conflict: false,
             uid: NEXT_TAB_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            fallback_encoding: opts.fallback_encoding,
             seen_key,
             changed_at: now,
             snap_key: None,
@@ -67,17 +73,21 @@ impl Tab {
         Self::new(Buffer::new(), Document::untitled(), opts)
     }
 
-    pub fn open(path: &Path, opts: TabOpts) -> anyhow::Result<(Self, bool)> {
-        let l = document::load(path)?;
+    /// Open `path`, decoding it as `force` if given (else detected).
+    pub fn open(path: &Path, opts: TabOpts, force: Option<Encoding>) -> anyhow::Result<(Self, bool)> {
+        let eo = encoding::Options { force, prefer: None, fallback: opts.fallback_encoding };
+        let l = document::load_with(path, &eo)?;
         Ok((Self::new(Buffer::from_str(&l.text), l.doc, opts), l.is_new))
     }
 
     /// Replace the buffer with the file's current contents as one undoable
     /// step (Ctrl+Z brings the previous text back), keeping the caret's line
-    /// and column where possible.
-    pub fn reload_from_disk(&mut self) -> anyhow::Result<()> {
+    /// and column where possible. The current encoding is kept unless the
+    /// bytes say otherwise; `force` decodes with that encoding instead.
+    pub fn reload_from_disk(&mut self, force: Option<Encoding>) -> anyhow::Result<()> {
         let path = self.doc.path.clone().ok_or_else(|| anyhow::anyhow!("no file"))?;
-        let l = document::load(&path)?;
+        let eo = encoding::Options { force, prefer: Some(self.doc.encoding), fallback: self.fallback_encoding };
+        let l = document::load_with(&path, &eo)?;
         let head = self.buf.sel.head;
         let line = self.buf.line_of(head);
         let col = head - self.buf.line_start(line);

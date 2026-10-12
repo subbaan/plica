@@ -5,6 +5,7 @@ mod colours;
 mod config;
 mod dialog;
 mod document;
+mod encoding;
 mod drop;
 mod find;
 mod dochl;
@@ -13,6 +14,7 @@ mod prefs;
 mod prefs_hl;
 mod keymap;
 mod lineedit;
+mod picker;
 mod layout;
 mod recovery;
 mod tab;
@@ -50,6 +52,8 @@ Options:
   --theme NAME         Use a built-in theme: dracula, gruvbox, nord,
                        solarized-dark, solarized-light, or terminal
   --builtin-theme      Same as --theme dracula
+  --encoding NAME      Read the files as NAME (e.g. windows-1252, shift_jis,
+                       utf-16le) instead of detecting their encoding
   --config PATH        Use this config file instead of the default
   --print-config       Print a commented default config and exit
   --check-config       Check the config file, list any problems and exit
@@ -76,10 +80,11 @@ struct Args {
     check_palette: Option<PathBuf>,
     config: Option<PathBuf>,
     check_config: bool,
+    encoding: Option<encoding::Encoding>,
 }
 
 fn parse_args() -> Result<Option<Args>> {
-    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: None, check_palette: None, config: None, check_config: false };
+    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: None, check_palette: None, config: None, check_config: false, encoding: None };
     let mut it = std::env::args_os().skip(1);
     let mut only_files = false;
     while let Some(arg) = it.next() {
@@ -105,6 +110,12 @@ fn parse_args() -> Result<Option<Args>> {
                         Some(c @ (config::ThemeChoice::Builtin(_) | config::ThemeChoice::Terminal)) => a.builtin = Some(c),
                         _ => bail!("unknown theme `{name}` (dracula, gruvbox, nord, solarized-dark, solarized-light, terminal)"),
                     }
+                }
+                "--encoding" => {
+                    let name = it.next().context("--encoding needs a name")?;
+                    let name = name.to_string_lossy();
+                    a.encoding = Some(encoding::Encoding::parse(&name).with_context(|| format!("unknown encoding `{name}`"))?);
+                    continue;
                 }
                 "--builtin-theme" => {
                     a.builtin = Some(config::ThemeChoice::Builtin(theme::Builtin::Dracula));
@@ -219,13 +230,13 @@ fn run() -> Result<()> {
     }
 
     // Load documents before touching the terminal so errors print cleanly.
-    let tab_opts = TabOpts { tab_width: cfg.tab_width, indent: cfg.indent };
+    let tab_opts = TabOpts { tab_width: cfg.tab_width, indent: cfg.indent, fallback_encoding: cfg.fallback_encoding };
     let mut tabs: Vec<Tab> = Vec::new();
     for path in &args.files {
         if tabs.iter().any(|t| t.shows(path)) {
             continue;
         }
-        tabs.push(Tab::open(path, tab_opts)?.0);
+        tabs.push(Tab::open(path, tab_opts, args.encoding)?.0);
     }
     if tabs.is_empty() {
         tabs.push(Tab::untitled(tab_opts));
@@ -265,6 +276,7 @@ fn run() -> Result<()> {
     app.show_whitespace = cfg.show_whitespace;
     app.keymap = cfg.keymap();
     app.primary_selection = cfg.primary_selection;
+    app.fallback_encoding = cfg.fallback_encoding;
     app.highlights = cfg.highlights.clone();
     app.adjust = adjust;
     let (doc_rules, doc_warnings) = dochl::DocRules::load(config_path.as_ref().and_then(|p| p.parent()).map(|d| d.join("documents.toml")));
@@ -307,8 +319,8 @@ fn run() -> Result<()> {
     app.offer_recovery(orphans);
     if let Some(w) = startup_warning.or(override_warning) {
         app.warn(w);
-    } else if app.tab.doc.mixed_line_endings {
-        app.warn("File has mixed line endings; they are preserved as-is");
+    } else {
+        app.announce_open();
     }
 
     // Palette watcher (parent directory, survives atomic replacement).

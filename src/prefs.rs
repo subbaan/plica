@@ -26,6 +26,7 @@ pub struct Settings {
     pub palette: Option<PathBuf>,
     pub high_contrast: bool,
     pub recovery: bool,
+    pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     pub highlights: crate::highlight::Highlights,
 }
 
@@ -43,6 +44,7 @@ impl Settings {
             palette: c.palette.clone(),
             high_contrast: c.high_contrast,
             recovery: c.recovery,
+            fallback_encoding: c.fallback_encoding,
             highlights: c.highlights.clone(),
         }
     }
@@ -61,6 +63,7 @@ pub enum Row {
     Palette,
     HighContrast,
     Recovery,
+    FallbackEncoding,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +105,7 @@ impl Section {
             Section::Editor => &[Row::TabWidth, Row::Wrap, Row::LineNumbers, Row::Whitespace, Row::Indent],
             Section::Interaction => &[Row::Mouse, Row::Primary],
             Section::Appearance => &[Row::Theme, Row::Palette, Row::HighContrast],
-            Section::Files => &[Row::Recovery],
+            Section::Files => &[Row::Recovery, Row::FallbackEncoding],
             _ => &[],
         }
     }
@@ -122,6 +125,7 @@ impl Row {
             Row::Palette => "Palette file",
             Row::HighContrast => "High contrast",
             Row::Recovery => "Crash recovery",
+            Row::FallbackEncoding => "Other encodings",
         }
     }
 
@@ -138,6 +142,7 @@ impl Row {
             Row::Palette => "Enter to edit, Delete to clear (Kitty format)",
             Row::HighContrast => "Text contrast 7:1 instead of 4.5:1",
             Row::Recovery => "Snapshot unsaved work for crash recovery",
+            Row::FallbackEncoding => "Files that aren't UTF-8: auto guesses",
         }
     }
 
@@ -162,6 +167,7 @@ impl Row {
             Row::HighContrast => b(s.high_contrast),
             Row::Palette => s.palette.as_ref().map_or_else(|| "(none)".into(), |p| tilde(p)),
             Row::Recovery => b(s.recovery),
+            Row::FallbackEncoding => format!("‹ {} ›", s.fallback_encoding.map_or("auto", |e| e.name())),
         }
     }
 
@@ -182,6 +188,7 @@ impl Row {
             Row::Theme => s.theme = cycle(&ThemeChoice::all(), s.theme, dir),
             Row::HighContrast => s.high_contrast = !s.high_contrast,
             Row::Recovery => s.recovery = !s.recovery,
+            Row::FallbackEncoding => s.fallback_encoding = cycle(&crate::encoding::fallback_choices(), s.fallback_encoding, dir),
             // Edited through a text prompt instead.
             Row::Palette => {}
         }
@@ -238,6 +245,7 @@ impl App {
             palette: self.palette_setting.clone(),
             high_contrast: self.adjust.high_contrast,
             recovery: self.recovery_enabled,
+            fallback_encoding: self.fallback_encoding,
             highlights: self.highlights.clone(),
         }
     }
@@ -282,6 +290,13 @@ impl App {
         }
         if s.recovery != old.recovery {
             self.set_recovery_enabled(s.recovery);
+        }
+        if s.fallback_encoding != old.fallback_encoding {
+            // Used for files opened (or reloaded) from now on.
+            self.fallback_encoding = s.fallback_encoding;
+            for i in 0..self.tab_count() {
+                self.tab_at_mut(i).fallback_encoding = s.fallback_encoding;
+            }
         }
     }
 
@@ -500,6 +515,8 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
     set("appearance", "theme", s.theme.name().into(), s.theme == d.theme);
     set("appearance", "high_contrast", s.high_contrast.into(), s.high_contrast == d.high_contrast);
     set("files", "recovery", s.recovery.into(), s.recovery == d.recovery);
+    let fallback = s.fallback_encoding.map_or("auto", |e| e.name());
+    set("files", "fallback_encoding", fallback.into(), s.fallback_encoding == d.fallback_encoding);
     if hl_changed {
         set("highlights", "enabled", s.highlights.enabled.into(), s.highlights.enabled == d.highlights.enabled);
         set("highlights", "samples", s.highlights.samples.into(), s.highlights.samples == d.highlights.samples);

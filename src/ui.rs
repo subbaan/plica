@@ -295,7 +295,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             buf.set_stringn(status.x, status.y, format!(" {path}"), left_w, surface.add_modifier(Modifier::DIM));
         }
     }
-    buf.set_stringn(status.right().saturating_sub(rw), status.y, &right, rw as usize, surface);
+    let rx = status.right().saturating_sub(rw);
+    buf.set_stringn(rx, status.y, &right, rw as usize, surface);
+    let enc = format!(" {} ", encoding_label(&app.tab.doc));
+    app.regions.status_encoding = match right.find(&enc) {
+        Some(i) => Rect { x: rx + right[..i].chars().count() as u16, y: status.y, width: enc.chars().count() as u16, height: 1 },
+        None => Rect::default(),
+    };
 
     if app.show_help {
         draw_help(buf, app, area, &p);
@@ -307,6 +313,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         if app.prompt.is_none() {
             caret_pos = None;
         }
+    }
+    if app.picker.is_some() {
+        draw_picker(buf, app, area, &p);
+        if app.dialog.is_none() {
+            caret_pos = Some(Position { x: app.regions.picker_field.x, y: app.regions.picker_field.y });
+            if let Some(pk) = &app.picker {
+                let v = pk.filter.view(app.regions.picker_field.width as usize);
+                caret_pos = Some(Position { x: app.regions.picker_field.x + v.caret, y: app.regions.picker_field.y });
+            }
+        }
+    } else {
+        app.regions.picker_box = Rect::default();
+        app.regions.picker_field = Rect::default();
+        app.regions.picker_list = Rect::default();
     }
     app.regions.dialog_buttons.clear();
     if app.dialog.is_some() {
@@ -522,6 +542,22 @@ fn draw_find_bar(buf: &mut TermBuf, app: &mut App, r: Rect, surface: Style, acce
     caret
 }
 
+/// The status bar's encoding field: "?" marks a guess, "+raw" kept bytes,
+/// "⚠" an inexact decode.
+pub fn encoding_label(d: &crate::document::Document) -> String {
+    let mut s = d.encoding.label();
+    if d.how == crate::encoding::How::Guess {
+        s.push('?');
+    }
+    if d.encoding.raw {
+        s.push_str("+raw");
+    }
+    if d.inexact {
+        s.push_str(" ⚠");
+    }
+    s
+}
+
 fn status_right(app: &App, compact: bool) -> String {
     let head = app.tab.buf.sel.head;
     let line = app.tab.buf.line_of(head);
@@ -540,7 +576,7 @@ fn status_right(app: &App, compact: bool) -> String {
     if !app.tab.buf.sel.is_empty() {
         parts.push(format!("Sel {}", app.tab.buf.sel.end() - app.tab.buf.sel.start()));
     }
-    parts.push(if app.tab.doc.has_bom { "UTF-8 BOM".into() } else { "UTF-8".into() });
+    parts.push(encoding_label(&app.tab.doc));
     let le = app.tab.doc.line_ending.label();
     parts.push(if app.tab.doc.mixed_line_endings { format!("{le}*") } else { le.into() });
     parts.push(match &app.theme_source {
@@ -597,9 +633,11 @@ fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
         (C::ToggleWrap, C::ToggleLineNumbers),
         (C::ToggleWhitespace, C::ToggleMouse),
         (C::ScrollUp, C::ScrollDown),
+        (C::Preferences, C::HighlightWord),
     ] {
         lines.push(pair(a, b));
     }
+    lines.push(format!("{:>17}  {}", km.label(C::Encoding), C::Encoding.describe()));
     lines.extend([
         String::new(),
         "Fixed: Alt+1..9 go to tab · Tab/Shift+Tab indent · Ctrl/Alt+←/→ word · Esc clears selection".into(),
@@ -724,6 +762,54 @@ fn draw_dialog(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
         x += bw + 2;
     }
     app.regions.dialog_buttons = hits;
+}
+
+fn draw_picker(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
+    let t = &app.theme;
+    let Some(pk) = &app.picker else { return };
+    let st = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
+    let border = p.plain_or(p.style(t.accent, t.surface_bg), Modifier::REVERSED);
+    let sel = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::BOLD | Modifier::UNDERLINED);
+    let field = p.plain_or(p.style(t.editor_fg, t.editor_bg), Modifier::UNDERLINED);
+    let dim = st.add_modifier(Modifier::DIM);
+    let visible = pk.visible();
+    let label_w = pk.items.iter().map(|i| i.label.chars().count()).max().unwrap_or(0);
+    let detail_w = pk.items.iter().map(|i| i.detail.chars().count()).max().unwrap_or(0);
+    let w = ((label_w + detail_w + 9).max(44) as u16).min(area.width.saturating_sub(2)).max(10);
+    let h = ((pk.items.len() + 5) as u16).min(area.height.saturating_sub(2)).max(6);
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    let inner = draw_box(buf, r, &pk.title, st, border);
+    if inner.height < 3 {
+        return;
+    }
+    // Filter field on the first row, hint on the last, list in between.
+    let fl = " Filter: ";
+    buf.set_stringn(inner.x, inner.y, fl, inner.width as usize, st);
+    let fx = inner.x + fl.len() as u16;
+    let fw = inner.right().saturating_sub(fx + 1);
+    buf.set_style(Rect { x: fx, y: inner.y, width: fw, height: 1 }, field);
+    let v = pk.filter.view(fw as usize);
+    buf.set_stringn(fx, inner.y, v.shown, fw as usize, field);
+    let list = Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: inner.height - 2 };
+    let top = pk.scroll_for(list.height as usize);
+    for (row, &i) in visible.iter().enumerate().skip(top).take(list.height as usize) {
+        let y = list.y + (row - top) as u16;
+        let it = &pk.items[i];
+        let style = if row == pk.sel { sel } else { st };
+        buf.set_style(Rect { x: list.x, y, width: list.width, height: 1 }, style);
+        let mark = if it.current { "●" } else { " " };
+        let (x, _) = buf.set_stringn(list.x, y, format!(" {mark} {:<label_w$}  ", it.label), list.width as usize, style);
+        let dstyle = if row == pk.sel { style } else { dim };
+        buf.set_stringn(x, y, &it.detail, list.right().saturating_sub(x) as usize, dstyle);
+    }
+    if visible.is_empty() {
+        buf.set_stringn(list.x + 1, list.y, "(nothing matches)", list.width.saturating_sub(1) as usize, dim);
+    }
+    let hint = format!(" ↑↓ · Enter or click: choose · Esc · {}/{}", visible.len(), pk.items.len());
+    buf.set_stringn(inner.x, inner.bottom() - 1, hint, inner.width as usize, dim);
+    app.regions.picker_box = r;
+    app.regions.picker_field = Rect { x: fx, y: inner.y, width: fw, height: 1 };
+    app.regions.picker_list = list;
 }
 
 fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
