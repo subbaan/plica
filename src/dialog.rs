@@ -26,6 +26,10 @@ pub enum Action {
     SaveAs,
     /// Save As onto an existing file, confirmed.
     Replace(PathBuf),
+    RestoreRecovery,
+    DiscardRecovery,
+    /// Keep recovery snapshots for the next start.
+    RecoveryLater,
 }
 
 #[derive(Debug, Clone)]

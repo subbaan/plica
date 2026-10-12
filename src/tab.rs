@@ -18,12 +18,37 @@ pub struct Tab {
     /// The file changed on disk while this (background) tab had unsaved
     /// changes; a dialog is shown when the tab becomes active.
     pub disk_conflict: bool,
+    /// Process-unique id (names this tab's recovery snapshot).
+    pub uid: u64,
+    /// Recovery bookkeeping: buffer key last seen / snapshotted, and when.
+    pub seen_key: (u64, u64),
+    pub changed_at: std::time::Instant,
+    pub snap_key: Option<(u64, u64)>,
+    pub snap_at: std::time::Instant,
 }
+
+static NEXT_TAB_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Tab {
     pub fn new(buf: Buffer, doc: Document, tab_width: usize) -> Self {
         let indent_unit = detect_indent(&buf, tab_width);
-        Self { buf, doc, indent_unit, top_line: 0, top_row: 0, scroll_x: 0, follow_caret: true, disk_conflict: false }
+        let now = std::time::Instant::now();
+        let seen_key = buf.cache_key();
+        Self {
+            buf,
+            doc,
+            indent_unit,
+            top_line: 0,
+            top_row: 0,
+            scroll_x: 0,
+            follow_caret: true,
+            disk_conflict: false,
+            uid: NEXT_TAB_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            seen_key,
+            changed_at: now,
+            snap_key: None,
+            snap_at: now,
+        }
     }
 
     pub fn untitled(tab_width: usize) -> Self {

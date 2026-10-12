@@ -6,6 +6,7 @@ mod document;
 mod drop;
 mod find;
 mod layout;
+mod recovery;
 mod tab;
 mod term;
 mod theme;
@@ -193,6 +194,9 @@ fn run() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     terminal.clear()?;
 
+    let recovery = recovery::default_dir().and_then(|d| recovery::Recovery::new(d).ok());
+    let orphans = recovery.as_ref().map(|r| r.orphans()).unwrap_or_default();
+
     let mut tabs = tabs.into_iter();
     let mut app = App::new(tabs.next().expect("at least one tab"), theme, source, caps);
     app.bg_tabs = tabs.collect();
@@ -200,6 +204,11 @@ fn run() -> Result<()> {
         let l = line.saturating_sub(1).min(app.tab.buf.len_lines() - 1);
         app.tab.buf.sel = Selection::caret(app.tab.buf.line_start(l));
     }
+    app.recovery = recovery;
+    if recovery_unavailable(&app) {
+        app.warn("Recovery snapshots unavailable (cannot create $XDG_STATE_HOME/plica/recovery)");
+    }
+    app.offer_recovery(orphans);
     if let Some(w) = startup_warning {
         app.warn(w);
     } else if app.tab.doc.mixed_line_endings {
@@ -236,6 +245,7 @@ fn run() -> Result<()> {
             terminal.draw(|f| ui::draw(f, &mut app))?;
             redraw = false;
         }
+        app.tick_recovery(false);
         while rx.try_recv().is_ok() {
             palette_due = Some(Instant::now() + PALETTE_DEBOUNCE);
         }
@@ -282,31 +292,30 @@ fn run() -> Result<()> {
         }
     }
 
+    if killed {
+        // Snapshot every unsaved tab now; the next start offers them.
+        app.tick_recovery(true);
+    } else {
+        // Normal quit: any remaining unsaved changes were explicitly discarded.
+        app.tick_recovery(false);
+        app.discard_all_snapshots();
+    }
+    if let Some(r) = &app.recovery {
+        r.flush();
+    }
     drop(terminal);
     drop(guard);
-    if killed {
-        for tab in app.all_tabs().filter(|t| t.buf.is_dirty()) {
-            match write_recovery(tab) {
-                Ok(p) => eprintln!("plica: terminated with unsaved changes; recovery copy written to {}", p.display()),
-                Err(e) => eprintln!("plica: terminated with unsaved changes and could not write recovery copy: {e:#}"),
-            }
+    let dirty = app.all_tabs().filter(|t| t.buf.is_dirty()).count();
+    if killed && dirty > 0 {
+        if app.recovery.is_some() {
+            eprintln!("plica: terminated with {dirty} unsaved document(s); start plica again to recover them");
+        } else {
+            eprintln!("plica: terminated with {dirty} unsaved document(s) and no recovery directory; changes lost");
         }
     }
     Ok(())
 }
 
-/// Emergency snapshot under $XDG_STATE_HOME/plica/recovery (never the original file).
-fn write_recovery(tab: &Tab) -> Result<PathBuf> {
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/state")))
-        .context("no HOME")?;
-    let dir = state.join("plica").join("recovery");
-    std::fs::create_dir_all(&dir)?;
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-    let path = dir.join(format!("{}.{ts}.{nanos:09}.txt", tab.doc.display_name()));
-    std::fs::write(&path, tab.buf.rope().to_string())?;
-    Ok(path)
+fn recovery_unavailable(app: &App) -> bool {
+    app.recovery.is_none()
 }

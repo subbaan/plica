@@ -7,7 +7,7 @@ How Plica is put together, and a dated log of design decisions and **workarounds
 ## Overview
 
 ```
-main.rs ── CLI (files → tabs), palette selection, event loop, palette debounce, recovery on signal
+main.rs ── CLI (files → tabs), palette selection, event loop, debounces, recovery offer/flush
   │
   ├─ term.rs ─────── raw mode / alt screen / mouse / paste / keyboard flags; restore() on exit, panic, signal
   ├─ watch.rs ────── notify watchers: palette dir, open documents' dirs → mpsc → main (debounced)
@@ -21,6 +21,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, palette debo
         ├─ drop.rs ──── recognise file drops delivered as pastes
         ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
         ├─ find.rs ──── search engine, match cache, find/replace bar commands
+        ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
         └─ theme.rs ─── parse_kitty → Palette → resolve → Theme (semantic roles, contrast repair)
 ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → truecolour / 256 / plain
 ```
@@ -43,6 +44,16 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.1.4
+
+- **Snapshots are written by one background thread** fed through a channel (`recovery.rs`). Ropey clones are O(1), so the UI thread hands over the rope without copying text; a 35 MB buffer never stalls typing. Writes and removals share the queue, so "write then remove" can't be reordered; `flush()` waits for the queue at exit/signal.
+- **Snapshot timing:** a dirty tab is written when its content has been unchanged for 2 s, or at least every 30 s during continuous editing (`App::tick_recovery`, every main-loop pass). Clean tabs drop their snapshot.
+- **Orphan detection = snapshot from a session whose Plica process is gone.** Liveness checks `/proc/<pid>/comm == "plica"` (guards against pid reuse) **and the process state is not Z/X**. *Bug found by e2e:* a killed Plica that its parent hadn't reaped yet is a zombie that still has `/proc/<pid>/comm`, so its snapshots were wrongly treated as belonging to a live instance.
+- **Session ids are pid + nanoseconds + a per-process counter.** *Bug found by tests:* pid + milliseconds collided for two sessions created in the same millisecond, making each treat the other's snapshots as its own.
+- **Restore applies the snapshot as one transaction on top of the file as it is on disk now**, so the user can Ctrl+Z to compare, and saving is an explicit choice. Restored snapshot files are deleted at once because this session snapshots the restored tabs itself.
+- **Signals flush snapshots instead of writing `.txt` copies** (0.0.1 behaviour), so all unsaved work goes through one recovery path.
+- **A normal quit removes this session's remaining snapshots:** by then any dirty tab was explicitly discarded via the quit dialog.
 
 ### 2026-10-12 · 0.1.3
 
@@ -98,6 +109,6 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 - **Smart-case find lowercases only where UTF-8 length is unchanged**, so byte offsets in the lowered copy still map onto the original text.
 - **Status messages take priority on narrow terminals:** the right-hand fields collapse to Ln/Col. *Problem:* at 60 columns messages like "Save failed" were cut to a few characters.
 - **Clipboard copy goes to three places** (internal, OSC 52, wl-copy/xclip/xsel). Paste prefers the tool, with a 700 ms timeout so a dead clipboard owner can't hang the UI.
-- **Recovery copy on SIGTERM/SIGHUP/SIGINT** to `$XDG_STATE_HOME/plica/recovery/`, never next to or over the original.
+- **Recovery copy on SIGTERM/SIGHUP/SIGINT** to `$XDG_STATE_HOME/plica/recovery/`, never next to or over the original. *(Superseded in 0.1.4 by snapshots.)*
 - **Kitty facts found during the spike:** Kitty eats Shift+click/drag in mouse-grabbing apps (its selection override), most Ctrl+Shift+letter chords, and Ctrl+Tab. With an app in front, a drop becomes a paste of plain paths.
 - **e2e harness quirks (test-only):** pyte composes `e`+U+0301 into `é` and its display strings don't map to columns for wide glyphs, so checks NFC-normalise and compute columns from cells.

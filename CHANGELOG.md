@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4 (2026-10-12): crash recovery
+
+- Unsaved work is snapshotted automatically to `$XDG_STATE_HOME/plica/recovery/` (private: 0700 directory, 0600 files) after 2 s of idle time, or at least every 30 s while editing continues. The original file is never touched.
+- Snapshots disappear when a tab is saved, undone back to its saved state, or deliberately discarded (Don't Save / Quit Without Saving).
+- After a crash, power loss or kill, the next start offers Restore / Discard / Later. Restore reopens each document with the recovered text as unsaved changes; Ctrl+Z shows the version on disk. Untitled work comes back as Untitled tabs.
+- SIGTERM/SIGHUP/SIGINT now flush snapshots instead of writing loose `.txt` copies, so that work is offered on the next start too.
+
 ## 0.1.3 (2026-10-12): find and replace
 
 - New find bar (Ctrl+F) with replace mode (Ctrl+H, or Ctrl+R where the terminal sends Ctrl+H as Backspace). Shows "3 of 17"; Enter/F3 next, Shift+Enter/Shift+F3 previous, wrapping around.

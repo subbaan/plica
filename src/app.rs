@@ -4,6 +4,7 @@ use crate::buffer::{EditKind, Selection};
 use crate::clipboard::Clipboard;
 use crate::dialog::{Action, Button as DButton, Dialog};
 use crate::drop;
+use crate::recovery::{Recovery, Snapshot};
 use crate::find::{FindBar, FindHit, SearchOpts};
 use crate::tab::Tab;
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
@@ -17,6 +18,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// Snapshot a dirty tab after this much idle time…
+const SNAPSHOT_IDLE: Duration = Duration::from_secs(2);
+/// …or at least this often while editing continues.
+const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(30);
 const SCROLL_STEP: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +148,9 @@ pub struct App {
     last_mouse: (u16, u16),
     last_click: Option<(Instant, u16, u16, u8)>,
     pub dialog: Option<Dialog>,
+    pub recovery: Option<Recovery>,
+    /// Snapshots from a crashed session, offered at startup.
+    pub recovery_offer: Vec<Snapshot>,
     after_save: Option<AfterSave>,
 }
 
@@ -175,6 +183,8 @@ impl App {
             last_mouse: (0, 0),
             last_click: None,
             dialog: None,
+            recovery: None,
+            recovery_offer: Vec::new(),
             after_save: None,
         }
     }
@@ -222,8 +232,15 @@ impl App {
         self.after_tab_change();
     }
 
-    /// Close the active tab without asking. Closing the last tab quits.
+    /// Close the active tab without asking (its unsaved changes, if any, were
+    /// deliberately discarded, so its recovery snapshot goes too). Closing
+    /// the last tab quits.
     fn close_active_tab(&mut self) {
+        if let Some(r) = &self.recovery
+            && self.tab.snap_key.is_some()
+        {
+            r.remove(self.tab.uid);
+        }
         if self.bg_tabs.is_empty() {
             self.quit = true;
             return;
@@ -313,7 +330,10 @@ impl App {
             }
             Action::DiscardThenClose => self.close_active_tab(),
             Action::SaveThenQuit | Action::SaveAllThenQuit => self.save_all_then_quit(),
-            Action::DiscardAndQuit => self.quit = true,
+            Action::DiscardAndQuit => {
+                self.discard_all_snapshots();
+                self.quit = true;
+            }
             Action::Overwrite => {
                 if self.save_active(true) == SaveOutcome::Saved {
                     self.continue_after_save();
@@ -334,6 +354,118 @@ impl App {
                     self.continue_after_save();
                 }
             }
+            Action::RestoreRecovery => self.restore_recovery(),
+            Action::DiscardRecovery => {
+                if let Some(r) = &self.recovery {
+                    r.delete(&self.recovery_offer);
+                }
+                let n = self.recovery_offer.len();
+                self.recovery_offer.clear();
+                self.info(format!("Discarded {n} recovered document(s)"));
+            }
+            Action::RecoveryLater => {
+                self.recovery_offer.clear();
+                self.info("Recovered work kept; it will be offered again next time");
+            }
+        }
+    }
+
+    // ---- crash recovery ------------------------------------------------------------
+
+    /// Offer snapshots found at startup (from a crashed or killed session).
+    pub fn offer_recovery(&mut self, snaps: Vec<Snapshot>) {
+        if snaps.is_empty() {
+            return;
+        }
+        let mut lines = vec![format!(
+            "Plica found unsaved work from a session that ended unexpectedly ({} document{}):",
+            snaps.len(),
+            if snaps.len() == 1 { "" } else { "s" }
+        )];
+        for s in snaps.iter().take(6) {
+            lines.push(format!("  • {}", s.doc_path.as_ref().map_or_else(|| s.name.clone(), |p| p.display().to_string())));
+        }
+        if snaps.len() > 6 {
+            lines.push(format!("  … and {} more", snaps.len() - 6));
+        }
+        self.recovery_offer = snaps;
+        self.dialog = Some(Dialog::new(
+            "Recover unsaved work",
+            lines,
+            vec![
+                DButton::new("&Restore", Action::RestoreRecovery),
+                DButton::new("&Discard", Action::DiscardRecovery),
+                DButton::new("&Later", Action::RecoveryLater),
+            ],
+        ));
+    }
+
+    /// Open each recovered document with its snapshot text applied as one
+    /// undoable edit (Ctrl+Z shows the version on disk).
+    fn restore_recovery(&mut self) {
+        let snaps = std::mem::take(&mut self.recovery_offer);
+        let mut restored = 0;
+        for s in &snaps {
+            let opened = match &s.doc_path {
+                Some(p) => self.open_file(p),
+                None => {
+                    self.add_tab(Tab::untitled(self.tab_width));
+                    true
+                }
+            };
+            if !opened {
+                continue;
+            }
+            if self.tab.buf.rope() != &s.text[..] {
+                let len = self.tab.buf.len_chars();
+                self.tab.buf.transact(vec![(0, len, s.text.clone())]);
+                self.tab.buf.sel = Selection::caret(0);
+            }
+            restored += 1;
+        }
+        if let Some(r) = &self.recovery {
+            // The restored text now lives in this session's tabs (and will be
+            // snapshotted again by it).
+            r.delete(&snaps);
+        }
+        self.info(format!("Restored {restored} document(s); review and save them"));
+    }
+
+    /// Called from the main loop: snapshot dirty tabs once they have been
+    /// idle for a moment (or periodically while typing continues), and drop
+    /// snapshots of tabs that became clean.
+    pub fn tick_recovery(&mut self, force: bool) {
+        let Some(r) = self.recovery.take() else { return };
+        let now = Instant::now();
+        for i in 0..self.tab_count() {
+            let tab = self.tab_at_mut(i);
+            let key = tab.buf.cache_key();
+            if key != tab.seen_key {
+                tab.seen_key = key;
+                tab.changed_at = now;
+            }
+            if tab.buf.is_dirty() {
+                let stale = tab.snap_key != Some(key);
+                let idle = now.duration_since(tab.changed_at) >= SNAPSHOT_IDLE;
+                let overdue = now.duration_since(tab.snap_at) >= SNAPSHOT_MAX_AGE;
+                if stale && (force || idle || overdue) {
+                    r.write(tab.uid, tab.doc.path.as_deref(), &tab.doc.display_name(), tab.buf.rope());
+                    tab.snap_key = Some(key);
+                    tab.snap_at = now;
+                }
+            } else if tab.snap_key.take().is_some() {
+                r.remove(tab.uid);
+            }
+        }
+        self.recovery = Some(r);
+    }
+
+    /// Unsaved changes the user chose to throw away (quit without saving):
+    /// remove their snapshots.
+    pub fn discard_all_snapshots(&mut self) {
+        let Some(r) = &self.recovery else { return };
+        for t in self.all_tabs().filter(|t| t.snap_key.is_some()) {
+            r.remove(t.uid);
         }
     }
 
@@ -1802,5 +1934,80 @@ mod tests {
         assert_eq!(a.find_status(), "1 of 3");
         key(&mut a, KeyCode::Char('w'), KeyModifiers::ALT);
         assert_eq!(a.find_status(), "1 of 2");
+    }
+
+    #[test]
+    fn snapshots_follow_dirty_state_and_restore_after_crash() {
+        let d = tempfile::tempdir().unwrap();
+        let rec_dir = d.path().join("rec");
+        let f = d.path().join("doc.txt");
+        std::fs::write(&f, "on disk\n").unwrap();
+        let snaps = |dir: &Path| std::fs::read_dir(dir).map(|r| r.count()).unwrap_or(0);
+
+        // Session 1: edit, snapshot, then "crash" (drop without cleanup).
+        let mut a = app_with("", 40, 10);
+        a.recovery = Some(Recovery::new(rec_dir.clone()).unwrap());
+        a.open_file(&f);
+        type_str(&mut a, "X");
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        type_str(&mut a, "untitled work");
+        a.tick_recovery(false);
+        a.recovery.as_ref().unwrap().flush();
+        assert_eq!(snaps(&rec_dir), 0, "not idle yet: no snapshot");
+        a.tick_recovery(true);
+        a.recovery.as_ref().unwrap().flush();
+        assert_eq!(snaps(&rec_dir), 2);
+        // Saving/undoing to clean removes a snapshot.
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert!(!a.tab.buf.is_dirty());
+        a.tick_recovery(false);
+        a.recovery.as_ref().unwrap().flush();
+        assert_eq!(snaps(&rec_dir), 1);
+        type_str(&mut a, "edited again ");
+        a.tick_recovery(true);
+        a.recovery.as_ref().unwrap().flush();
+        assert_eq!(snaps(&rec_dir), 2);
+        drop(a);
+
+        // Session 2: finds both (the test process isn't named "plica", so
+        // session 1 counts as gone) and restores them.
+        let mut b = app_with("", 40, 10);
+        let r = Recovery::new(rec_dir.clone()).unwrap();
+        let orphans = r.orphans();
+        b.recovery = Some(r);
+        b.offer_recovery(orphans);
+        assert!(b.dialog.is_some());
+        key(&mut b, KeyCode::Char('r'), KeyModifiers::NONE);
+        b.recovery.as_ref().unwrap().flush();
+        let texts: Vec<String> = b.all_tabs().map(|t| t.buf.rope().to_string()).collect();
+        assert!(texts.contains(&"edited again on disk\n".to_string()), "{texts:?}");
+        assert!(texts.contains(&"untitled work".to_string()), "{texts:?}");
+        assert!(b.all_tabs().all(|t| t.buf.is_dirty()), "restored work is unsaved");
+        assert_eq!(snaps(&rec_dir), 0, "old snapshots deleted after restore");
+        // Ctrl+Z on the restored file shows the disk version.
+        let i = (0..b.tab_count()).find(|&i| b.tab_at(i).doc.path.is_some()).unwrap();
+        b.switch_to(i);
+        key(&mut b, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(text(&b), "on disk\n");
+    }
+
+    #[test]
+    fn discarding_on_close_or_quit_removes_snapshots() {
+        let d = tempfile::tempdir().unwrap();
+        let rec_dir = d.path().join("rec");
+        let mut a = app_with("", 40, 10);
+        a.recovery = Some(Recovery::new(rec_dir.clone()).unwrap());
+        type_str(&mut a, "x");
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        type_str(&mut a, "y");
+        a.tick_recovery(true);
+        key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE); // Don't Save
+        key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE); // Don't Save -> quit
+        assert!(a.quit);
+        a.recovery.as_ref().unwrap().flush();
+        assert_eq!(std::fs::read_dir(&rec_dir).unwrap().count(), 0);
     }
 }

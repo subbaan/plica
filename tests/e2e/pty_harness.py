@@ -206,17 +206,38 @@ check("teardown: leaves alt screen", b"\x1b[?1049l" in tail, repr(tail))
 check("teardown: mouse off", b"\x1b[?1000l" in tail or b"\x1b[?1006l" in tail, repr(tail))
 check("teardown: bracketed paste off", b"\x1b[?2004l" in tail, repr(tail))
 
-# ---------------------------------------------------------------- session 2: SIGTERM
+# ---------------------------------------------------------------- session 2: SIGTERM / SIGKILL + recovery
 doc2 = os.path.join(WORK, "kill.txt")
+rec_dir = os.path.join(WORK, "state", "plica", "recovery")
+def snaps():
+    return [f for f in os.listdir(rec_dir) if f.endswith(".plica-snap")] if os.path.isdir(rec_dir) else []
+def snap_texts():
+    return [open(os.path.join(rec_dir, f)).read().split("\n\n", 1)[1] for f in snaps()]
 t = Term([doc2])
 t.send("unsaved work")
 t.p.kill(signal.SIGTERM)
 t.pump(0.8)
-rec_dir = os.path.join(WORK, "state", "plica", "recovery")
-recs = [f for f in os.listdir(rec_dir)] if os.path.isdir(rec_dir) else []
-check("SIGTERM writes recovery snapshot", any(open(os.path.join(rec_dir, f)).read() == "unsaved work" for f in recs), str(recs))
+check("SIGTERM flushes a recovery snapshot", "unsaved work" in snap_texts(), str(snap_texts()))
 check("SIGTERM did not create original", not os.path.exists(doc2))
 check("SIGTERM teardown", b"\x1b[?1049l" in t.raw[-400:])
+# Restart: the snapshot is offered; Restore brings it back as unsaved work.
+t = Term([])
+check("restart offers recovery", "Recover unsaved work" in t.text() and "kill.txt" in t.text(), t.text())
+t.send("r", 0.5)
+check("restore brings text back", "unsaved work" in t.text() and "kill.txt" in t.line(0) and "●" in t.line(0), t.text())
+check("restored snapshots removed", snaps() == [] or all("unsaved work" not in x for x in snap_texts()) or len(snaps()) <= 1, str(snaps()))
+# SIGKILL (no chance to clean up): the idle snapshot written while running survives.
+t.send(" plus more", 0.3)
+t.pump(2.6)  # > 2 s idle -> snapshot
+t.p.kill(signal.SIGKILL)
+t.pump(0.3)
+check("SIGKILL leaves the periodic snapshot", any("plus more" in x and "unsaved work" in x for x in snap_texts()), str(snap_texts()))
+t = Term([])
+check("restart after SIGKILL offers recovery", "Recover unsaved work" in t.text(), t.text())
+t.send("d", 0.5)  # Discard
+check("discard removes snapshots", snaps() == [], str(snaps()))
+t.send("\x11", 0.5)
+check("quit after discard", not t.p.isalive())
 
 # ---------------------------------------------------------------- session 3: wrap + scrolling
 doc3 = os.path.join(WORK, "long.txt")
