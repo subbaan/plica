@@ -21,6 +21,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ drop.rs ──── recognise file drops delivered as pastes
         ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
         ├─ find.rs ──── search engine, match cache, find/replace bar commands
+        ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
         ├─ config.rs ── config.toml loading/validation, defaults text
@@ -48,6 +49,10 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.2.1
+
+- **`lineedit.rs`: one single-line editor for every text field** (find, replace, prompts). Cursor is a byte index on a grapheme boundary; widths come from `CellWidth` like the editor layout, so clicks and the drawn caret agree. The horizontal scroll offset lives in a `Cell` so rendering (which only has shared access to the field) can keep it stable: the view only scrolls when the cursor would leave it, and scrolls back when deleted text frees space. Fields return `Outcome::Ignored` for keys they don't use, which is how the find bar still passes ↑/↓, Ctrl+S, etc. to the editor.
 
 ### 2026-10-12 · 0.2.0
 

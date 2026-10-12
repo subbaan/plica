@@ -4,6 +4,7 @@
 use crate::app::App;
 use crate::buffer::{Buffer, EditKind, Selection, is_word_char};
 use crate::keymap::Command;
+use crate::lineedit::{LineEdit, Outcome};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Cap on cached matches so a one-letter query in a huge file stays cheap.
@@ -37,8 +38,8 @@ pub enum FindHit {
 }
 
 pub struct FindBar {
-    pub query: String,
-    pub replacement: String,
+    pub query: LineEdit,
+    pub replacement: LineEdit,
     pub focus: Field,
     pub replace_mode: bool,
     pub opts: SearchOpts,
@@ -60,10 +61,10 @@ struct Cache {
 }
 
 impl FindBar {
-    pub fn new(query: String, origin: usize) -> Self {
+    pub fn new(query: &str, origin: usize) -> Self {
         Self {
-            query,
-            replacement: String::new(),
+            query: LineEdit::new(query),
+            replacement: LineEdit::default(),
             focus: Field::Find,
             replace_mode: false,
             opts: SearchOpts::default(),
@@ -75,9 +76,9 @@ impl FindBar {
 
     /// All matches (char ranges, ascending), cached per buffer version.
     pub fn matches(&mut self, buf: &Buffer) -> &[(usize, usize)] {
-        let key = (buf.cache_key(), self.query.clone(), self.opts, self.scope);
+        let key = (buf.cache_key(), self.query.text().to_string(), self.opts, self.scope);
         if self.cache.as_ref().is_none_or(|c| c.key != key) {
-            let (matches, truncated) = find_all_chars(buf, &self.query, self.opts, self.scope);
+            let (matches, truncated) = find_all_chars(buf, self.query.text(), self.opts, self.scope);
             self.cache = Some(Cache { key, matches, truncated });
         }
         &self.cache.as_ref().unwrap().matches
@@ -87,7 +88,7 @@ impl FindBar {
         self.cache.as_ref().is_some_and(|c| c.truncated)
     }
 
-    fn field_mut(&mut self) -> &mut String {
+    fn field_mut(&mut self) -> &mut LineEdit {
         match self.focus {
             Field::Find => &mut self.query,
             Field::Replace => &mut self.replacement,
@@ -172,12 +173,12 @@ impl App {
         let selected = self.tab.buf.selected_text();
         let multi_line = selected.contains('\n');
         let bar = self.find.get_or_insert_with(|| {
-            let mut b = FindBar::new(self.last_find.clone(), sel.start());
+            let mut b = FindBar::new(&self.last_find, sel.start());
             b.opts = self.last_find_opts;
             b
         });
         if !selected.is_empty() && !multi_line {
-            bar.query = selected;
+            bar.query.set(&selected);
         }
         if multi_line {
             bar.scope = Some((sel.start(), sel.end()));
@@ -192,7 +193,7 @@ impl App {
 
     pub fn close_find(&mut self) {
         if let Some(b) = self.find.take() {
-            self.last_find = b.query;
+            self.last_find = b.query.text().to_string();
             self.last_find_opts = b.opts;
         }
     }
@@ -244,22 +245,20 @@ impl App {
             (KeyCode::Tab | KeyCode::BackTab, _) if bar.replace_mode => {
                 bar.focus = if bar.focus == Field::Find { Field::Replace } else { Field::Find };
             }
-            (KeyCode::Backspace, _) => {
-                bar.field_mut().pop();
-                if bar.focus == Field::Find {
-                    self.find_incremental();
-                }
-            }
             (_, Some('v')) if ctrl => {
                 let t = self.clipboard.paste();
                 self.find_insert_text(&t);
             }
-            (KeyCode::Char(c), _) if !ctrl && !alt => {
-                let mut b = [0u8; 4];
-                self.find_insert_text(c.encode_utf8(&mut b));
-            }
-            // Anything else (arrows, Ctrl+S, ...) goes to the editor.
-            _ => return false,
+            _ => match bar.field_mut().key(&k) {
+                Outcome::Changed => {
+                    if bar.focus == Field::Find {
+                        self.find_incremental();
+                    }
+                }
+                Outcome::Moved => {}
+                // Anything else (Up/Down, Ctrl+S, ...) goes to the editor.
+                Outcome::Ignored => return false,
+            },
         }
         true
     }
@@ -267,17 +266,24 @@ impl App {
     /// Text typed or pasted into the focused field (newlines become spaces).
     pub fn find_insert_text(&mut self, t: &str) {
         let Some(bar) = &mut self.find else { return };
-        bar.field_mut().push_str(&t.replace(['\r', '\n'], " "));
+        bar.field_mut().insert(t);
         if bar.focus == Field::Find {
             self.find_incremental();
         }
     }
 
-    pub fn on_find_click(&mut self, hit: FindHit) {
+    /// A click on the bar; `col` is the column within the clicked part.
+    pub fn on_find_click(&mut self, hit: FindHit, col: usize) {
         let Some(bar) = &mut self.find else { return };
         match hit {
-            FindHit::FindField => bar.focus = Field::Find,
-            FindHit::ReplaceField => bar.focus = Field::Replace,
+            FindHit::FindField => {
+                bar.focus = Field::Find;
+                bar.query.click(col);
+            }
+            FindHit::ReplaceField => {
+                bar.focus = Field::Replace;
+                bar.replacement.click(col);
+            }
             FindHit::MatchCase | FindHit::WholeWord | FindHit::InSelection => self.toggle_find_opt(hit),
             FindHit::Prev => self.find_step(false),
             FindHit::Next => self.find_step(true),
@@ -331,7 +337,7 @@ impl App {
             }
             return;
         };
-        let query = bar.query.clone();
+        let query = bar.query.text().to_string();
         let m = bar.matches(&self.tab.buf);
         if m.is_empty() {
             if !query.is_empty() {
@@ -386,7 +392,7 @@ impl App {
     fn replace_one(&mut self) {
         let sel = self.tab.buf.sel;
         let Some(bar) = &mut self.find else { return };
-        let replacement = bar.replacement.clone();
+        let replacement = bar.replacement.text().to_string();
         let on_match = bar.matches(&self.tab.buf).binary_search(&(sel.start(), sel.end())).is_ok();
         if on_match {
             let delta = replacement.chars().count() as isize - (sel.end() - sel.start()) as isize;
@@ -402,10 +408,10 @@ impl App {
     /// Replace every match (within the scope) as one undo step.
     pub fn replace_all(&mut self) {
         let Some(bar) = &mut self.find else { return };
-        let replacement = bar.replacement.clone();
+        let replacement = bar.replacement.text().to_string();
         let matches = bar.matches(&self.tab.buf).to_vec();
         if matches.is_empty() {
-            let q = bar.query.clone();
+            let q = bar.query.text().to_string();
             self.warn(format!("Not found: {q}"));
             return;
         }

@@ -4,6 +4,7 @@
 use crate::app::{App, Button, Level, TabHit, ThemeSource};
 use crate::find::FindHit;
 use crate::layout::GlyphKind;
+use crate::lineedit::LineEdit;
 use crate::theme::Rgb;
 use ratatui::Frame;
 use ratatui::buffer::Buffer as TermBuf;
@@ -227,14 +228,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let lw = label.chars().count() as u16;
         buf.set_stringn(prompt.x, prompt.y, &label, prompt.width as usize, accent);
         let input_w = prompt.width.saturating_sub(lw + 1) as usize;
-        // Show the tail of long input.
-        let shown: String = {
-            let n = pr.input.chars().count();
-            pr.input.chars().skip(n.saturating_sub(input_w.saturating_sub(1))).collect()
-        };
-        let (end, _) = buf.set_stringn(prompt.x + lw, prompt.y, &shown, input_w, surface);
+        let fx = prompt.x + lw;
+        let v = pr.input.view(input_w);
+        let (end, _) = buf.set_stringn(fx, prompt.y, v.shown, input_w, surface);
         buf.set_stringn(end + 1, prompt.y, hint, prompt.right().saturating_sub(end + 1) as usize, surface.add_modifier(Modifier::DIM));
-        caret_pos = Some(Position { x: end.min(prompt.right() - 1), y: prompt.y });
+        caret_pos = Some(Position { x: (fx + v.caret).min(prompt.right() - 1), y: prompt.y });
+        app.regions.prompt_field = Rect { x: fx, y: prompt.y, width: prompt.right().saturating_sub(fx), height: 1 };
+    } else {
+        app.regions.prompt_field = Rect::default();
     }
 
     // ---- status bar ----
@@ -414,16 +415,15 @@ fn draw_find_bar(buf: &mut TermBuf, app: &mut App, r: Rect, surface: Style, acce
     let y = r.y;
     let mut caret = None;
 
-    let mut draw_field = |buf: &mut TermBuf, y: u16, label: &str, text: &str, focused: bool, hit: FindHit| {
+    let mut draw_field = |buf: &mut TermBuf, y: u16, label: &str, text: &LineEdit, focused: bool, hit: FindHit| {
         buf.set_stringn(r.x, y, label, label_w as usize, if focused { accent } else { surface });
         let fx = r.x + label_w;
         buf.set_style(Rect { x: fx, y, width: field_w, height: 1 }, field);
-        let n = text.chars().count();
-        let shown: String = text.chars().skip(n.saturating_sub(field_w.saturating_sub(1) as usize)).collect();
-        let (end, _) = buf.set_stringn(fx, y, &shown, field_w as usize, field);
+        let v = text.view(field_w as usize);
+        buf.set_stringn(fx, y, v.shown, field_w as usize, field);
         hits.push((Rect { x: fx, y, width: field_w, height: 1 }, hit));
         if focused {
-            caret = Some(Position { x: end.min(fx + field_w - 1), y });
+            caret = Some(Position { x: (fx + v.caret).min(fx + field_w - 1), y });
         }
     };
     let focus_find = bar.focus == crate::find::Field::Find;

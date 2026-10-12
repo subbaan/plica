@@ -9,6 +9,7 @@ mod drop;
 mod find;
 mod prefs;
 mod keymap;
+mod lineedit;
 mod layout;
 mod recovery;
 mod tab;

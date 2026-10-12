@@ -354,6 +354,17 @@ check("replace all", open(ff).read() == "apple Apple apple pie\nbanana apple\n" 
 t.send("\x1b", 0.2)  # close bar
 t.send("\x1a", 0.3)  # undo
 check("replace all undoes in one step", "apple Apple apple pie" in t.text(), t.text())
+# The find field has a cursor: arrows, Home/End, Backspace mid-text, click to place.
+t.send("\x1b", 0.2); t.send("\x06", 0.3)  # Esc, Ctrl+F (last query "apple")
+t.send("\x1b[F\x1b[D\x1b[D\x7f", 0.3)  # End, Left, Left, Backspace
+t.send("\x1b[H", 0.2); t.send("x", 0.3)  # Home, type
+bar_row = next(y for y in range(ROWS) if "Find:" in t.line(y))
+check("find field edits at the cursor", "Find:    xaple " in t.line(bar_row), t.line(bar_row))
+check("caret drawn in the field", t.screen.cursor.y == bar_row and t.screen.cursor.x == t.col_of(bar_row, "xaple") + 1, (t.screen.cursor.x, t.screen.cursor.y))
+t.click(t.col_of(bar_row, "xaple") + 3, bar_row); t.pump(0.2)
+t.send("Q", 0.3)
+check("click places the field cursor", "Find:    xapQle " in t.line(bar_row), t.line(bar_row))
+t.send("\x1b", 0.2)
 t.send("\x11", 0.3)
 if t.p.isalive(): t.send("n", 0.4)
 check("quit after find tests", not t.p.isalive())

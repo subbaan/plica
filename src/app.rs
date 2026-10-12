@@ -9,6 +9,7 @@ use crate::find::{FindBar, FindHit, SearchOpts};
 use crate::config::{IndentMode, ThemeChoice};
 use crate::prefs::{PrefsHit, PrefsState};
 use crate::keymap::{Command, Keymap};
+use crate::lineedit::LineEdit;
 use crate::tab::{Tab, TabOpts};
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
 use crate::term::{self, Capabilities};
@@ -53,7 +54,13 @@ pub enum PromptKind {
 
 pub struct Prompt {
     pub kind: PromptKind,
-    pub input: String,
+    pub input: LineEdit,
+}
+
+impl Prompt {
+    pub fn new(kind: PromptKind, input: &str) -> Self {
+        Self { kind, input: LineEdit::new(input) }
+    }
 }
 
 impl PromptKind {
@@ -95,6 +102,8 @@ pub struct Regions {
     pub dialog_buttons: Vec<(Rect, usize)>,
     pub prefs_hits: Vec<(Rect, PrefsHit)>,
     pub find_hits: Vec<(Rect, FindHit)>,
+    /// The prompt's text field (empty when no prompt is shown).
+    pub prompt_field: Rect,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -696,9 +705,9 @@ impl App {
                 if let Some(p) = &mut self.prompt {
                     match (dropped, p.kind) {
                         (Some(paths), PromptKind::Open | PromptKind::SaveAs) => {
-                            p.input = paths[0].display().to_string();
+                            p.input.set(&paths[0].display().to_string());
                         }
-                        _ => p.input.push_str(&text.replace(['\r', '\n'], " ")),
+                        _ => p.input.insert(&text),
                     }
                 } else if let Some(paths) = dropped {
                     self.open_dropped(&paths);
@@ -1229,7 +1238,7 @@ impl App {
             if !input.ends_with('/') {
                 input.push('/');
             }
-            self.prompt = Some(Prompt { kind: PromptKind::Open, input });
+            self.prompt = Some(Prompt::new(PromptKind::Open, &input));
             return;
         }
         let files: Vec<&PathBuf> = paths.iter().filter(|p| !p.is_dir()).collect();
@@ -1251,7 +1260,7 @@ impl App {
             PromptKind::SaveAs => self.tab.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             _ => String::new(),
         };
-        self.prompt = Some(Prompt { kind, input });
+        self.prompt = Some(Prompt::new(kind, &input));
     }
 
     fn on_prompt_key(&mut self, k: KeyEvent) {
@@ -1264,7 +1273,7 @@ impl App {
                 self.after_save = None;
             }
             KeyCode::Enter => {
-                let input = p.input.clone();
+                let input = p.input.text().to_string();
                 match kind {
                     PromptKind::GotoLine => self.goto_line(&input),
                     PromptKind::PalettePath => self.set_palette_path(&input),
@@ -1275,19 +1284,15 @@ impl App {
                 self.prompt = None;
                 self.tab.follow_caret = true;
             }
-            KeyCode::Backspace => {
-                p.input.pop();
-            }
             KeyCode::Char('v') if ctrl => {
                 let t = self.clipboard.paste();
                 if let Some(p) = &mut self.prompt {
-                    p.input.push_str(&t.replace(['\r', '\n'], " "));
+                    p.input.insert(&t);
                 }
             }
-            KeyCode::Char(c) if !ctrl => {
-                p.input.push(c);
+            _ => {
+                p.input.key(&k);
             }
-            _ => {}
         }
     }
 
@@ -1308,6 +1313,13 @@ impl App {
         self.last_mouse = (m.column, m.row);
         let alt = m.modifiers.contains(KeyModifiers::ALT);
         let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+        if let (MouseEventKind::Down(MouseButton::Left), Some(p)) = (m.kind, &mut self.prompt)
+            && self.dialog.is_none()
+            && contains(self.regions.prompt_field, m.column, m.row)
+        {
+            p.input.click((m.column - self.regions.prompt_field.x) as usize);
+            return;
+        }
         match m.kind {
             _ if self.dialog.is_some() => {
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind
@@ -1336,8 +1348,8 @@ impl App {
                     self.on_tab_bar_click(hit);
                     return;
                 }
-                if let Some(&(_, hit)) = self.regions.find_hits.iter().find(|(r, _)| contains(*r, m.column, m.row)) {
-                    self.on_find_click(hit);
+                if let Some(&(r, hit)) = self.regions.find_hits.iter().find(|(r, _)| contains(*r, m.column, m.row)) {
+                    self.on_find_click(hit, (m.column - r.x) as usize);
                     return;
                 }
                 if let Some(b) = self.button_at(m.column, m.row) {
@@ -1962,11 +1974,11 @@ mod tests {
         a.handle_event(Event::Paste(d.path().display().to_string()));
         let p = a.prompt.as_ref().unwrap();
         assert_eq!(p.kind, PromptKind::Open);
-        assert!(p.input.ends_with('/'));
+        assert!(p.input.text().ends_with('/'));
         let f = d.path().join("a.txt");
         std::fs::write(&f, "").unwrap();
         a.handle_event(Event::Paste(f.display().to_string()));
-        assert_eq!(a.prompt.as_ref().unwrap().input, f.display().to_string());
+        assert_eq!(a.prompt.as_ref().unwrap().input.text(), f.display().to_string());
     }
 
     #[test]
@@ -2000,6 +2012,31 @@ mod tests {
         key(&mut a, KeyCode::F(3), KeyModifiers::NONE);
         assert!(a.find.is_some(), "F3 reopens with the last search and options");
         assert!(a.find.as_ref().unwrap().opts.match_case);
+    }
+
+    #[test]
+    fn text_fields_have_a_cursor() {
+        let mut a = app_with("cat cot cut", 40, 10);
+        key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
+        type_str(&mut a, "ct");
+        assert_eq!(a.find_status(), "No results");
+        key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+        type_str(&mut a, "o");
+        assert_eq!(a.find.as_ref().unwrap().query.text(), "cot", "typed at the cursor");
+        assert_eq!(a.find_status(), "1 of 1", "editing mid-field searches again");
+        let caret = a.tab.buf.sel;
+        key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(a.tab.buf.sel, caret, "Home stays in the field");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+
+        key(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        type_str(&mut a, "23");
+        key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
+        type_str(&mut a, "1");
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(a.prompt.as_ref().unwrap().input.text(), "1");
     }
 
     #[test]

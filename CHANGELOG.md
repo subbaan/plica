@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 (2026-10-12): text fields with a cursor
+
+- The Find and Replace fields and the prompts (Open, Save As, Go to line, palette path) now have a real cursor: ←/→ (Ctrl/Alt for words), Home/End, Delete, Ctrl+Backspace / Ctrl+Delete for whole words, typing and pasting at the cursor, and clicking to place the cursor. Long text scrolls with the cursor instead of only showing the end.
+- In the find bar, ←/→ and Home/End now edit the field rather than moving the document caret; ↑/↓ still go to the document.
+
 ## 0.2.0 (2026-10-12): Phase 2, preferences and polish
 
 Completes Phase 2 (tabs 0.1.1, dialogs 0.1.2, find/replace 0.1.3, recovery 0.1.4, config 0.1.5, primary selection 0.1.6, and this release). Manual gate checklist: `docs/phase2-checklist.md`.

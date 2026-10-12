@@ -301,7 +301,7 @@ impl App {
 
     pub fn open_palette_prompt(&mut self) {
         let input = self.palette_setting.as_ref().map(|p| tilde(p)).unwrap_or_default();
-        self.prompt = Some(crate::app::Prompt { kind: crate::app::PromptKind::PalettePath, input });
+        self.prompt = Some(crate::app::Prompt::new(crate::app::PromptKind::PalettePath, &input));
     }
 
     /// Prompt result for the palette path ("" clears it).
