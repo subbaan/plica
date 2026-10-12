@@ -53,6 +53,11 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.3.0
+
+- **The palette watcher is rebuilt when the palette path's resolved target changes.** *Bug found by the gate test:* `PaletteWatcher` records the symlink's target at creation and watches that folder. After a theme switcher re-pointed the link to a file in another folder, in-place edits to the new target were never seen. `reload_palette` now compares `canonicalize(path)` with `App::palette_real` (set when the watcher is made) and flags `palette_watch_dirty`, so the main loop rebuilds the watcher for the new folder.
+- **Gate evidence is automated** (e2e session 13): region colours are read back from the rendered cells, not from internal state, so "every region updates" is checked the way a user sees it.
+
 ### 2026-10-12 · 0.2.5
 
 - **`theme::Adjust` (high contrast + role overrides) is applied wherever a theme is resolved**: startup (`colours::load`), Preferences, and every live palette reload (`App::adjust`). Overrides resolve against the palette's own theme before overriding, so `"color4"` or `"accent"` follow palette changes and can't loop.

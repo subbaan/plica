@@ -490,6 +490,79 @@ check("document shows the new group", t.cell(xz, 1).fg.lower() == "bd93f9", t.ce
 t.send("\x11", 0.5)
 os.remove(cfg_file)
 
+# ---------------------------------------------------------------- session 13: Phase 3 gate (shared palette)
+gdir = os.path.join(WORK, "gate"); os.makedirs(gdir, exist_ok=True)
+def pal_text(bg, fg, c0, sel, c3):
+    return f"foreground {fg}\nbackground {bg}\nselection_background {sel}\ncolor0 {c0}\ncolor3 {c3}\ncolor8 #808080\n"
+DARK = ("#131617", "#e0e1e1", "#232627", "#189abf", "#de9b4b")
+LIGHT = ("#fafafa", "#202020", "#e0e0e0", "#a0c4ff", "#b35900")
+def put_pal(path, vals, mode=None):
+    tmp = path + ".new"
+    open(tmp, "w").write(pal_text(*vals))
+    if mode is not None: os.chmod(tmp, mode)
+    os.replace(tmp, path)
+gpal = os.path.join(gdir, "current-theme.conf")
+put_pal(gpal, DARK)
+fg_doc = os.path.join(WORK, "gate.txt"); open(fg_doc, "w").write("TODO check every region\n")
+t = Term(["--palette", gpal, fg_doc])
+t.send("\x06", 0.3); t.send("region", 0.4)  # find bar open, "region" selected as the match
+def regions():
+    fy = next(y for y in range(ROWS) if "Find:" in t.line(y))
+    xs = t.col_of(1, "region")
+    return {
+        "editor": t.cell(10, 4).bg.lower(), "title bar": t.cell(2, 0).bg.lower(),
+        "status bar": t.cell(2, ROWS - 1).bg.lower(), "find bar": t.cell(t.col_of(fy, " of "), fy).bg.lower(),
+        "find label (accent)": t.cell(1, fy).bg.lower(),
+        "selection": t.cell(xs, 1).bg.lower(), "TODO highlight": t.cell(t.col_of(1, "TODO"), 1).fg.lower(),
+    }
+want_dark = {"editor": "131617", "title bar": "232627", "status bar": "232627", "find bar": "232627", "find label (accent)": "189abf", "selection": "189abf", "TODO highlight": "de9b4b"}
+want_light = {"editor": "fafafa", "title bar": "e0e0e0", "status bar": "e0e0e0", "find bar": "e0e0e0", "find label (accent)": "a0c4ff", "selection": "a0c4ff", "TODO highlight": "b35900"}
+check("gate: dark palette in every region", regions() == want_dark, regions())
+put_pal(gpal, LIGHT); t.pump(0.8)
+check("gate: switching the shared file updates every region (dark -> light)", regions() == want_light, regions())
+# A dialog open during a switch is recoloured too.
+t.send("\x1b", 0.2); t.send("x", 0.2); t.send("\x11", 0.4)  # close find, edit, Ctrl+Q -> unsaved dialog
+dy = next(y for y in range(ROWS) if "Save" in t.line(y) and "Cancel" in t.line(y))
+before = t.cell(t.col_of(dy, "Cancel") - 2, dy).bg.lower()
+put_pal(gpal, DARK); t.pump(0.8)
+after = t.cell(t.col_of(dy, "Cancel") - 2, dy).bg.lower()
+check("gate: open dialog recoloured live", before == "e0e0e0" and after == "232627", (before, after))
+t.send("\x1b", 0.3)  # cancel the dialog
+# Corrupt / unreadable / removed files keep the last good colours.
+for name, action in [
+    ("unreadable file", lambda: put_pal(gpal, LIGHT, mode=0)),
+    ("truncated file", lambda: (open(gpal + ".new", "w").write("foreground #202020\nbackgr"), os.replace(gpal + ".new", gpal))),
+    ("invalid hex", lambda: (open(gpal + ".new", "w").write(pal_text("#zzzzzz", "#202020", "#e0e0e0", "#a0c4ff", "#b35900")), os.replace(gpal + ".new", gpal))),
+    ("deleted file", lambda: os.remove(gpal)),
+]:
+    action(); t.pump(0.8)
+    check(f"gate: {name} keeps last good colours", t.cell(10, 4).bg.lower() == "131617" and t.p.isalive(), t.cell(10, 4).bg)
+check("gate: problem shown in the status bar", "⚠" in t.line(ROWS - 1), t.line(ROWS - 1))
+put_pal(gpal, LIGHT); t.pump(0.8)
+check("gate: restored file applies", t.cell(10, 4).bg.lower() == "fafafa", t.cell(10, 4).bg)
+# Rapid switching settles on the last palette.
+for i in range(15):
+    put_pal(gpal, LIGHT if i % 2 else DARK)
+    time.sleep(0.02)
+put_pal(gpal, ("#102030",) + DARK[1:]); t.pump(1.0)
+check("gate: rapid switching settles on the final palette", t.cell(10, 4).bg.lower() == "102030", t.cell(10, 4).bg)
+t.send("\x11", 0.4)
+if t.p.isalive(): t.send("n", 0.4)
+check("gate: session ends cleanly", not t.p.isalive())
+
+# Symlinked palette path, re-pointed by a theme switcher, then edited in place.
+d1 = os.path.join(gdir, "themes1"); d2 = os.path.join(gdir, "themes2"); os.makedirs(d1); os.makedirs(d2)
+put_pal(os.path.join(d1, "one.conf"), DARK); put_pal(os.path.join(d2, "two.conf"), LIGHT)
+link = os.path.join(gdir, "linked.conf"); os.symlink(os.path.join(d1, "one.conf"), link)
+t = Term(["--palette", link, fg_doc])
+check("gate: symlinked palette read", t.cell(10, 4).bg.lower() == "131617", t.cell(10, 4).bg)
+os.symlink(os.path.join(d2, "two.conf"), link + ".new"); os.replace(link + ".new", link); t.pump(0.8)
+check("gate: re-pointed symlink applies", t.cell(10, 4).bg.lower() == "fafafa", t.cell(10, 4).bg)
+put_pal(os.path.join(d2, "two.conf"), ("#304050",) + LIGHT[1:]); t.pump(0.8)
+check("gate: edits to the new link target are followed", t.cell(10, 4).bg.lower() == "304050", t.cell(10, 4).bg)
+t.send("\x11", 0.4)
+if t.p.isalive(): t.send("n", 0.4)
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

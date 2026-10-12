@@ -191,6 +191,9 @@ pub struct App {
     pub palette_setting: Option<PathBuf>,
     /// Set when the colour source changed and the palette watcher must be rebuilt.
     pub palette_watch_dirty: bool,
+    /// Where the palette path resolved to when its watcher was made; a
+    /// re-pointed symlink needs a new watcher for the new target's folder.
+    pub palette_real: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     /// Snapshots from a crashed session, offered at startup.
     pub recovery_offer: Vec<Snapshot>,
@@ -239,6 +242,7 @@ impl App {
             theme_choice: ThemeChoice::Auto,
             palette_setting: None,
             palette_watch_dirty: false,
+            palette_real: None,
             config_path: None,
             recovery_offer: Vec::new(),
             after_save: None,
@@ -689,6 +693,10 @@ impl App {
     pub fn reload_palette(&mut self) {
         let ThemeSource::File { path, .. } = &self.theme_source else { return };
         let path = path.clone();
+        let real = std::fs::canonicalize(&path).ok();
+        if real != self.palette_real {
+            self.palette_watch_dirty = true;
+        }
         let result = std::fs::read_to_string(&path)
             .map_err(|e| e.to_string())
             .and_then(|t| theme::parse_kitty(&t).map_err(|e| e.to_string()));

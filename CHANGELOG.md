@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 (2026-10-12): Phase 3, shared colours and highlighting
+
+Completes Phase 3 (text field cursor 0.2.1, highlight groups 0.2.2, document highlights 0.2.3, Highlights in Preferences 0.2.4, themes / high contrast / overrides 0.2.5, and this release). Manual gate checklist: `docs/phase3-checklist.md`.
+
+- **Fix:** when the palette path is a symlink and a theme switcher re-points it, later edits to the *new* target file are now picked up too (Plica used to keep watching the old target's folder).
+- New end-to-end gate tests: every interface region (editor, bars, find bar, accent, selection, highlights, an open dialog) follows a dark → light palette switch; unreadable, truncated, invalid and deleted palette files keep the last good colours and recover; rapid switching settles on the final palette.
+
 ## 0.2.5 (2026-10-12): built-in themes, high contrast, colour overrides
 
 - **Built-in themes:** Gruvbox, Nord, Solarized Dark and Solarized Light join Dracula (`appearance.theme`, Preferences → Appearance, or `--theme NAME`). The status bar names the active theme.

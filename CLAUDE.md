@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Plica is a mouse-friendly terminal text editor (Mousepad/Gedit feel, not Vim/Emacs). `PLICA_IMPLEMENTATION_PLAN_v0.1.0.md` is the source of truth for scope, phases and release gates. Phases 0–2 are done (0.2.0; Phase 2 manual gate checklist in `docs/phase2-checklist.md`); next is Phase 3 (0.3.0: shared colours polish and word/phrase highlighting). The stack (Rust, crossterm/ratatui, ropey) in `docs/adr/0001-language-and-tui-stack.md` is approved. `docs/phase0-report.md` has the capability matrix, terminal shortcut conflicts, known limitations and the proposed next slices. Break work into small, reviewable slices.
+Plica is a mouse-friendly terminal text editor (Mousepad/Gedit feel, not Vim/Emacs). `PLICA_IMPLEMENTATION_PLAN_v0.1.0.md` is the source of truth for scope, phases and release gates. Phases 0–3 are done (0.3.0; manual gate checklists in `docs/phase2-checklist.md` and `docs/phase3-checklist.md`); next is Phase 4 (0.4.0: Markdown tables). The stack (Rust, crossterm/ratatui, ropey) in `docs/adr/0001-language-and-tui-stack.md` is approved. `docs/phase0-report.md` has the capability matrix, terminal shortcut conflicts, known limitations and the proposed next slices. Break work into small, reviewable slices.
 
 ## Commands
 

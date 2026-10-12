@@ -314,15 +314,17 @@ fn run() -> Result<()> {
     // Palette watcher (parent directory, survives atomic replacement).
     // Rebuilt when Preferences change the colour source.
     let (tx, rx) = mpsc::channel();
-    let make_palette_watcher = |app: &mut App, tx: mpsc::Sender<watch::PaletteTouched>| match &app.theme_source {
-        ThemeSource::File { path, .. } => match watch::PaletteWatcher::new(path, tx) {
+    let make_palette_watcher = |app: &mut App, tx: mpsc::Sender<watch::PaletteTouched>| {
+        let ThemeSource::File { path, .. } = &app.theme_source else { return None };
+        let path = path.clone();
+        app.palette_real = std::fs::canonicalize(&path).ok();
+        match watch::PaletteWatcher::new(&path, tx) {
             Ok(w) => Some(w),
             Err(e) => {
                 app.warn(format!("Cannot watch palette for changes: {e}"));
                 None
             }
-        },
-        _ => None,
+        }
     };
     let mut _palette_watcher = make_palette_watcher(&mut app, tx.clone());
 
