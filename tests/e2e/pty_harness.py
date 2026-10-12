@@ -383,6 +383,25 @@ t.send("\x0b", 0.5)  # Ctrl+K = quit
 check("remapped quit works", not t.p.isalive())
 os.remove(os.path.join(cfg_dir, "config.toml"))
 
+# ---------------------------------------------------------------- session 10: preferences
+fp = os.path.join(WORK, "prefs.txt"); open(fp, "w").write("prefs test\n")
+cfg_file = os.path.join(WORK, "config", "plica", "config.toml")
+t = Term([fp])
+check("starts with Dracula background", t.cell(10, 5).bg.lower() == "282a36", t.cell(10, 5).bg)
+t.send("\x1b[20~", 0.4)  # F9
+check("preferences open", "Preferences" in t.text(), t.text())
+t.send("\t\t", 0.3)  # -> Appearance
+t.send("\x1b[C\x1b[C\x1b[C", 0.4)  # Colours: auto -> palette -> dracula -> terminal
+check("theme previews live (terminal colours)", t.cell(10, ROWS - 3).bg == "default", t.cell(10, ROWS - 3).bg)
+row = next(y for y in range(ROWS) if " Save " in t.line(y) and "Cancel" in t.line(y))
+t.click(t.col_of(row, " Save ") + 2, row); t.pump(0.4)
+check("click Save closes and writes config", "Tab section" not in t.text() and 'theme = "terminal"' in open(cfg_file).read(), t.text())
+t.send("\x11", 0.5)
+t = Term([fp])
+check("saved preference applies on restart", t.cell(10, 5).bg == "default", t.cell(10, 5).bg)
+t.send("\x11", 0.5)
+os.remove(cfg_file)
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

@@ -270,6 +270,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_help(buf, app, area, &p);
         caret_pos = None;
     }
+    app.regions.prefs_hits.clear();
+    if app.prefs.is_some() {
+        draw_prefs(buf, app, area, &p);
+        if app.prompt.is_none() {
+            caret_pos = None;
+        }
+    }
     app.regions.dialog_buttons.clear();
     if app.dialog.is_some() {
         draw_dialog(buf, app, area, &p);
@@ -283,7 +290,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_tab_bar(buf: &mut TermBuf, app: &mut App, title: Rect, surface: Style, accent: Style, p: &Painter) {
     buf.set_style(title, surface);
-    let buttons: [(&str, Button, bool); 4] = [
+    let buttons: [(&str, Button, bool); 5] = [
+        (" Prefs ", Button::Prefs, app.prefs.is_some()),
         (" Save ", Button::Save, app.tab.buf.is_dirty()),
         (" Wrap ", Button::Wrap, app.wrap),
         (" Mouse ", Button::Mouse, app.mouse_enabled),
@@ -657,6 +665,102 @@ fn draw_dialog(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
         x += bw + 2;
     }
     app.regions.dialog_buttons = hits;
+}
+
+fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
+    use crate::prefs::{PrefsHit, Section};
+    let t = app.theme.clone();
+    let settings = app.current_settings();
+    let Some(state) = &app.prefs else { return };
+    let st = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
+    let border = p.plain_or(p.style(t.accent, t.surface_bg), Modifier::REVERSED);
+    let sel = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::BOLD | Modifier::UNDERLINED);
+    let dim = st.add_modifier(Modifier::DIM);
+    let w = area.width.saturating_sub(4).min(84);
+    let h = area.height.saturating_sub(2).min(20);
+    if w < 40 || h < 10 {
+        return;
+    }
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    let inner = draw_box(buf, r, "Preferences", st, border);
+    let mut hits = Vec::new();
+
+    // Sections.
+    let left_w = 20u16;
+    for (i, sec) in Section::ALL.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.bottom() - 2 {
+            break;
+        }
+        let style = if i == state.section { sel } else { st };
+        buf.set_stringn(inner.x, y, format!(" {:<18}", sec.title()), left_w as usize, style);
+        hits.push((Rect { x: inner.x, y, width: left_w, height: 1 }, PrefsHit::Section(i)));
+    }
+    for y in inner.y..inner.bottom() - 2 {
+        put(buf, inner.x + left_w, y, "│", 1, dim);
+    }
+
+    // Rows of the current section.
+    let rx = inner.x + left_w + 2;
+    let rw = inner.right().saturating_sub(rx);
+    let section = Section::ALL[state.section];
+    match section {
+        Section::Keys => {
+            buf.set_stringn(rx, inner.y, "Rebind in config.toml [keys]; see plica --print-config", rw as usize, dim);
+            let visible = (inner.height.saturating_sub(4)) as usize;
+            for (i, cmd) in crate::keymap::Command::ALL.iter().skip(state.keys_scroll).take(visible).enumerate() {
+                let line = format!("{:<22}{}", cmd.describe(), app.keymap.label(*cmd));
+                buf.set_stringn(rx, inner.y + 2 + i as u16, line, rw as usize, st);
+            }
+        }
+        Section::Tables => {
+            buf.set_stringn(rx, inner.y, "Markdown table editing arrives in Plica 0.4.", rw as usize, dim);
+        }
+        Section::Highlights => {
+            buf.set_stringn(rx, inner.y, "Word and phrase highlighting arrives in Plica 0.3.", rw as usize, dim);
+        }
+        _ => {
+            let rows = section.rows();
+            for (i, row) in rows.iter().enumerate() {
+                let y = inner.y + i as u16;
+                let focused = i == state.row;
+                let lst = if focused { st.add_modifier(Modifier::BOLD) } else { st };
+                buf.set_stringn(rx, y, format!("{:<20}", row.label()), 20, lst);
+                let vx = rx + 21;
+                let val = row.value(&settings);
+                let vst = if focused { sel } else { st };
+                buf.set_stringn(vx, y, &val, rw.saturating_sub(21) as usize, vst);
+                hits.push((Rect { x: rx, y, width: rw, height: 1 }, PrefsHit::Row(i)));
+                if val.starts_with('‹') {
+                    let n = val.chars().count() as u16;
+                    // ‹ and › are listed first so they win over the row hit.
+                    hits.insert(0, (Rect { x: vx, y, width: 2, height: 1 }, PrefsHit::Dec(i)));
+                    hits.insert(0, (Rect { x: vx + n - 2, y, width: 2, height: 1 }, PrefsHit::Inc(i)));
+                }
+            }
+            if let Some(row) = rows.get(state.row) {
+                buf.set_stringn(rx, inner.y + rows.len() as u16 + 1, row.hint(), rw as usize, dim);
+            }
+        }
+    }
+
+    // Footer: buttons and hints.
+    let fy = inner.bottom() - 1;
+    let mut x = inner.x;
+    for (label, hit) in [(" Save ", PrefsHit::Save), (" Apply ", PrefsHit::Apply), (" Cancel ", PrefsHit::Cancel)] {
+        let bw = label.len() as u16;
+        buf.set_stringn(x, fy, label, bw as usize, st.add_modifier(Modifier::BOLD | Modifier::REVERSED));
+        hits.push((Rect { x, y: fy, width: bw, height: 1 }, hit));
+        x += bw + 1;
+    }
+    buf.set_stringn(x, fy, " ←/→ change · Tab section · Ctrl+S save · Esc cancel", inner.right().saturating_sub(x) as usize, dim);
+    if let Some(path) = &app.config_path {
+        let shown = std::env::var_os("HOME")
+            .and_then(|h| path.strip_prefix(h).ok().map(|r| format!("~/{}", r.display())))
+            .unwrap_or_else(|| path.display().to_string());
+        buf.set_stringn(rx, fy - 1, format!("Changes preview live · Save writes {shown}"), rw as usize, dim);
+    }
+    app.regions.prefs_hits = hits;
 }
 
 fn digits(n: usize) -> usize {

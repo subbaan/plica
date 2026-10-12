@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0 (2026-10-12): Phase 2, preferences and polish
+
+Completes Phase 2 (tabs 0.1.1, dialogs 0.1.2, find/replace 0.1.3, recovery 0.1.4, config 0.1.5, primary selection 0.1.6, and this release). Manual gate checklist: `docs/phase2-checklist.md`.
+
+- **Preferences dialog** (F9, Ctrl+, where the terminal sends it, or the Prefs button): Editor, Interaction, Appearance, Files & Recovery, and a read-only Keybindings list; Tables and Highlights are placeholders for 0.4 / 0.3. Keyboard (↑/↓, ←/→, Space/Enter, Tab between sections) and mouse (click values, ‹ › arrows, buttons).
+- Changes preview live, including the colour theme and palette file. **Save** writes `config.toml`, keeping your comments and layout and only adding settings that differ from the defaults; the first save keeps your original as `config.toml.bak`; a config with a syntax error is never overwritten. **Apply** keeps changes for this session; **Cancel** reverts.
+- Crash recovery can be switched on or off at runtime; switching it off removes this session's snapshots.
+- When colours come from `--palette`, `--builtin-theme` or `PLICA_PALETTE`, Preferences shows (and saves) that choice.
+- `make perf`: large-file (35 MB) responsiveness test.
+
 ## 0.1.6 (2026-10-12): primary selection
 
 - Selecting text sets the X11/Wayland primary selection (mouse selections on release, keyboard selections once they settle), via OSC 52 (Kitty accepts it) and xclip / xsel / wl-copy when present. Middle-click in the text pastes it at the pointer. Turn off with `interaction.primary_selection = false`.

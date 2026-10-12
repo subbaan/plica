@@ -1,7 +1,7 @@
 # Standard build: release binary + project-root symlink ./plica.
 # There is deliberately no install target.
 
-.PHONY: build test check lint run e2e
+.PHONY: build test check lint run e2e perf
 
 build:
 	cargo build --release
@@ -21,3 +21,7 @@ run: build
 # End-to-end pty test (needs python-pexpect + python-pyte).
 e2e: build
 	python3 -I tests/e2e/pty_harness.py
+
+# Large-file responsiveness (35 MB; needs python-pexpect + python-pyte).
+perf: build
+	python3 -I tests/e2e/perf.py

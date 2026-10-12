@@ -1,6 +1,7 @@
 //! User configuration: `$XDG_CONFIG_HOME/plica/config.toml`.
 //!
-//! Plica never writes this file. Loading is resilient: each setting is
+//! Plica only writes this file when the user presses Save in Preferences
+//! (see prefs.rs, which keeps their comments). Loading is resilient: each setting is
 //! validated on its own, and a bad value or unknown key produces a warning
 //! while that setting keeps its default. A syntax error falls back to all
 //! defaults (with a warning). Plica always starts.
@@ -258,7 +259,8 @@ pub fn default_text() -> String {
     }
     format!(
         r#"# Plica configuration ({path})
-# Plica only reads this file. Lines starting with # are comments.
+# Plica writes this file only when you press Save in Preferences, keeping your
+# comments. Lines starting with # are comments.
 version = {SCHEMA_VERSION}
 
 [editor]

@@ -63,6 +63,7 @@ commands! {
     ScrollUp => "scroll_up", "Scroll up a line", ["ctrl+up"];
     ScrollDown => "scroll_down", "Scroll down a line", ["ctrl+down"];
     Help => "help", "Help", ["f1"];
+    Preferences => "preferences", "Preferences", ["f9", "ctrl+,"];
 }
 
 /// A key plus modifiers, normalised so equivalent events compare equal.

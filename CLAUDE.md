@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-Plica is a mouse-friendly terminal text editor (Mousepad/Gedit feel, not Vim/Emacs). `PLICA_IMPLEMENTATION_PLAN_v0.1.0.md` is the source of truth for scope, phases and release gates. Phase 0 and the Phase 1 feature list are done (0.1.0); next is Phase 2 (0.2.0). The stack (Rust, crossterm/ratatui, ropey) in `docs/adr/0001-language-and-tui-stack.md` is approved. `docs/phase0-report.md` has the capability matrix, terminal shortcut conflicts, known limitations and the proposed next slices. Break work into small, reviewable slices.
+Plica is a mouse-friendly terminal text editor (Mousepad/Gedit feel, not Vim/Emacs). `PLICA_IMPLEMENTATION_PLAN_v0.1.0.md` is the source of truth for scope, phases and release gates. Phases 0–2 are done (0.2.0; Phase 2 manual gate checklist in `docs/phase2-checklist.md`); next is Phase 3 (0.3.0: shared colours polish and word/phrase highlighting). The stack (Rust, crossterm/ratatui, ropey) in `docs/adr/0001-language-and-tui-stack.md` is approved. `docs/phase0-report.md` has the capability matrix, terminal shortcut conflicts, known limitations and the proposed next slices. Break work into small, reviewable slices.
 
 ## Commands
 
 - `make build`: release build; recreates the `./plica` → `target/release/plica` symlink. No install target, by design.
 - `make check`: clippy with `-D warnings`, unit tests, release build. Run after every change.
 - `cargo test <name>` runs a single unit test (e.g. `cargo test layout::tests::word_wrap`).
+- `make perf`: 35 MB large-file responsiveness test.
 - `make e2e`: pty end-to-end test (`tests/e2e/pty_harness.py`; needs python-pexpect + python-pyte). Sends real key and SGR mouse sequences, checks rendered cells and colours, saved bytes, live palette reload and terminal teardown. Uses a temp dir, never the user's real palette or state dir.
 - `./plica --check-palette PATH`: print the parsed palette, resolved roles and contrast ratios.
 - Version lives only in `Cargo.toml` (`ui::VERSION` reads it).

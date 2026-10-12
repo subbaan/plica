@@ -6,7 +6,8 @@ use crate::dialog::{Action, Button as DButton, Dialog};
 use crate::drop;
 use crate::recovery::{Recovery, Snapshot};
 use crate::find::{FindBar, FindHit, SearchOpts};
-use crate::config::IndentMode;
+use crate::config::{IndentMode, ThemeChoice};
+use crate::prefs::{PrefsHit, PrefsState};
 use crate::keymap::{Command, Keymap};
 use crate::tab::{Tab, TabOpts};
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
@@ -45,6 +46,7 @@ pub enum Level {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
     GotoLine,
+    PalettePath,
     SaveAs,
     Open,
 }
@@ -58,6 +60,7 @@ impl PromptKind {
     pub fn label(self) -> &'static str {
         match self {
             PromptKind::GotoLine => "Go to line",
+            PromptKind::PalettePath => "Palette file (empty = none)",
             PromptKind::SaveAs => "Save as",
             PromptKind::Open => "Open",
         }
@@ -73,6 +76,7 @@ enum DragUnit {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Button {
+    Prefs,
     Save,
     Wrap,
     Mouse,
@@ -89,6 +93,7 @@ pub struct Regions {
     pub tab_bar: Rect,
     pub tab_hits: Vec<(Rect, TabHit)>,
     pub dialog_buttons: Vec<(Rect, usize)>,
+    pub prefs_hits: Vec<(Rect, PrefsHit)>,
     pub find_hits: Vec<(Rect, FindHit)>,
 }
 
@@ -156,6 +161,14 @@ pub struct App {
     last_click: Option<(Instant, u16, u16, u8)>,
     pub dialog: Option<Dialog>,
     pub recovery: Option<Recovery>,
+    pub recovery_enabled: bool,
+    pub prefs: Option<PrefsState>,
+    /// Theme setting as configured (the resolved colours are `theme`).
+    pub theme_choice: ThemeChoice,
+    pub palette_setting: Option<PathBuf>,
+    /// Set when the colour source changed and the palette watcher must be rebuilt.
+    pub palette_watch_dirty: bool,
+    pub config_path: Option<PathBuf>,
     /// Snapshots from a crashed session, offered at startup.
     pub recovery_offer: Vec<Snapshot>,
     after_save: Option<AfterSave>,
@@ -195,6 +208,12 @@ impl App {
             last_click: None,
             dialog: None,
             recovery: None,
+            recovery_enabled: true,
+            prefs: None,
+            theme_choice: ThemeChoice::Auto,
+            palette_setting: None,
+            palette_watch_dirty: false,
+            config_path: None,
             recovery_offer: Vec::new(),
             after_save: None,
         }
@@ -476,6 +495,25 @@ impl App {
         self.recovery = Some(r);
     }
 
+    /// Turn crash recovery on or off at runtime (Preferences).
+    pub fn set_recovery_enabled(&mut self, on: bool) {
+        self.recovery_enabled = on;
+        if on && self.recovery.is_none() {
+            self.recovery = crate::recovery::default_dir().and_then(|d| Recovery::new(d).ok());
+            if self.recovery.is_none() {
+                self.warn("Cannot create the recovery directory");
+            }
+        } else if !on {
+            self.discard_all_snapshots();
+            if let Some(r) = self.recovery.take() {
+                r.flush();
+            }
+            for i in 0..self.tab_count() {
+                self.tab_at_mut(i).snap_key = None;
+            }
+        }
+    }
+
     /// Unsaved changes the user chose to throw away (quit without saving):
     /// remove their snapshots.
     pub fn discard_all_snapshots(&mut self) {
@@ -511,7 +549,7 @@ impl App {
 
     // ---- external changes ----------------------------------------------------------
 
-    fn tab_at_mut(&mut self, i: usize) -> &mut Tab {
+    pub fn tab_at_mut(&mut self, i: usize) -> &mut Tab {
         match i.cmp(&self.active) {
             std::cmp::Ordering::Equal => &mut self.tab,
             std::cmp::Ordering::Less => &mut self.bg_tabs[i],
@@ -711,6 +749,10 @@ impl App {
             self.on_prompt_key(k);
             return;
         }
+        if self.prefs.is_some() {
+            self.on_prefs_key(k);
+            return;
+        }
         if self.find.is_some() && self.on_find_key(k) {
             return;
         }
@@ -814,6 +856,7 @@ impl App {
             Command::ScrollUp => return self.scroll_rows(-1),
             Command::ScrollDown => return self.scroll_rows(1),
             Command::Help => self.show_help = true,
+            Command::Preferences => self.open_prefs(),
         }
         self.tab.follow_caret = true;
     }
@@ -1224,6 +1267,7 @@ impl App {
                 let input = p.input.clone();
                 match kind {
                     PromptKind::GotoLine => self.goto_line(&input),
+                    PromptKind::PalettePath => self.set_palette_path(&input),
                     PromptKind::SaveAs if !input.is_empty() => self.save_as(&input),
                     PromptKind::Open if !input.is_empty() => self.open_path(&input),
                     _ => {}
@@ -1273,6 +1317,14 @@ impl App {
                     if let Some(a) = action {
                         self.run_action(a);
                     }
+                }
+            }
+            _ if self.prefs.is_some() => {
+                if let MouseEventKind::Down(MouseButton::Left) = m.kind
+                    && self.prompt.is_none()
+                    && let Some(&(_, hit)) = self.regions.prefs_hits.iter().find(|(r, _)| contains(*r, m.column, m.row))
+                {
+                    self.on_prefs_click(hit);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -1461,6 +1513,7 @@ impl App {
 
     fn press_button(&mut self, b: Button) {
         match b {
+            Button::Prefs => self.open_prefs(),
             Button::Save => {
                 self.after_save = None;
                 self.save_active(false);
@@ -2083,5 +2136,62 @@ mod tests {
         a.primary_due = Some(Instant::now());
         a.tick();
         assert_eq!(a.clipboard.paste_primary(), "world");
+    }
+
+    #[test]
+    fn preferences_preview_cancel_and_save() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("plica").join("config.toml");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        std::fs::write(&cfg, "# mine\n[editor]\nwrap = true # keep\n").unwrap();
+        let mut a = app_with("x", 40, 10);
+        a.config_path = Some(cfg.clone());
+        assert!(a.wrap);
+        key(&mut a, KeyCode::F(9), KeyModifiers::NONE);
+        assert!(a.prefs.is_some());
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE); // Soft wrap row
+        key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert!(!a.wrap, "change previews live");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.wrap, "Cancel reverts");
+        // Change again and save.
+        key(&mut a, KeyCode::F(9), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(a.prefs.is_none());
+        let saved = std::fs::read_to_string(&cfg).unwrap();
+        assert!(saved.contains("# mine") && saved.contains("wrap = false # keep"), "{saved}");
+        assert_eq!(std::fs::read_to_string(cfg.with_extension("toml.bak")).unwrap(), "# mine\n[editor]\nwrap = true # keep\n");
+        let (c, w) = crate::config::parse(&saved);
+        assert!(w.is_empty() && !c.wrap);
+    }
+
+    #[test]
+    fn preferences_refuse_to_overwrite_broken_config() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("config.toml");
+        std::fs::write(&cfg, "[editor\nwrap = ").unwrap();
+        let mut a = app_with("", 40, 10);
+        a.config_path = Some(cfg.clone());
+        key(&mut a, KeyCode::F(9), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(a.prefs.is_some(), "dialog stays open");
+        assert!(a.status.as_ref().unwrap().0.contains("syntax error"));
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "[editor\nwrap = ", "file untouched");
+    }
+
+    #[test]
+    fn preferences_create_config_from_template_when_missing() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("new").join("config.toml");
+        let mut a = app_with("", 40, 10);
+        a.config_path = Some(cfg.clone());
+        key(&mut a, KeyCode::F(9), KeyModifiers::NONE);
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE); // tab width 4 -> 5
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let saved = std::fs::read_to_string(&cfg).unwrap();
+        assert!(saved.contains("tab_width = 5") && saved.contains("# Plica configuration"), "{saved}");
+        assert!(!cfg.with_extension("toml.bak").exists(), "no backup of a file that didn't exist");
     }
 }

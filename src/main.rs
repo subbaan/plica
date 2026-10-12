@@ -1,11 +1,13 @@
 mod app;
 mod buffer;
 mod clipboard;
+mod colours;
 mod config;
 mod dialog;
 mod document;
 mod drop;
 mod find;
+mod prefs;
 mod keymap;
 mod layout;
 mod recovery;
@@ -131,16 +133,6 @@ fn env_palette() -> Option<PathBuf> {
     std::env::var_os("PLICA_PALETTE").filter(|p| !p.is_empty()).map(|p| app::expand_tilde(&p.to_string_lossy()))
 }
 
-/// Candidate shared desktop palette (only if it exists).
-fn kitty_palette() -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".config")))?;
-    let candidate = config.join("kitty").join("current-theme.conf");
-    candidate.is_file().then_some(candidate)
-}
-
 fn check_palette(path: &Path) -> Result<()> {
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let report = theme::parse_kitty(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
@@ -208,54 +200,15 @@ fn run() -> Result<()> {
     }
 
     // Choose the colour source (CLI > environment > config > auto).
-    enum Colours {
-        Builtin,
-        Terminal,
-        Palette(PathBuf),
-    }
-    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-    let mut theme_note = None;
-    let colours = if args.builtin {
-        Colours::Builtin
+    let palette_overridden = args.builtin || args.palette.is_some() || env_palette().is_some();
+    let (colour_choice, theme_note) = if args.builtin {
+        (colours::Colours::Builtin, None)
     } else if let Some(p) = args.palette.clone().or_else(env_palette) {
-        Colours::Palette(p)
+        (colours::Colours::Palette(p), None)
     } else {
-        use config::ThemeChoice;
-        match cfg.theme {
-            ThemeChoice::Dracula => Colours::Builtin,
-            ThemeChoice::Terminal => Colours::Terminal,
-            ThemeChoice::Palette => match cfg.palette.clone().or_else(kitty_palette) {
-                Some(p) => Colours::Palette(p),
-                None => {
-                    theme_note = Some("theme = \"palette\" but no palette file is set or found; using Dracula".to_string());
-                    Colours::Builtin
-                }
-            },
-            ThemeChoice::Auto => match cfg.palette.clone() {
-                Some(p) => Colours::Palette(p),
-                None if no_color => Colours::Terminal,
-                None => kitty_palette().map_or(Colours::Builtin, Colours::Palette),
-            },
-        }
+        colours::decide(cfg.theme, cfg.palette.as_deref())
     };
-    let (theme, source, startup_warning) = match colours {
-        Colours::Terminal => (theme::resolve(&theme::dracula()), ThemeSource::TerminalDefault, theme_note),
-        Colours::Palette(path) => {
-            let path = std::path::absolute(&path).unwrap_or(path);
-            let parsed = std::fs::read_to_string(&path)
-                .map_err(|e| e.to_string())
-                .and_then(|t| theme::parse_kitty(&t).map_err(|e| e.to_string()));
-            match parsed {
-                Ok(r) => (theme::resolve(&r.palette), ThemeSource::File { path, last_error: None }, None),
-                Err(e) => (
-                    theme::resolve(&theme::dracula()),
-                    ThemeSource::File { path: path.clone(), last_error: Some(e.clone()) },
-                    Some(format!("Palette {} unusable ({e}); using Dracula until it is fixed", path.display())),
-                ),
-            }
-        }
-        Colours::Builtin => (theme::resolve(&theme::dracula()), ThemeSource::Builtin, theme_note),
-    };
+    let (theme, source, startup_warning) = colours::load(colour_choice, theme_note);
 
     let (guard, caps) = term::TermGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
@@ -274,6 +227,21 @@ fn run() -> Result<()> {
     app.show_whitespace = cfg.show_whitespace;
     app.keymap = cfg.keymap();
     app.primary_selection = cfg.primary_selection;
+    app.theme_choice = cfg.theme;
+    app.palette_setting = cfg.palette.clone();
+    app.recovery_enabled = cfg.recovery;
+    app.config_path = config_path.clone();
+    if palette_overridden {
+        // Colours came from --palette/--builtin-theme/PLICA_PALETTE; record
+        // what that means so Preferences shows (and saves) the truth.
+        match &app.theme_source {
+            ThemeSource::File { path, .. } => {
+                app.theme_choice = config::ThemeChoice::Palette;
+                app.palette_setting = Some(path.clone());
+            }
+            _ => app.theme_choice = config::ThemeChoice::Dracula,
+        }
+    }
     if !cfg.mouse {
         app.mouse_enabled = false;
         let _ = term::set_mouse(false);
@@ -298,8 +266,9 @@ fn run() -> Result<()> {
     }
 
     // Palette watcher (parent directory, survives atomic replacement).
+    // Rebuilt when Preferences change the colour source.
     let (tx, rx) = mpsc::channel();
-    let _watcher = match &app.theme_source {
+    let make_palette_watcher = |app: &mut App, tx: mpsc::Sender<watch::PaletteTouched>| match &app.theme_source {
         ThemeSource::File { path, .. } => match watch::PaletteWatcher::new(path, tx) {
             Ok(w) => Some(w),
             Err(e) => {
@@ -309,6 +278,7 @@ fn run() -> Result<()> {
         },
         _ => None,
     };
+    let mut _palette_watcher = make_palette_watcher(&mut app, tx.clone());
 
     // Document watcher: reload clean tabs / flag conflicts on external change.
     let (doc_tx, doc_rx) = mpsc::channel::<PathBuf>();
@@ -328,6 +298,10 @@ fn run() -> Result<()> {
             redraw = false;
         }
         app.tick_recovery(false);
+        if app.palette_watch_dirty {
+            app.palette_watch_dirty = false;
+            _palette_watcher = make_palette_watcher(&mut app, tx.clone());
+        }
         while rx.try_recv().is_ok() {
             palette_due = Some(Instant::now() + PALETTE_DEBOUNCE);
         }

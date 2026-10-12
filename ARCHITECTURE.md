@@ -24,6 +24,8 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
         ├─ config.rs ── config.toml loading/validation, defaults text
+        ├─ prefs.rs ─── Preferences model/dialog, live apply, comment-preserving save
+        ├─ colours.rs ─ colour-source decision and loading (startup + Preferences)
         └─ theme.rs ─── parse_kitty → Palette → resolve → Theme (semantic roles, contrast repair)
 ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → truecolour / 256 / plain
 ```
@@ -46,6 +48,15 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.2.0
+
+- **Preferences write the config with `toml_edit`**, editing the user's document in place: values are replaced keeping each line's decor (trailing comments, spacing), keys are only added when they differ from the default (existing keys are always updated), and `[keys]`/unknown entries are untouched. A missing file starts from the commented `--print-config` template. *Safety:* a file with a syntax error is refused (the dialog stays open), the user's pre-Plica file is copied once to `config.toml.bak`, and the write goes through `Document::save` (atomic, follows symlinks such as dotfile links, keeps permissions).
+- **Live preview = apply immediately; Cancel re-applies the snapshot taken when the dialog opened.** One code path (`apply_settings`) serves preview, Apply and Cancel, so they can't diverge.
+- **Colour selection moved to `colours.rs`** so startup and Preferences use the same decision; a theme or palette change sets `palette_watch_dirty` and the main loop rebuilds the palette watcher for the new file.
+- **CLI/env colour overrides are reflected into the Preferences model** at startup (`theme_choice`/`palette_setting`), so saving from Preferences records what is actually in use instead of silently reverting to the config's older value.
+- **The kept-alive palette watcher is named `_palette_watcher`:** it is only held for its `Drop`; an underscore-prefixed binding keeps it alive without an unused-variable warning (a bare `_` would drop it at once).
+- **Known limitation:** incremental find re-searches the whole document when the query changes (about 150 ms per keystroke on a 35 MB file, measured by `make perf`). Fine for normal files; a future optimisation could narrow the previous results or debounce.
 
 ### 2026-10-12 · 0.1.6
 
