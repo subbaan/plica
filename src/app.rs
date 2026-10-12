@@ -2,6 +2,7 @@
 
 use crate::buffer::{Buffer, EditKind, Selection};
 use crate::clipboard::Clipboard;
+use crate::dialog::{Action, Button as DButton, Dialog};
 use crate::drop;
 use crate::tab::Tab;
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
@@ -81,6 +82,7 @@ pub struct Regions {
     pub buttons: Vec<(Rect, Button)>,
     pub tab_bar: Rect,
     pub tab_hits: Vec<(Rect, TabHit)>,
+    pub dialog_buttons: Vec<(Rect, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,11 +93,20 @@ pub enum TabHit {
     Next,
 }
 
+/// What to do once the active tab has been saved successfully (a save can
+/// be interrupted by the Save As prompt or a dialog, so this is remembered).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pending {
-    Quit,
+enum AfterSave {
     CloseTab,
-    OverwriteExternal,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveOutcome {
+    Saved,
+    /// Waiting on the Save As prompt or a dialog.
+    Waiting,
+    Failed,
 }
 
 pub struct App {
@@ -129,7 +140,8 @@ pub struct App {
     dragging_scrollbar: bool,
     last_mouse: (u16, u16),
     last_click: Option<(Instant, u16, u16, u8)>,
-    pending: Option<Pending>,
+    pub dialog: Option<Dialog>,
+    after_save: Option<AfterSave>,
 }
 
 impl App {
@@ -158,7 +170,8 @@ impl App {
             dragging_scrollbar: false,
             last_mouse: (0, 0),
             last_click: None,
-            pending: None,
+            dialog: None,
+            after_save: None,
         }
     }
 
@@ -220,40 +233,215 @@ impl App {
         self.after_tab_change();
     }
 
-    /// Close the active tab, asking first (second request confirms) if it
-    /// has unsaved changes.
-    fn request_close_tab(&mut self, pending: Option<Pending>) {
-        if self.tab.buf.is_dirty() && pending != Some(Pending::CloseTab) {
-            self.pending = Some(Pending::CloseTab);
-            self.warn("Unsaved changes! Close again to discard them, or Ctrl+S to save");
-        } else {
+    /// Close the active tab, asking first if it has unsaved changes.
+    fn request_close_tab(&mut self) {
+        if !self.tab.buf.is_dirty() {
             self.close_active_tab();
+            return;
+        }
+        let name = self.tab.doc.display_name();
+        self.dialog = Some(Dialog::new(
+            "Unsaved changes",
+            vec![format!("Save changes to {name} before closing?")],
+            vec![
+                DButton::new("&Save", Action::SaveThenClose),
+                DButton::new("Do&n't Save", Action::DiscardThenClose),
+                DButton::new("&Cancel", Action::Cancel),
+            ],
+        ));
+    }
+
+    /// Quit, asking about unsaved tabs first.
+    fn request_quit(&mut self) {
+        let dirty: Vec<usize> = (0..self.tab_count()).filter(|&i| self.tab_at(i).buf.is_dirty()).collect();
+        match dirty.len() {
+            0 => self.quit = true,
+            1 => {
+                self.switch_to(dirty[0]);
+                let name = self.tab.doc.display_name();
+                self.dialog = Some(Dialog::new(
+                    "Unsaved changes",
+                    vec![format!("Save changes to {name} before quitting?")],
+                    vec![
+                        DButton::new("&Save", Action::SaveThenQuit),
+                        DButton::new("Do&n't Save", Action::DiscardAndQuit),
+                        DButton::new("&Cancel", Action::Cancel),
+                    ],
+                ));
+            }
+            n => {
+                self.dialog = Some(Dialog::new(
+                    "Unsaved changes",
+                    vec![format!("{n} documents have unsaved changes.")],
+                    vec![
+                        DButton::new("Save &All", Action::SaveAllThenQuit),
+                        DButton::new("&Quit Without Saving", Action::DiscardAndQuit),
+                        DButton::new("&Cancel", Action::Cancel),
+                    ],
+                ));
+            }
         }
     }
 
-    fn on_tab_bar_click(&mut self, hit: TabHit, pending: Option<Pending>) {
+    fn on_tab_bar_click(&mut self, hit: TabHit) {
         match hit {
             TabHit::Select(i) => self.switch_to(i),
             TabHit::Close(i) => {
-                // Keep a pending confirmation if it is for this same tab.
-                let pending = if i == self.active { pending } else { None };
                 self.switch_to(i);
-                self.request_close_tab(pending);
+                self.request_close_tab();
             }
             TabHit::Prev => self.cycle_tab(-1),
             TabHit::Next => self.cycle_tab(1),
         }
     }
 
-    fn after_tab_change(&mut self) {
-        self.drag = None;
-        self.pending = None;
-        self.rendered_rows.clear();
-        self.tab.follow_caret = true;
+    // ---- dialogs and save chains ---------------------------------------------------
+
+    fn run_action(&mut self, action: Action) {
+        self.dialog = None;
+        match action {
+            Action::Cancel => self.after_save = None,
+            Action::SaveThenClose => {
+                self.after_save = Some(AfterSave::CloseTab);
+                if self.save_active(false) == SaveOutcome::Saved {
+                    self.continue_after_save();
+                }
+            }
+            Action::DiscardThenClose => self.close_active_tab(),
+            Action::SaveThenQuit | Action::SaveAllThenQuit => self.save_all_then_quit(),
+            Action::DiscardAndQuit => self.quit = true,
+            Action::Overwrite => {
+                if self.save_active(true) == SaveOutcome::Saved {
+                    self.continue_after_save();
+                }
+            }
+            Action::ReloadFromDisk => {
+                self.after_save = None;
+                self.reload_active();
+            }
+            Action::KeepMine => {
+                self.after_save = None;
+                self.tab.disk_conflict = false;
+                self.info("Keeping your version; saving will ask before overwriting");
+            }
+            Action::SaveAs => self.open_prompt(PromptKind::SaveAs),
+            Action::Replace(path) => {
+                if self.save_as_path(path) {
+                    self.continue_after_save();
+                }
+            }
+        }
     }
 
-    fn dirty_tab_count(&self) -> usize {
-        (0..self.tab_count()).filter(|&i| self.tab_at(i).buf.is_dirty()).count()
+    fn continue_after_save(&mut self) {
+        match self.after_save.take() {
+            Some(AfterSave::CloseTab) => self.close_active_tab(),
+            Some(AfterSave::Quit) => self.save_all_then_quit(),
+            None => {}
+        }
+    }
+
+    /// Save every unsaved tab in order, stopping to ask for a name or about
+    /// a disk conflict; the chain resumes after each successful save.
+    fn save_all_then_quit(&mut self) {
+        for i in 0..self.tab_count() {
+            if self.tab_at(i).buf.is_dirty() {
+                self.switch_to(i);
+                self.after_save = Some(AfterSave::Quit);
+                if self.save_active(false) != SaveOutcome::Saved {
+                    return;
+                }
+            }
+        }
+        self.after_save = None;
+        self.quit = true;
+    }
+
+    // ---- external changes ----------------------------------------------------------
+
+    fn tab_at_mut(&mut self, i: usize) -> &mut Tab {
+        match i.cmp(&self.active) {
+            std::cmp::Ordering::Equal => &mut self.tab,
+            std::cmp::Ordering::Less => &mut self.bg_tabs[i],
+            std::cmp::Ordering::Greater => &mut self.bg_tabs[i - 1],
+        }
+    }
+
+    /// Directories holding open files (for the document watcher).
+    pub fn watched_dirs(&self) -> std::collections::BTreeSet<PathBuf> {
+        self.all_tabs()
+            .filter_map(|t| t.doc.path.as_ref()?.parent().map(Path::to_path_buf))
+            .collect()
+    }
+
+    /// A watched path changed on disk (already debounced).
+    pub fn on_disk_change(&mut self, path: &Path) {
+        if let Some(i) = (0..self.tab_count()).find(|&i| self.tab_at(i).doc.path.as_deref() == Some(path)) {
+            self.check_disk(i);
+        }
+    }
+
+    pub fn check_all_disk(&mut self) {
+        for i in 0..self.tab_count() {
+            self.check_disk(i);
+        }
+    }
+
+    fn check_disk(&mut self, i: usize) {
+        let is_active = i == self.active;
+        let tab = self.tab_at_mut(i);
+        if !tab.doc.changed_on_disk() {
+            return;
+        }
+        let name = tab.doc.display_name();
+        let exists = tab.doc.path.as_ref().is_some_and(|p| p.exists());
+        if !exists {
+            // Forget the stamp so we warn once; saving recreates the file.
+            tab.doc.stamp = None;
+            self.warn(format!("{name} was deleted or moved on disk; save to recreate it"));
+            return;
+        }
+        if !tab.buf.is_dirty() {
+            match tab.reload_from_disk() {
+                Ok(()) => self.info(format!("Reloaded {name} (changed on disk; Ctrl+Z restores)")),
+                Err(e) => self.warn(format!("Could not reload {name}: {e:#}")),
+            }
+        } else if is_active {
+            self.show_conflict_dialog();
+        } else {
+            tab.disk_conflict = true;
+            self.warn(format!("{name} changed on disk while it has unsaved changes"));
+        }
+    }
+
+    fn show_conflict_dialog(&mut self) {
+        self.tab.disk_conflict = false;
+        let name = self.tab.doc.display_name();
+        self.dialog = Some(Dialog::new(
+            "File changed on disk",
+            vec![format!("{name} changed on disk, and you have unsaved changes.")],
+            vec![
+                DButton::new("&Keep Mine", Action::KeepMine),
+                DButton::new("&Reload (lose my changes)", Action::ReloadFromDisk),
+            ],
+        ));
+    }
+
+    fn reload_active(&mut self) {
+        let name = self.tab.doc.display_name();
+        match self.tab.reload_from_disk() {
+            Ok(()) => self.info(format!("Reloaded {name} (Ctrl+Z restores your version)")),
+            Err(e) => self.warn(format!("Could not reload {name}: {e:#}")),
+        }
+    }
+
+    fn after_tab_change(&mut self) {
+        self.drag = None;
+        self.rendered_rows.clear();
+        self.tab.follow_caret = true;
+        if self.tab.disk_conflict && self.dialog.is_none() {
+            self.show_conflict_dialog();
+        }
     }
 
     /// All tabs, in order (for recovery snapshots).
@@ -331,9 +519,7 @@ impl App {
                     self.paste_text(&text);
                 }
             }
-            Event::FocusGained if self.tab.doc.changed_on_disk() => {
-                self.warn("File changed on disk since it was opened/saved");
-            }
+            Event::FocusGained => self.check_all_disk(),
             _ => {}
         }
     }
@@ -356,9 +542,12 @@ impl App {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
 
-        // Any key other than the confirming one cancels a pending confirmation.
-        let pending = self.pending.take();
-
+        if let Some(d) = &mut self.dialog {
+            if let Some(action) = d.on_key(k) {
+                self.run_action(action);
+            }
+            return;
+        }
         if self.show_help {
             self.show_help = false;
             return;
@@ -376,18 +565,13 @@ impl App {
             // -- file / app --
             (_, Some('s')) if ctrl && shift => self.open_prompt(PromptKind::SaveAs),
             (KeyCode::F(12), _) => self.open_prompt(PromptKind::SaveAs),
-            (_, Some('s')) if ctrl => self.save(pending == Some(Pending::OverwriteExternal)),
-            (_, Some('o')) if ctrl => self.open_prompt(PromptKind::Open),
-            (_, Some('q')) if ctrl => {
-                let dirty = self.dirty_tab_count();
-                if dirty > 0 && pending != Some(Pending::Quit) {
-                    self.pending = Some(Pending::Quit);
-                    self.warn(format!("{dirty} tab(s) have unsaved changes! Ctrl+Q again quits without saving"));
-                } else {
-                    self.quit = true;
-                }
+            (_, Some('s')) if ctrl => {
+                self.after_save = None;
+                self.save_active(false);
             }
-            (_, Some('w')) if ctrl => self.request_close_tab(pending),
+            (_, Some('o')) if ctrl => self.open_prompt(PromptKind::Open),
+            (_, Some('q')) if ctrl => self.request_quit(),
+            (_, Some('w')) if ctrl => self.request_close_tab(),
             (_, Some('n')) if ctrl => {
                 self.add_tab(Tab::untitled(self.tab_width));
                 self.info("New file");
@@ -707,45 +891,83 @@ impl App {
 
     // ---- saving --------------------------------------------------------------------
 
-    fn save(&mut self, force: bool) {
+    /// Save the active tab. Without `force`, a file that changed on disk
+    /// raises a dialog instead of being overwritten.
+    fn save_active(&mut self, force: bool) -> SaveOutcome {
         if self.tab.doc.path.is_none() {
             self.open_prompt(PromptKind::SaveAs);
-            return;
+            return SaveOutcome::Waiting;
         }
         if !force && self.tab.doc.changed_on_disk() {
-            self.pending = Some(Pending::OverwriteExternal);
-            self.warn("File changed on disk! Ctrl+S again to overwrite it, F12 to save a copy");
-            return;
+            let name = self.tab.doc.display_name();
+            let gone = !self.tab.doc.path.as_ref().is_some_and(|p| p.exists());
+            let line = if gone {
+                format!("{name} was deleted or moved on disk since it was opened.")
+            } else {
+                format!("{name} has changed on disk since it was opened.")
+            };
+            self.dialog = Some(Dialog::new(
+                "File changed on disk",
+                vec![line],
+                vec![
+                    DButton::new("&Overwrite", Action::Overwrite),
+                    DButton::new("&Reload (lose my changes)", Action::ReloadFromDisk),
+                    DButton::new("Save &As…", Action::SaveAs),
+                    DButton::new("&Cancel", Action::Cancel),
+                ],
+            ));
+            return SaveOutcome::Waiting;
         }
         let text = self.tab.buf.rope().to_string();
         match self.tab.doc.save(&text) {
             Ok(()) => {
                 self.tab.buf.mark_saved();
+                self.tab.disk_conflict = false;
                 self.info(format!("Saved {}", self.tab.doc.display_name()));
+                SaveOutcome::Saved
             }
-            Err(e) => self.warn(format!("Save failed: {e:#}")),
+            Err(e) => {
+                self.after_save = None;
+                self.warn(format!("Save failed: {e:#}"));
+                SaveOutcome::Failed
+            }
         }
     }
 
-    fn save_as(&mut self, path: &str) {
-        let path = expand_tilde(path);
-        if path.exists() {
-            // Keep it simple and safe for now: never silently clobber.
-            self.warn(format!("{} exists; choose another name (overwrite prompt arrives in 0.2)", path.display()));
+    /// Save As from the prompt: confirm before replacing another file.
+    fn save_as(&mut self, input: &str) {
+        let path = std::path::absolute(expand_tilde(input)).unwrap_or_else(|_| expand_tilde(input));
+        if path.exists() && !self.tab.shows(&path) {
+            let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+            self.dialog = Some(Dialog::new(
+                "Replace file?",
+                vec![format!("{name} already exists. Replace it?")],
+                vec![DButton::new("&Replace", Action::Replace(path)), DButton::new("&Cancel", Action::Cancel)],
+            ));
             return;
         }
+        if self.save_as_path(path) {
+            self.continue_after_save();
+        }
+    }
+
+    fn save_as_path(&mut self, path: PathBuf) -> bool {
         let old = self.tab.doc.path.replace(path);
         let old_stamp = self.tab.doc.stamp.take();
         let text = self.tab.buf.rope().to_string();
         match self.tab.doc.save(&text) {
             Ok(()) => {
                 self.tab.buf.mark_saved();
+                self.tab.disk_conflict = false;
                 self.info(format!("Saved as {}", self.tab.doc.display_name()));
+                true
             }
             Err(e) => {
                 self.tab.doc.path = old;
                 self.tab.doc.stamp = old_stamp;
+                self.after_save = None;
                 self.warn(format!("Save failed: {e:#}"));
+                false
             }
         }
     }
@@ -824,6 +1046,7 @@ impl App {
         match k.code {
             KeyCode::Esc => {
                 self.prompt = None;
+                self.after_save = None;
             }
             KeyCode::Enter => {
                 let input = p.input.clone();
@@ -914,14 +1137,23 @@ impl App {
         let alt = m.modifiers.contains(KeyModifiers::ALT);
         let shift = m.modifiers.contains(KeyModifiers::SHIFT);
         match m.kind {
+            _ if self.dialog.is_some() => {
+                if let MouseEventKind::Down(MouseButton::Left) = m.kind
+                    && let Some(&(_, i)) = self.regions.dialog_buttons.iter().find(|(r, _)| contains(*r, m.column, m.row))
+                {
+                    let action = self.dialog.as_ref().map(|d| d.buttons[i].action.clone());
+                    if let Some(a) = action {
+                        self.run_action(a);
+                    }
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
-                let pending = self.pending.take();
                 if self.show_help {
                     self.show_help = false;
                     return;
                 }
                 if let Some(hit) = self.tab_hit_at(m.column, m.row) {
-                    self.on_tab_bar_click(hit, pending);
+                    self.on_tab_bar_click(hit);
                     return;
                 }
                 if let Some(b) = self.button_at(m.column, m.row) {
@@ -978,9 +1210,8 @@ impl App {
                 self.dragging_scrollbar = false;
             }
             MouseEventKind::Down(MouseButton::Middle) => {
-                let pending = self.pending.take();
                 if let Some(TabHit::Select(i) | TabHit::Close(i)) = self.tab_hit_at(m.column, m.row) {
-                    self.on_tab_bar_click(TabHit::Close(i), pending);
+                    self.on_tab_bar_click(TabHit::Close(i));
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -1084,7 +1315,10 @@ impl App {
 
     fn press_button(&mut self, b: Button) {
         match b {
-            Button::Save => self.save(false),
+            Button::Save => {
+                self.after_save = None;
+                self.save_active(false);
+            }
             Button::Wrap => self.toggle_wrap(),
             Button::Mouse => self.toggle_mouse(),
             Button::Help => self.show_help = true,
@@ -1425,16 +1659,141 @@ mod tests {
         // Order is preserved across switches.
         let order: Vec<String> = a.all_tabs().map(|t| t.buf.rope().to_string()).collect();
         assert_eq!(order, ["A", "B", "C"]);
-        // Closing a dirty tab needs a second Ctrl+W.
+        // Closing a dirty tab asks; "Don't Save" closes it.
         key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
         assert_eq!(a.tab_count(), 3);
-        key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        assert!(a.dialog.is_some());
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
         assert_eq!((a.tab_count(), text(&a).as_str()), (2, "B"), "last tab closed -> left neighbour");
-        // Quit with unsaved tabs needs a second Ctrl+Q.
+        // Quit with one unsaved tab (B): Cancel keeps running, "Don't Save" quits.
         key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
-        assert!(!a.quit);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(!a.quit && a.dialog.is_none());
         key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
         assert!(a.quit);
+    }
+
+    fn type_str(a: &mut App, s: &str) {
+        for c in s.chars() {
+            key(a, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    #[test]
+    fn save_then_close_untitled_goes_through_save_as() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app_with("", 40, 10);
+        type_str(&mut a, "hello");
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL); // second tab so closing doesn't quit
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
+        key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE); // Save
+        assert_eq!(a.prompt.as_ref().map(|p| p.kind), Some(PromptKind::SaveAs));
+        let target = d.path().join("named.txt");
+        type_str(&mut a, &target.display().to_string());
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
+        assert_eq!(a.tab_count(), 1, "tab closed after the save");
+    }
+
+    #[test]
+    fn save_all_then_quit_saves_files_and_asks_names() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("f.txt");
+        std::fs::write(&f, "file").unwrap();
+        let mut a = app_with("", 40, 10);
+        type_str(&mut a, "untitled text");
+        a.open_file(&f);
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        type_str(&mut a, "!");
+        key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE); // Save All
+        assert!(!a.quit);
+        assert_eq!(a.prompt.as_ref().map(|p| p.kind), Some(PromptKind::SaveAs), "asks a name for Untitled");
+        let target = d.path().join("u.txt");
+        type_str(&mut a, &target.display().to_string());
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.quit);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "file!");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "untitled text");
+    }
+
+    #[test]
+    fn external_change_reloads_clean_tab_undoably() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("w.txt");
+        std::fs::write(&f, "line one\nline two\n").unwrap();
+        let mut a = app_with("", 40, 10);
+        a.open_file(&f);
+        a.tab.buf.sel = Selection::caret(a.tab.buf.line_start(1) + 4);
+        std::fs::write(&f, "changed one\nline two\nline three\n").unwrap();
+        a.on_disk_change(&f);
+        assert_eq!(text(&a), "changed one\nline two\nline three\n");
+        assert!(!a.tab.buf.is_dirty());
+        assert_eq!(a.tab.buf.sel.head, a.tab.buf.line_start(1) + 4, "caret keeps line/column");
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(text(&a), "line one\nline two\n", "Ctrl+Z restores the previous text");
+        // Our own save must not count as an external change.
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        a.on_disk_change(&f);
+        assert!(a.dialog.is_none());
+        assert_eq!(text(&a), "line one\nline two\n");
+    }
+
+    #[test]
+    fn external_change_with_unsaved_edits_asks_and_save_asks_before_overwrite() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("c.txt");
+        std::fs::write(&f, "base").unwrap();
+        let mut a = app_with("", 40, 10);
+        a.open_file(&f);
+        type_str(&mut a, "mine ");
+        std::fs::write(&f, "theirs, longer").unwrap();
+        a.on_disk_change(&f);
+        assert!(a.dialog.is_some(), "conflict dialog");
+        key(&mut a, KeyCode::Char('k'), KeyModifiers::NONE); // Keep Mine
+        assert_eq!(text(&a), "mine base");
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(a.dialog.is_some(), "save asks before overwriting");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "theirs, longer");
+        key(&mut a, KeyCode::Char('o'), KeyModifiers::NONE); // Overwrite
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "mine base");
+    }
+
+    #[test]
+    fn background_conflict_shows_dialog_when_tab_activated() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("bg.txt");
+        std::fs::write(&f, "x").unwrap();
+        let mut a = app_with("", 40, 10);
+        a.open_file(&f);
+        type_str(&mut a, "edit");
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        std::fs::write(&f, "external!").unwrap();
+        a.on_disk_change(&f);
+        assert!(a.dialog.is_none(), "no dialog while the tab is in the background");
+        key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
+        assert!(a.dialog.is_some());
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE); // Reload
+        assert_eq!(text(&a), "external!");
+    }
+
+    #[test]
+    fn save_as_onto_existing_file_asks_to_replace() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("exists.txt");
+        std::fs::write(&f, "old").unwrap();
+        let mut a = app_with("", 40, 10);
+        type_str(&mut a, "new");
+        key(&mut a, KeyCode::F(12), KeyModifiers::NONE);
+        type_str(&mut a, &f.display().to_string());
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.dialog.is_some());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
+        key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE); // Replace
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
+        assert!(!a.tab.buf.is_dirty());
     }
 
     #[test]

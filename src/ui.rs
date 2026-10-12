@@ -253,6 +253,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_help(buf, app, area, &p);
         caret_pos = None;
     }
+    app.regions.dialog_buttons.clear();
+    if app.dialog.is_some() {
+        draw_dialog(buf, app, area, &p);
+        caret_pos = None;
+    }
 
     if let Some(pos) = caret_pos {
         f.set_cursor_position(pos);
@@ -497,6 +502,68 @@ fn fit_middle(s: &str, w: usize) -> String {
     let start: String = s.chars().take(head).collect();
     let end: String = s.chars().skip(n - tail).collect();
     format!("{start}…{end}")
+}
+
+/// Rounded box with a title in the top border; returns the inner rect.
+fn draw_box(buf: &mut TermBuf, r: Rect, title: &str, st: Style, border: Style) -> Rect {
+    for y in r.y..r.bottom() {
+        for x in r.x..r.right() {
+            put(buf, x, y, " ", 1, st);
+        }
+    }
+    for x in r.x..r.right() {
+        put(buf, x, r.y, "─", 1, border);
+        put(buf, x, r.bottom() - 1, "─", 1, border);
+    }
+    for y in r.y..r.bottom() {
+        put(buf, r.x, y, "│", 1, border);
+        put(buf, r.right() - 1, y, "│", 1, border);
+    }
+    put(buf, r.x, r.y, "╭", 1, border);
+    put(buf, r.right() - 1, r.y, "╮", 1, border);
+    put(buf, r.x, r.bottom() - 1, "╰", 1, border);
+    put(buf, r.right() - 1, r.bottom() - 1, "╯", 1, border);
+    if !title.is_empty() {
+        buf.set_stringn(r.x + 2, r.y, format!(" {title} "), r.width.saturating_sub(4) as usize, border.add_modifier(Modifier::BOLD));
+    }
+    Rect { x: r.x + 2, y: r.y + 1, width: r.width.saturating_sub(4), height: r.height.saturating_sub(2) }
+}
+
+fn draw_dialog(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
+    let t = &app.theme;
+    let Some(d) = &app.dialog else { return };
+    let st = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
+    let border = p.plain_or(p.style(t.accent, t.surface_bg), Modifier::REVERSED);
+    let focus = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::BOLD | Modifier::UNDERLINED);
+    let labels: Vec<String> = d.buttons.iter().map(|b| format!(" {} ", b.label)).collect();
+    let buttons_w: usize = labels.iter().map(|l| l.chars().count() + 2).sum();
+    let text_w = d.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0).max(d.title.chars().count() + 4);
+    let w = (text_w.max(buttons_w) + 6).min(area.width as usize) as u16;
+    let h = (d.lines.len() + 4).min(area.height as usize) as u16;
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    let inner = draw_box(buf, r, &d.title, st, border);
+    for (i, line) in d.lines.iter().enumerate() {
+        buf.set_stringn(inner.x, inner.y + i as u16, line, inner.width as usize, st);
+    }
+    // Buttons, right-aligned on the last inner row.
+    let by = inner.bottom() - 1;
+    let mut x = inner.right().saturating_sub(buttons_w as u16).max(inner.x);
+    let mut hits = Vec::new();
+    for (i, (b, label)) in d.buttons.iter().zip(&labels).enumerate() {
+        let bw = label.chars().count() as u16;
+        let bst = if i == d.focus { focus } else { st.add_modifier(Modifier::BOLD) };
+        buf.set_stringn(x, by, label, bw as usize, bst);
+        if let Some(m) = b.mnemonic {
+            // +1 for the leading space in the label.
+            let mx = x + 1 + b.label[..m].chars().count() as u16;
+            if let Some(c) = buf.cell_mut((mx, by)) {
+                c.modifier.insert(Modifier::UNDERLINED);
+            }
+        }
+        hits.push((Rect { x, y: by, width: bw, height: 1 }, i));
+        x += bw + 2;
+    }
+    app.regions.dialog_buttons = hits;
 }
 
 fn digits(n: usize) -> usize {

@@ -83,6 +83,10 @@ pub fn detect_line_ending(text: &str) -> (LineEnding, bool) {
 }
 
 pub fn load(path: &Path) -> Result<Loaded> {
+    // Absolute paths keep tab identity and watcher events (always absolute)
+    // comparable, whatever the working directory was.
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = abs.as_path();
     match fs::metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Loaded {

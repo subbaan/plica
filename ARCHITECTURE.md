@@ -10,7 +10,7 @@ How Plica is put together, and a dated log of design decisions and **workarounds
 main.rs ── CLI (files → tabs), palette selection, event loop, palette debounce, recovery on signal
   │
   ├─ term.rs ─────── raw mode / alt screen / mouse / paste / keyboard flags; restore() on exit, panic, signal
-  ├─ watch.rs ────── notify watcher on the palette's parent directory → mpsc → main (debounced)
+  ├─ watch.rs ────── notify watchers: palette dir, open documents' dirs → mpsc → main (debounced)
   │
   └─ app.rs ──────── App state: tabs + Theme + shared UI state; key/mouse/paste commands
         ├─ tab.rs ───── Tab = Buffer + Document + indent style + viewport
@@ -19,6 +19,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, palette debo
         ├─ document.rs ─ load (UTF-8 only), atomic save, line-ending detection, disk stamps
         ├─ clipboard.rs ─ internal + OSC 52 + wl-copy/xclip/xsel
         ├─ drop.rs ──── recognise file drops delivered as pastes
+        ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
         └─ theme.rs ─── parse_kitty → Palette → resolve → Theme (semantic roles, contrast repair)
 ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → truecolour / 256 / plain
 ```
@@ -41,6 +42,15 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.1.2
+
+- **Save chains via `AfterSave`.** Closing or quitting may need a save that is interrupted (Save As prompt, disk-conflict dialog, Replace dialog). The pending follow-up (close tab / continue Save-All-then-quit) is stored in `App::after_save` and resumed by `continue_after_save()` after any successful save; Esc, Cancel or a failed save clears it. Save All is re-entrant: it walks the tabs and stops at the first one needing input, and resuming simply walks again (saved tabs are no longer dirty).
+- **External changes are detected by comparing disk stamps** (mtime + length + inode) recorded at load/save, never by trusting watcher events alone. Our own atomic save updates the stamp, so the watcher event it causes compares equal and is ignored. Watcher events are debounced 200 ms per path; focus-gained re-checks every tab as a backstop for filesystems without inotify.
+- **Document watcher watches directories, not files** (same reason as the palette: atomic replace changes the inode). `DocWatcher::sync` adds/removes directories as tabs change, each loop iteration (cheap: a set compare).
+- **Reload is an undoable transaction** (`Tab::reload_from_disk` replaces the whole text with `Buffer::transact`, then marks saved), so an unexpected external rewrite can be reverted with Ctrl+Z; the caret keeps its line/column.
+- **Conflicts in background tabs are deferred:** the tab is flagged and the dialog appears when it becomes active, so a background change never interrupts typing in another tab.
+- **Document paths are made absolute at load**, because watcher events carry absolute paths and tab identity must not depend on the working directory.
 
 ### 2026-10-12 · 0.1.1
 

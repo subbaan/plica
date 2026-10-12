@@ -28,19 +28,7 @@ impl PaletteWatcher {
         let targets = names.clone();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
-            // Ignore open/read/close-nowrite: our own reload reads the file,
-            // and reacting to that would loop forever.
-            if !matches!(
-                ev.kind,
-                EventKind::Create(_)
-                    | EventKind::Modify(_)
-                    | EventKind::Remove(_)
-                    | EventKind::Access(AccessKind::Close(AccessMode::Write))
-                    | EventKind::Any
-            ) {
-                return;
-            }
-            if let EventKind::Modify(ModifyKind::Metadata(_)) = ev.kind {
+            if !is_content_event(&ev.kind) {
                 return;
             }
             let hit = ev.paths.iter().any(|p| {
@@ -60,4 +48,52 @@ impl PaletteWatcher {
         }
         Ok(Self { _watcher: watcher })
     }
+}
+
+/// Watches the directories of open documents and reports changed paths.
+/// Directories are added/removed as tabs open and close (`sync`).
+pub struct DocWatcher {
+    watcher: RecommendedWatcher,
+    dirs: std::collections::BTreeSet<PathBuf>,
+}
+
+impl DocWatcher {
+    pub fn new(tx: Sender<PathBuf>) -> notify::Result<Self> {
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(ev) = res else { return };
+            if is_content_event(&ev.kind) {
+                for p in ev.paths {
+                    let _ = tx.send(p);
+                }
+            }
+        })?;
+        Ok(Self { watcher, dirs: Default::default() })
+    }
+
+    pub fn sync(&mut self, wanted: &std::collections::BTreeSet<PathBuf>) {
+        if *wanted == self.dirs {
+            return;
+        }
+        for d in self.dirs.difference(wanted) {
+            let _ = self.watcher.unwatch(d);
+        }
+        for d in wanted.difference(&self.dirs) {
+            // A missing directory just isn't watched; focus checks still run.
+            let _ = self.watcher.watch(d, RecursiveMode::NonRecursive);
+        }
+        self.dirs = wanted.clone();
+    }
+}
+
+/// Events that can mean the file's contents changed. Open/read/close-nowrite
+/// are excluded: Plica's own reads would otherwise trigger reload loops.
+fn is_content_event(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Modify(_)
+            | EventKind::Remove(_)
+            | EventKind::Access(AccessKind::Close(AccessMode::Write))
+            | EventKind::Any
+    ) && !matches!(kind, EventKind::Modify(ModifyKind::Metadata(_)))
 }

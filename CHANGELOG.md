@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2 (2026-10-12): dialogs and external changes
+
+- Real dialogs (keyboard: underlined letter, ←/→/Tab, Enter, Esc; or click a button) replace the "press again to confirm" warnings:
+  - closing an unsaved tab: Save / Don't Save / Cancel (Save on an Untitled tab goes through Save As, then closes);
+  - quitting: the same for one unsaved tab, or Save All / Quit Without Saving / Cancel for several (Save All asks names for Untitled tabs one by one);
+  - saving over a file changed or deleted on disk: Overwrite / Reload (lose my changes) / Save As… / Cancel;
+  - Save As onto an existing file: Replace / Cancel.
+- Open files are watched. A tab without unsaved edits reloads automatically when its file changes on disk, as one undoable step that keeps the caret's line and column (Ctrl+Z brings back the old text). A tab with unsaved edits shows Keep Mine / Reload; a background tab shows it when you switch to it. Plica's own saves are not mistaken for external changes. Files are also re-checked when the terminal regains focus.
+- Deleting an open file shows a warning once; saving recreates it.
+- File paths are stored as absolute paths.
+
 ## 0.1.1 (2026-10-12): tabs
 
 - Multiple documents in tabs. `plica a.txt b.txt` opens one tab per file; opening a file that is already open switches to it.

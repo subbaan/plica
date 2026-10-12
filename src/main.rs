@@ -1,6 +1,7 @@
 mod app;
 mod buffer;
 mod clipboard;
+mod dialog;
 mod document;
 mod drop;
 mod layout;
@@ -23,6 +24,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const PALETTE_DEBOUNCE: Duration = Duration::from_millis(150);
+const DOC_DEBOUNCE: Duration = Duration::from_millis(200);
 
 const HELP: &str = "\
 Plica — a mouse-friendly terminal text editor
@@ -216,6 +218,11 @@ fn run() -> Result<()> {
         _ => None,
     };
 
+    // Document watcher: reload clean tabs / flag conflicts on external change.
+    let (doc_tx, doc_rx) = mpsc::channel::<PathBuf>();
+    let mut doc_watcher = watch::DocWatcher::new(doc_tx).ok();
+    let mut doc_due: std::collections::HashMap<PathBuf, Instant> = Default::default();
+
     let mut palette_due: Option<Instant> = None;
     let mut redraw = true;
     let mut killed = false;
@@ -231,13 +238,26 @@ fn run() -> Result<()> {
         while rx.try_recv().is_ok() {
             palette_due = Some(Instant::now() + PALETTE_DEBOUNCE);
         }
+        if let Some(w) = &mut doc_watcher {
+            w.sync(&app.watched_dirs());
+        }
+        while let Ok(p) = doc_rx.try_recv() {
+            doc_due.insert(p, Instant::now() + DOC_DEBOUNCE);
+        }
+        let now = Instant::now();
+        let ready: Vec<PathBuf> = doc_due.iter().filter(|(_, t)| **t <= now).map(|(p, _)| p.clone()).collect();
+        for p in ready {
+            doc_due.remove(&p);
+            app.on_disk_change(&p);
+            redraw = true;
+        }
         if palette_due.is_some_and(|t| Instant::now() >= t) {
             palette_due = None;
             app.reload_palette();
             redraw = true;
             continue;
         }
-        let timeout = if palette_due.is_some() || app.status.is_some() { Duration::from_millis(50) } else { Duration::from_millis(250) };
+        let timeout = if palette_due.is_some() || !doc_due.is_empty() || app.status.is_some() { Duration::from_millis(50) } else { Duration::from_millis(250) };
         if event::poll(timeout)? {
             // Drain everything queued before redrawing (fast typing, paste, drags).
             loop {

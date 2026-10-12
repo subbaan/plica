@@ -15,12 +15,15 @@ pub struct Tab {
     pub scroll_x: usize,
     /// Set when the caret moved and the viewport must follow it.
     pub follow_caret: bool,
+    /// The file changed on disk while this (background) tab had unsaved
+    /// changes; a dialog is shown when the tab becomes active.
+    pub disk_conflict: bool,
 }
 
 impl Tab {
     pub fn new(buf: Buffer, doc: Document, tab_width: usize) -> Self {
         let indent_unit = detect_indent(&buf, tab_width);
-        Self { buf, doc, indent_unit, top_line: 0, top_row: 0, scroll_x: 0, follow_caret: true }
+        Self { buf, doc, indent_unit, top_line: 0, top_row: 0, scroll_x: 0, follow_caret: true, disk_conflict: false }
     }
 
     pub fn untitled(tab_width: usize) -> Self {
@@ -30,6 +33,29 @@ impl Tab {
     pub fn open(path: &Path, tab_width: usize) -> anyhow::Result<(Self, bool)> {
         let l = document::load(path)?;
         Ok((Self::new(Buffer::from_str(&l.text), l.doc, tab_width), l.is_new))
+    }
+
+    /// Replace the buffer with the file's current contents as one undoable
+    /// step (Ctrl+Z brings the previous text back), keeping the caret's line
+    /// and column where possible.
+    pub fn reload_from_disk(&mut self) -> anyhow::Result<()> {
+        let path = self.doc.path.clone().ok_or_else(|| anyhow::anyhow!("no file"))?;
+        let l = document::load(&path)?;
+        let head = self.buf.sel.head;
+        let line = self.buf.line_of(head);
+        let col = head - self.buf.line_start(line);
+        if self.buf.rope() != &l.text[..] {
+            let len = self.buf.len_chars();
+            self.buf.transact(vec![(0, len, l.text)]);
+            let line = line.min(self.buf.len_lines() - 1);
+            let pos = (self.buf.line_start(line) + col).min(self.buf.line_end(line));
+            self.buf.sel = crate::buffer::Selection::caret(self.buf.snap(pos));
+        }
+        self.buf.mark_saved();
+        self.doc = l.doc;
+        self.disk_conflict = false;
+        self.follow_caret = true;
+        Ok(())
     }
 
     /// An untouched "Untitled" tab that a newly opened file may replace.

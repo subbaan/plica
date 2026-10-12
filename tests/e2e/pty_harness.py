@@ -183,20 +183,24 @@ check("bracketed paste literal", "pasted" in t.text() and "line two" in t.text()
 t.send("\x1a")
 check("paste is one undo step", "pasted" not in t.text(), t.text())
 
-# External modification guard
+# External modification while the buffer has unsaved edits: the watcher
+# raises a conflict dialog; Keep Mine, then saving asks before overwriting.
+t.send("z")
 time.sleep(0.05)
 with open(doc, "ab") as f: f.write(b"external\r\n")
-t.send("z")
-t.send("\x13")
-check("external change detected on save", "changed on disk" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.pump(0.8)
+check("watcher raises conflict dialog", "changed on disk" in t.text(), t.text())
+t.send("k", 0.3)  # Keep Mine
+t.send("\x13", 0.3)
+check("save asks before overwriting external change", "changed on disk" in t.text(), t.text())
 check("file not overwritten", open(doc, "rb").read().endswith(b"external\r\n"))
-t.send("\x1b", 0.1)  # cancel pending
+t.send("\x1b", 0.2)  # Cancel
 
-# Quit with dirty buffer requires confirmation
+# Quit with dirty buffer shows a dialog; Don't Save quits.
 t.send("\x11")
-check("dirty quit asks", t.p.isalive() and "unsaved" in t.line(ROWS - 1).lower(), t.line(ROWS - 1))
-t.send("\x11", 0.6)
-check("second Ctrl+Q quits", not t.p.isalive())
+check("dirty quit asks", t.p.isalive() and "Save changes to notes.txt" in t.text(), t.text())
+t.send("n", 0.6)
+check("Don't Save quits", not t.p.isalive())
 tail = t.raw[-400:]
 check("teardown: leaves alt screen", b"\x1b[?1049l" in tail, repr(tail))
 check("teardown: mouse off", b"\x1b[?1000l" in tail or b"\x1b[?1006l" in tail, repr(tail))
@@ -290,9 +294,27 @@ check("middle-click closes tab", "beta.txt" not in t.line(0) and "alpha.txt" in 
 t.send(f"\x1b[200~{fb}\x1b[201~", 0.4)
 check("drop while dirty opens new tab", "beta body" in t.text() and "alpha.txt" in t.line(0), t.line(0))
 t.send("\x11")
-check("quit asks when a background tab is dirty", t.p.isalive(), t.line(ROWS - 1))
+check("quit asks when a background tab is dirty", t.p.isalive() and "alpha.txt" in t.text(), t.text())
+# Click the "Don't Save" button with the mouse.
+row = next(y for y in range(ROWS) if "Don't Save" in t.line(y))
+t.click(t.col_of(row, "Don't Save") + 1, row)
+t.pump(0.4)
+check("clicking dialog button quits", not t.p.isalive())
+
+# ---------------------------------------------------------------- session 7: live reload of clean tab
+fr = os.path.join(WORK, "live.txt"); open(fr, "w").write("version one\n")
+t = Term([fr])
+time.sleep(0.05)
+tmp = fr + ".tmp"; open(tmp, "w").write("version two, written by another program\n"); os.replace(tmp, fr)
+t.pump(0.8)
+check("clean tab reloads on external change", "version two" in t.text(), t.text())
+t.send("\x1a", 0.3)  # Ctrl+Z
+check("reload is undoable", "version one" in t.text(), t.text())
+t.send("\x19", 0.3)  # Ctrl+Y
+t.send("\x13", 0.3)  # save (no conflict: our state equals disk)
+check("no conflict after reload", "changed on disk" not in t.text(), t.text())
 t.send("\x11", 0.5)
-check("second Ctrl+Q quits", not t.p.isalive())
+check("clean quit", not t.p.isalive())
 
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
