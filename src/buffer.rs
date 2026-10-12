@@ -281,7 +281,15 @@ impl Buffer {
     /// Apply several non-overlapping replacements `(at, delete_len, insert)`
     /// as one undo step. Positions refer to the text before any of them;
     /// the selection is remapped through all of them.
-    pub fn transact(&mut self, mut ops: Vec<(usize, usize, String)>) {
+    pub fn transact(&mut self, ops: Vec<(usize, usize, String)>) {
+        self.edit(ops, EditKind::Other, None);
+    }
+
+    /// `transact` with an undo kind (Typing/Deleting steps coalesce with
+    /// their neighbours like ordinary typing) and, optionally, the selection
+    /// to leave afterwards instead of the remapped one. Used by table edits,
+    /// where one keystroke also re-pads a column.
+    pub fn edit(&mut self, mut ops: Vec<(usize, usize, String)>, kind: EditKind, sel: Option<Selection>) {
         let before = self.sel;
         ops.sort_by_key(|op| std::cmp::Reverse(op.0));
         let map = |pos: usize, ops: &[(usize, usize, String)]| -> usize {
@@ -304,10 +312,12 @@ impl Buffer {
                 edits.push(self.raw_insert(*at, ins));
             }
         }
-        self.sel = new_sel;
+        self.sel = sel.unwrap_or(new_sel);
         self.preferred_col = None;
-        self.break_coalescing = true;
-        self.commit(edits, before, EditKind::Other);
+        if kind == EditKind::Other {
+            self.break_coalescing = true;
+        }
+        self.commit(edits, before, kind);
     }
 
     fn raw_insert(&mut self, at: usize, text: &str) -> Edit {

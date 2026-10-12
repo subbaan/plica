@@ -129,6 +129,13 @@ pub struct Regions {
 pub enum PickChoice {
     Reopen(Encoding),
     SaveWith(Encoding),
+    Table(TableAction),
+}
+
+/// Entries of the table menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableAction {
+    Format,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +208,14 @@ pub struct App {
     pub picker: Option<Picker<PickChoice>>,
     /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Re-pad a table column as its cells grow or shrink.
+    pub table_realign: bool,
+    /// Table keys switched off (Esc) in the table starting at this line.
+    pub table_keys_off: Option<usize>,
+    /// The table the caret was in after the last event (for the hint).
+    pub table_context: Option<usize>,
+    /// Where the last table edit left the caret, in which buffer version.
+    pub table_typed_at: Option<((u64, u64), usize)>,
     pub recovery: Option<Recovery>,
     pub recovery_enabled: bool,
     pub prefs: Option<PrefsState>,
@@ -256,6 +271,10 @@ impl App {
             dialog: None,
             picker: None,
             fallback_encoding: None,
+            table_realign: true,
+            table_keys_off: None,
+            table_context: None,
+            table_typed_at: None,
             recovery: None,
             recovery_enabled: true,
             prefs: None,
@@ -788,6 +807,7 @@ impl App {
             Event::FocusGained => self.check_all_disk(),
             _ => {}
         }
+        self.note_table_context();
     }
 
     /// Called regularly from the main loop (drag autoscroll).
@@ -845,6 +865,9 @@ impl App {
 
         if let Some(cmd) = self.keymap.lookup(&k) {
             self.run_command(cmd);
+            return;
+        }
+        if self.table_key(&k) {
             return;
         }
 
@@ -945,6 +968,8 @@ impl App {
             Command::Preferences => self.open_prefs(),
             Command::HighlightWord => self.highlight_word(),
             Command::Encoding => self.encoding_menu(),
+            Command::TableMenu => self.table_menu(),
+            Command::FormatTable => self.format_table(),
         }
         self.tab.follow_caret = true;
     }
@@ -1164,7 +1189,7 @@ impl App {
     /// Insert pasted text literally as one undo step, adopting the document's
     /// line ending (terminals often deliver newlines as CR).
     fn paste_text(&mut self, text: &str) {
-        if text.is_empty() {
+        if text.is_empty() || self.table_paste(text) {
             return;
         }
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
@@ -1452,7 +1477,25 @@ impl App {
         match c {
             PickChoice::Reopen(e) => self.reopen_as(e),
             PickChoice::SaveWith(e) => self.save_with(e),
+            PickChoice::Table(TableAction::Format) => self.format_table(),
         }
+        self.tab.follow_caret = true;
+    }
+
+    /// The table menu (its actions also have their own commands).
+    fn table_menu(&mut self) {
+        if self.caret_table().is_none() {
+            self.warn("Put the caret in a Markdown table first (a header row, then a row like |---|---|)");
+            return;
+        }
+        let item = |label: &str, cmd: Option<Command>, value| picker::Item {
+            label: label.to_string(),
+            detail: cmd.map(|c| self.keymap.label(c)).filter(|l| l != "unbound").unwrap_or_default(),
+            current: false,
+            value: PickChoice::Table(value),
+        };
+        let items = vec![item("Format table", Some(Command::FormatTable), TableAction::Format)];
+        self.picker = Some(Picker::new("Table", items));
     }
 
     /// Read the active file again, decoded as `e` (one undoable step).
@@ -2004,12 +2047,12 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::buffer::Buffer;
     use ratatui::crossterm::event::{KeyEventState, MouseEvent};
 
-    fn app_with(text: &str, w: u16, h: u16) -> App {
+    pub(crate) fn app_with(text: &str, w: u16, h: u16) -> App {
         let caps = Capabilities { keyboard_enhanced: true, truecolor: true };
         let theme = theme::resolve(&theme::dracula());
         let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto, fallback_encoding: None });
@@ -2020,11 +2063,11 @@ mod tests {
         a
     }
 
-    fn key(a: &mut App, code: KeyCode, mods: KeyModifiers) {
+    pub(crate) fn key(a: &mut App, code: KeyCode, mods: KeyModifiers) {
         a.handle_event(Event::Key(KeyEvent { code, modifiers: mods, kind: KeyEventKind::Press, state: KeyEventState::NONE }));
     }
 
-    fn text(a: &App) -> String {
+    pub(crate) fn text(a: &App) -> String {
         a.tab.buf.rope().to_string()
     }
 
@@ -2163,7 +2206,7 @@ mod tests {
         assert!(a.quit);
     }
 
-    fn type_str(a: &mut App, s: &str) {
+    pub(crate) fn type_str(a: &mut App, s: &str) {
         for c in s.chars() {
             key(a, KeyCode::Char(c), KeyModifiers::NONE);
         }

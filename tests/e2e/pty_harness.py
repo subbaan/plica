@@ -631,6 +631,49 @@ binf = os.path.join(edir, "prog.bin"); open(binf, "wb").write(b"\x7fELF\x02\x01\
 out = pexpect.run(BIN, args=[binf], env=dict(os.environ, XDG_STATE_HOME=os.path.join(WORK, "state"), XDG_CONFIG_HOME=os.path.join(WORK, "config")), timeout=5).decode()
 check("enc: binary file refused", "binary" in out, out)
 
+# ---------------------------------------------------------------- session 15: Markdown tables
+tdoc = os.path.join(WORK, "gear.md")
+TSRC = "# Gear\n\n| Device | Type |\n| ------ | ---- |\n| MPC    | Samp |\n\nDone.\n"
+open(tdoc, "w").write(TSRC)
+t = Term([tdoc])
+t.send("\x1b[B" * 4)  # caret into the MPC row
+check("table: status shows table context", "Table" in t.text(), t.text())
+t.send("\x1b[F")      # End (after the last pipe = last cell)
+t.send("\x1b[Z")      # Shift+Tab: previous cell = Device column, selected
+t.send(" One Plus")   # typing replaces the selection...
+t.send("\x13", 0.4)
+saved = open(tdoc).read()
+check("table: typing realigns its column", "| One Plus | Type |\n| -------- | ---- |\n| One Plus" not in saved and "| Device   | Type |\n| -------- | ---- |\n| One Plus | Samp |" in saved, saved)
+t.send("\x1a\x1a\x1a", 0.4)
+t.send("\x13", 0.4)
+check("table: undo restores the structure", open(tdoc).read() == TSRC, open(tdoc).read())
+# Tab from the last cell adds a row; Esc gives a plain Tab.
+y = 4 + 1  # screen row of the MPC line (title bar at row 0)
+t.click(t.col_of(y, "Samp") + 1, y)
+t.send("\t")
+t.send("Volca")
+t.send("\x13", 0.4)
+check("table: Tab in the last cell adds a row", "| MPC    | Samp |\n| Volca  |      |\n" in open(tdoc).read(), open(tdoc).read())
+t.send("\x1b", 0.2)
+check("table: Esc turns table keys off", "keys off" in t.text(), t.text())
+t.send("\t")
+t.send("\x13", 0.4)
+check("table: plain Tab after Esc", "Volca\t" in open(tdoc).read(), open(tdoc).read())
+t.send("\x1a", 0.3)
+t.send("\x13", 0.4)  # save, so the rewrite below reloads cleanly
+t.send("\x1b", 0.2)
+# Table menu → Format on a sloppy table.
+open(tdoc, "w").write("|a|bb|\n|-|-|\n|ccc|d|\n"); t.pump(0.8)
+t.send("\x1b[1;5H")  # Ctrl+Home: into the table
+t.send("\x1bt", 0.3)
+check("table: menu opens", "Format table" in t.text(), t.text())
+t.send("\r", 0.3)
+t.send("\x13", 0.4)
+check("table: format command", open(tdoc).read() == "|a  |bb |\n|---|---|\n|ccc|d  |\n", open(tdoc).read())
+t.send("\x11", 0.4)
+if t.p.isalive(): t.send("n", 0.4)
+check("table: clean quit", not t.p.isalive())
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

@@ -18,6 +18,8 @@ mod picker;
 mod layout;
 mod recovery;
 mod tab;
+mod table;
+mod table_edit;
 mod term;
 mod theme;
 mod ui;
@@ -276,6 +278,7 @@ fn run() -> Result<()> {
     app.show_whitespace = cfg.show_whitespace;
     app.keymap = cfg.keymap();
     app.primary_selection = cfg.primary_selection;
+    app.table_realign = cfg.table_realign;
     app.fallback_encoding = cfg.fallback_encoding;
     app.highlights = cfg.highlights.clone();
     app.adjust = adjust;

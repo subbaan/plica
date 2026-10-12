@@ -143,6 +143,27 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         let gi = *marks.get(pos.checked_sub(*ws)?)?;
         hl_styles.get(gi as usize).copied()
     };
+    // Markdown tables on screen: pipes and the delimiter row in the border
+    // colour, the header row bold.
+    let border_style = p.plain_or(Style::default().fg(p.c(t.muted)), Modifier::DIM);
+    let mut table_lines: std::collections::HashMap<usize, (crate::table::RowKind, Vec<usize>)> = std::collections::HashMap::new();
+    for row in &rows {
+        if let std::collections::hash_map::Entry::Vacant(e) = table_lines.entry(row.line)
+            && let Some(tb) = app.tab.table_at(row.line)
+            && let Some(r) = tb.row_of_line(row.line)
+        {
+            e.insert((tb.rows[r].kind, tb.pipes(r)));
+        }
+    }
+    let table_style = |line: usize, pos: usize| -> Option<Style> {
+        let (kind, pipes) = table_lines.get(&line)?;
+        match kind {
+            crate::table::RowKind::Delimiter => Some(border_style),
+            _ if pipes.binary_search(&pos).is_ok() => Some(border_style),
+            crate::table::RowKind::Header => Some(Style::default().add_modifier(Modifier::BOLD)),
+            crate::table::RowKind::Body => None,
+        }
+    };
     let in_match = |s: usize, e: usize| {
         let i = matches.partition_point(|&(_, me)| me <= s);
         matches.get(i).is_some_and(|&(ms, me)| s >= ms && e <= me)
@@ -175,6 +196,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 break;
             }
             let mut st = if is_caret_line { current_line } else { base };
+            if let Some(ts) = table_style(row.line, g.start) {
+                st = st.patch(ts);
+            }
             if let Some(h) = hl_at(row.line, g.start) {
                 st = st.patch(h);
             }
@@ -576,6 +600,9 @@ fn status_right(app: &App, compact: bool) -> String {
     if !app.tab.buf.sel.is_empty() {
         parts.push(format!("Sel {}", app.tab.buf.sel.end() - app.tab.buf.sel.start()));
     }
+    if app.caret_table().is_some() {
+        parts.push(if app.table_keys_live().is_some() { "Table".into() } else { "Table (keys off)".into() });
+    }
     parts.push(encoding_label(&app.tab.doc));
     let le = app.tab.doc.line_ending.label();
     parts.push(if app.tab.doc.mixed_line_endings { format!("{le}*") } else { le.into() });
@@ -634,14 +661,15 @@ fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
         (C::ToggleWhitespace, C::ToggleMouse),
         (C::ScrollUp, C::ScrollDown),
         (C::Preferences, C::HighlightWord),
+        (C::Encoding, C::TableMenu),
     ] {
         lines.push(pair(a, b));
     }
-    lines.push(format!("{:>17}  {}", km.label(C::Encoding), C::Encoding.describe()));
     lines.extend([
         String::new(),
         "Fixed: Alt+1..9 go to tab · Tab/Shift+Tab indent · Ctrl/Alt+←/→ word · Esc clears selection".into(),
         "Find bar: Alt+C case · Alt+W whole word · Alt+L in selection · Alt+A replace all".into(),
+        "Tables: Tab/Shift+Tab next/previous cell · Enter new row · Esc plain keys in this table".into(),
         "Mouse: click · drag · double/triple-click · Shift/Alt+click extend · middle-click pastes selection".into(),
         "       wheel (Shift: sideways)".into(),
         "       line numbers select lines · tabs: click, ×, middle-click, wheel · drop files to open".into(),
@@ -857,9 +885,6 @@ fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
                 let line = format!("{:<22}{}", cmd.describe(), app.keymap.label(*cmd));
                 buf.set_stringn(rx, inner.y + 2 + i as u16, line, rw as usize, st);
             }
-        }
-        Section::Tables => {
-            buf.set_stringn(rx, inner.y, "Markdown table editing arrives in Plica 0.4.", rw as usize, dim);
         }
         Section::Highlights => {
             let area = Rect { x: rx, y: inner.y, width: rw, height: inner.height.saturating_sub(3) };

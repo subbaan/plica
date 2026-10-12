@@ -66,6 +66,8 @@ commands! {
     Preferences => "preferences", "Preferences", ["f9", "ctrl+,"];
     HighlightWord => "highlight_word", "Highlight word in this document (again: remove)", ["alt+h", "f8"];
     Encoding => "encoding", "Reopen or save in another encoding", ["alt+e", "f7"];
+    TableMenu => "table_menu", "Table menu (format, rows, columns)", ["alt+t", "f6"];
+    FormatTable => "format_table", "Format the table under the caret", [];
 }
 
 /// A key plus modifiers, normalised so equivalent events compare equal.

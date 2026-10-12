@@ -70,6 +70,8 @@ pub struct Config {
     pub recovery: bool,
     /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Re-pad a table column as its cells change.
+    pub table_realign: bool,
     pub keymap_overrides: Vec<(Command, Vec<Chord>)>,
     pub highlights: Highlights,
 }
@@ -90,6 +92,7 @@ impl Default for Config {
             colour_overrides: Vec::new(),
             recovery: true,
             fallback_encoding: None,
+            table_realign: true,
             keymap_overrides: Vec::new(),
             highlights: Highlights::default(),
         }
@@ -221,6 +224,10 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                     }
                     true
                 }
+                _ => false,
+            }),
+            "tables" => section(val, "tables", &mut w, |k, v, w| match k {
+                "realign" => known(boolean(v, "tables.realign", w).map(|b| cfg.table_realign = b)),
                 _ => false,
             }),
             "highlights" => section(val, "highlights", &mut w, |k, v, w| match k {
@@ -451,6 +458,11 @@ recovery = true          # snapshot unsaved work for crash recovery
 # (windows-1252, Shift_JIS, …); or name one, e.g. "windows-1250", "koi8-r".
 # Files are always saved back in the encoding they were read in.
 fallback_encoding = "auto"
+
+[tables]
+# Markdown pipe tables: Tab / Shift+Tab move between cells, Enter adds a row,
+# Esc gives plain keys in that table; Alt+T (or F6) opens the table menu.
+realign = true           # re-pad a column as its cells grow or shrink
 
 [highlights]
 enabled = true           # word and phrase highlighting

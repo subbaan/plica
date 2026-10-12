@@ -27,6 +27,7 @@ pub struct Settings {
     pub high_contrast: bool,
     pub recovery: bool,
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    pub table_realign: bool,
     pub highlights: crate::highlight::Highlights,
 }
 
@@ -45,6 +46,7 @@ impl Settings {
             high_contrast: c.high_contrast,
             recovery: c.recovery,
             fallback_encoding: c.fallback_encoding,
+            table_realign: c.table_realign,
             highlights: c.highlights.clone(),
         }
     }
@@ -64,6 +66,7 @@ pub enum Row {
     HighContrast,
     Recovery,
     FallbackEncoding,
+    TableRealign,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +109,7 @@ impl Section {
             Section::Interaction => &[Row::Mouse, Row::Primary],
             Section::Appearance => &[Row::Theme, Row::Palette, Row::HighContrast],
             Section::Files => &[Row::Recovery, Row::FallbackEncoding],
+            Section::Tables => &[Row::TableRealign],
             _ => &[],
         }
     }
@@ -126,6 +130,7 @@ impl Row {
             Row::HighContrast => "High contrast",
             Row::Recovery => "Crash recovery",
             Row::FallbackEncoding => "Other encodings",
+            Row::TableRealign => "Realign as you type",
         }
     }
 
@@ -143,6 +148,7 @@ impl Row {
             Row::HighContrast => "Text contrast 7:1 instead of 4.5:1",
             Row::Recovery => "Snapshot unsaved work for crash recovery",
             Row::FallbackEncoding => "Files that aren't UTF-8: auto guesses",
+            Row::TableRealign => "Re-pad a column as its cells grow or shrink",
         }
     }
 
@@ -168,6 +174,7 @@ impl Row {
             Row::Palette => s.palette.as_ref().map_or_else(|| "(none)".into(), |p| tilde(p)),
             Row::Recovery => b(s.recovery),
             Row::FallbackEncoding => format!("‹ {} ›", s.fallback_encoding.map_or("auto", |e| e.name())),
+            Row::TableRealign => b(s.table_realign),
         }
     }
 
@@ -189,6 +196,7 @@ impl Row {
             Row::HighContrast => s.high_contrast = !s.high_contrast,
             Row::Recovery => s.recovery = !s.recovery,
             Row::FallbackEncoding => s.fallback_encoding = cycle(&crate::encoding::fallback_choices(), s.fallback_encoding, dir),
+            Row::TableRealign => s.table_realign = !s.table_realign,
             // Edited through a text prompt instead.
             Row::Palette => {}
         }
@@ -246,6 +254,7 @@ impl App {
             high_contrast: self.adjust.high_contrast,
             recovery: self.recovery_enabled,
             fallback_encoding: self.fallback_encoding,
+            table_realign: self.table_realign,
             highlights: self.highlights.clone(),
         }
     }
@@ -258,6 +267,7 @@ impl App {
         self.show_whitespace = s.show_whitespace;
         self.primary_selection = s.primary_selection;
         self.highlights = s.highlights.clone();
+        self.table_realign = s.table_realign;
         if s.tab_width != old.tab_width || s.indent != old.indent {
             self.tab_width = s.tab_width;
             self.indent_mode = s.indent;
@@ -517,6 +527,7 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
     set("files", "recovery", s.recovery.into(), s.recovery == d.recovery);
     let fallback = s.fallback_encoding.map_or("auto", |e| e.name());
     set("files", "fallback_encoding", fallback.into(), s.fallback_encoding == d.fallback_encoding);
+    set("tables", "realign", s.table_realign.into(), s.table_realign == d.table_realign);
     if hl_changed {
         set("highlights", "enabled", s.highlights.enabled.into(), s.highlights.enabled == d.highlights.enabled);
         set("highlights", "samples", s.highlights.samples.into(), s.highlights.samples == d.highlights.samples);

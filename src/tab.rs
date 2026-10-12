@@ -3,6 +3,9 @@
 use crate::buffer::Buffer;
 use crate::document::{self, Document};
 use crate::encoding::{self, Encoding};
+use crate::table::Table;
+use std::cell::RefCell;
+use std::rc::Rc;
 use crate::config::IndentMode;
 use std::path::Path;
 
@@ -33,6 +36,8 @@ pub struct Tab {
     pub uid: u64,
     /// The configured fallback encoding, for reloads.
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Tables recognised in the current buffer version.
+    tables: RefCell<TableCache>,
     /// Recovery bookkeeping: buffer key last seen / snapshotted, and when.
     pub seen_key: (u64, u64),
     pub changed_at: std::time::Instant,
@@ -62,6 +67,7 @@ impl Tab {
             disk_conflict: false,
             uid: NEXT_TAB_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             fallback_encoding: opts.fallback_encoding,
+            tables: RefCell::default(),
             seen_key,
             changed_at: now,
             snap_key: None,
@@ -105,6 +111,33 @@ impl Tab {
         Ok(())
     }
 
+    /// The Markdown table containing `line`, if any. Recognised tables
+    /// (and lines known not to be in one) are cached until the text changes.
+    pub fn table_at(&self, line: usize) -> Option<Rc<Table>> {
+        let mut c = self.tables.borrow_mut();
+        let key = self.buf.cache_key();
+        if c.key != key {
+            *c = TableCache { key, ..TableCache::default() };
+        }
+        if let Some(t) = c.tables.iter().find(|t| (t.first_line()..=t.last_line()).contains(&line)) {
+            return Some(t.clone());
+        }
+        if c.misses.contains(&line) {
+            return None;
+        }
+        match Table::at(self.buf.rope(), line) {
+            Some(t) => {
+                let t = Rc::new(t);
+                c.tables.push(t.clone());
+                Some(t)
+            }
+            None => {
+                c.misses.push(line);
+                None
+            }
+        }
+    }
+
     /// An untouched "Untitled" tab that a newly opened file may replace.
     pub fn is_pristine(&self) -> bool {
         self.doc.path.is_none() && !self.buf.is_dirty() && self.buf.len_chars() == 0
@@ -133,4 +166,11 @@ pub fn detect_indent(buf: &Buffer, tab_width: usize) -> String {
         }
     }
     if spaces > tabs { " ".repeat(tab_width) } else { "\t".to_string() }
+}
+
+#[derive(Default)]
+struct TableCache {
+    key: (u64, u64),
+    tables: Vec<Rc<Table>>,
+    misses: Vec<usize>,
 }

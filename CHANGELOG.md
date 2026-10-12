@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.2 (2026-10-12): Markdown tables, first slice
+
+The start of Phase 4. Plica now recognises Markdown pipe tables (a header row followed by a row like `|---|:--:|`) and edits them cell by cell. The file stays ordinary Markdown.
+
+- **Typing in a cell re-pads its column** so the pipes stay lined up; the rest of the document is untouched. A column that wasn't lined up to begin with is left as it is (only the cell's text changes). Undo restores the previous layout. You can turn this off under Preferences → Tables, or with `[tables] realign = false`.
+- **Tab / Shift+Tab** move to the next / previous cell and select its text, so typing replaces it. **Tab in the last cell adds a row.** **Enter** adds a row below the current one.
+- **Backspace and Delete stop at the cell's edge**, so a pipe is never deleted by accident. Typing `|` in a cell inserts `\|`, which keeps it as cell text.
+- **Esc** (with nothing selected) turns table keys off for that table, so Tab, Enter and Backspace edit plain text there. Esc again, or moving to another table, turns them back on. The status bar shows `Table` or `Table (keys off)`.
+- **Table menu: Alt+T or F6** (rebindable as `table_menu`). For now it has **Format table**, which lines up every row, keeps alignment colons and pipe style, and pads short rows without dropping any text. It is also available as the `format_table` command (unbound by default).
+- Pipes and the delimiter row are drawn in the muted colour and the header row in bold.
+- Not tables: anything inside fenced code blocks, lines indented 4+ spaces, and prose that merely contains a `|`.
+
 ## 0.3.1 (2026-10-12): text encodings
 
 - **Files in other encodings open and save back unchanged.** Plica detects the encoding when it opens a file and saves in that same encoding, so a Windows-1252, Shift_JIS or UTF-16 file stays one. Supported: UTF-8 (with or without BOM), UTF-16 LE/BE (with or without BOM), and about 35 legacy encodings: Western, Central European, Cyrillic, Greek, Turkish, Hebrew, Arabic, Baltic, Vietnamese, Thai, Japanese, Chinese and Korean.

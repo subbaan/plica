@@ -90,6 +90,13 @@ impl VisualRow {
     }
 }
 
+/// Display width of `s` laid out from column 0 with tabs counting 1 (for
+/// aligning table cells, whose real column isn't known).
+pub fn text_width(s: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    s.graphemes(true).map(|g| shape(g, 0, 1).1).sum()
+}
+
 /// Shape a grapheme into (symbol, width, kind) for a given starting column.
 fn shape(g: &str, col: usize, tab_width: usize) -> (Cow<'static, str>, usize, GlyphKind) {
     let mut chars = g.chars();

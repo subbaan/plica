@@ -25,7 +25,9 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ dochl.rs ─── per-document highlight rules (documents.toml)
         ├─ highlight.rs ─ word/phrase groups, colour specs, per-line matching
         ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
-        ├─ picker.rs ── filterable list popup (encoding menus)
+        ├─ picker.rs ── filterable list popup (encoding and table menus)
+        ├─ table.rs ─── Markdown table recognition, TableModel with source spans, format/edit ops
+        ├─ table_edit.rs ─ App: typing in cells, Tab/Enter navigation, Format table
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
         ├─ config.rs ── config.toml loading/validation, defaults text
@@ -38,7 +40,7 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 
 ### Core invariants
 
-- **Text is the canonical model.** Highlights and (future) tables are views computed from the rope; on-disk bytes are the rope encoded in the document's encoding (plus a remembered BOM); `encoding.rs` guarantees that round trip or marks the document inexact.
+- **Text is the canonical model.** Highlights and tables are views computed from the rope; on-disk bytes are the rope encoded in the document's encoding (plus a remembered BOM); `encoding.rs` guarantees that round trip or marks the document inexact.
 - **Three offset spaces, never mixed:** char index into the rope (all internal positions, snapped to grapheme boundaries) · bytes (only in `document.rs` and search) · display cells (only in `layout.rs`/`ui.rs`).
 - **One width function:** layout uses ratatui's `CellWidth`, the same function the renderer uses.
 - **Hit-testing uses what was drawn:** `App::rendered_rows` holds the rows from the last frame.
@@ -54,6 +56,17 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.3.2
+
+- **Tables are recognised locally and cached per buffer version.** `Table::at(rope, line)` expands from the line over contiguous "pipe lines" (non-blank, indent < 4, an unescaped `|`, not a fence line). The first header + delimiter pair with matching cell counts starts the table; pipe lines above it are prose. The cost is O(table) plus a fence scan of the text above. `Tab::table_at` caches found tables, and lines known not to be in one, until the text changes. Lines over 20 000 chars are never rows, so huge single-line files aren't rescanned on every keystroke.
+- **Fence detection scans bytes, not lines** (`table::in_fence`): a state machine over the rope's chunks up to the table's first line. It is cheap for any realistic file, and cached together with the table.
+- **Pipes follow GitHub:** `\|` is cell text, but a pipe inside a code span still splits the cell. Typing `|` in a cell inserts `\|` so the model and the file agree.
+- **Edits are span replacements in the old text, then re-recognition.** `Table::edit_cell` returns `(at, len, text)` ops plus where the new content starts; `Buffer::edit` applies them as one transaction with an undo kind. Typing coalesces with neighbouring keystrokes as usual, so one keystroke and its column re-padding always undo together. The table is never edited in place.
+- **Realigning is minimal and style-preserving.** Only the edited column changes, and only if every row of it had the same display width before (otherwise only the cell's text is replaced, so sloppy tables aren't silently reformatted). The column grows as needed, and shrinks back only if it had no slack before (hand-added padding is kept). The style comes from the table itself: leading/trailing pipes, spaces inside pipes, and spaced or unspaced delimiters, so the common `| a |` / `|---|` style formats to itself. *Bug found by test:* an earlier version treated delimiter cells like content cells and re-padded `|---|` to `| --- |`, reformatting the whole column on a one-letter edit.
+- **Typed trailing spaces survive re-padding.** After re-parsing, a space typed at the end of a cell's text looks exactly like padding. `App::table_typed_at` remembers where the last table edit left the caret (and in which buffer version): a caret there is trusted, while a caret clicked into padding is pulled back to the end of the text.
+- **Edge carets belong to the edge cell.** *Bug found by the stress test:* with the caret at line start (before the leading pipe), typed text went outside the table (`Q| item`). An empty selection now always maps to `cell_at`'s cell, and edits clamp into its content.
+- **Measured:** typing in the last row of a 50 000-row (2.5 MB) table takes about 80–110 ms per keystroke (re-recognition plus the column check over all rows). Fine for now; the cached model could later be updated incrementally if it matters.
 
 ### 2026-10-12 · 0.3.1
 

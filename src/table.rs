@@ -1,0 +1,664 @@
+//! Markdown pipe tables: recognition, a logical model mapped to exact
+//! source spans, and the edits that change them.
+//!
+//! The text stays canonical. A `Table` is derived from the rope: every cell
+//! knows the char range it occupies between its pipes (`span`) and the
+//! trimmed text inside (`content`). Edits are computed as replacements of
+//! those spans in the old text, applied as one transaction, after which the
+//! table is simply recognised again.
+//!
+//! Grammar (GitHub-flavoured Markdown, conservatively):
+//! - A header row, then a delimiter row with the same number of cells
+//!   (`---`, `:--`, `--:`, `:-:` per cell), then body rows.
+//! - Every row contains an unescaped `|` (`\|` is a pipe inside a cell, also
+//!   inside code spans, as on GitHub). A line without one ends the table, as
+//!   do blank lines, lines indented 4+ spaces or by a tab, and fences.
+//! - Tables inside fenced code blocks (``` or ~~~) are not tables.
+//! - Ragged rows are kept as they are; formatting pads short rows and gives
+//!   extra cells their own column, so no text is ever dropped.
+
+use ropey::Rope;
+use std::ops::Range;
+
+/// Lines longer than this are never table rows (keeps huge single-line
+/// files from being scanned on every keystroke).
+const MAX_ROW_CHARS: usize = 20_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    None,
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    Header,
+    Delimiter,
+    Body,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cell {
+    /// Chars between the pipes (or the line edge), padding included.
+    pub span: Range<usize>,
+    /// `span` without surrounding whitespace. For an empty cell, an empty
+    /// range just after the first padding space.
+    pub content: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub line: usize,
+    pub kind: RowKind,
+    /// The line's chars, terminator excluded.
+    pub start: usize,
+    pub end: usize,
+    pub cells: Vec<Cell>,
+    /// This row's own leading / trailing pipe.
+    pub lead: bool,
+    pub trail: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Table {
+    /// Header, delimiter, then body rows, one per line.
+    pub rows: Vec<Row>,
+    pub aligns: Vec<Align>,
+    /// Style, taken from the header row: leading / trailing pipe, a space
+    /// inside the pipes, and the indentation.
+    pub lead: bool,
+    pub trail: bool,
+    pub spaced: bool,
+    /// The delimiter row has spaces inside its pipes (`| --- |`).
+    pub delim_spaced: bool,
+    pub indent: String,
+}
+
+/// One row split into cells: char ranges relative to the line.
+struct Parts {
+    cells: Vec<Range<usize>>,
+    lead: bool,
+    trail: bool,
+    indent: usize,
+}
+
+fn split_row(chars: &[char]) -> Option<Parts> {
+    let indent = chars.iter().take_while(|&&c| c == ' ').count();
+    if indent > 3 || chars.get(indent) == Some(&'\t') {
+        return None;
+    }
+    let mut end = chars.len();
+    while end > indent && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if end == indent || is_fence(&chars[indent..end]) {
+        return None;
+    }
+    let mut pipes = Vec::new();
+    let mut i = indent;
+    while i < end {
+        match chars[i] {
+            '\\' => i += 2,
+            '|' => {
+                pipes.push(i);
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let (&first, &last) = (pipes.first()?, pipes.last()?);
+    let lead = first == indent;
+    let trail = last == end - 1 && !(pipes.len() == 1 && lead);
+    let inner = &pipes[usize::from(lead)..pipes.len() - usize::from(trail)];
+    let mut cells = Vec::with_capacity(inner.len() + 1);
+    let mut start = if lead { indent + 1 } else { indent };
+    for &p in inner {
+        cells.push(start..p);
+        start = p + 1;
+    }
+    cells.push(start..if trail { end - 1 } else { chars.len() });
+    Some(Parts { cells, lead, trail, indent })
+}
+
+fn is_fence(t: &[char]) -> bool {
+    t.len() >= 3 && (t[..3] == ['`'; 3] || t[..3] == ['~'; 3])
+}
+
+fn line_chars(rope: &Rope, line: usize) -> Vec<char> {
+    let l = rope.line(line);
+    if l.len_chars() > MAX_ROW_CHARS {
+        // Never a row: a lone `x` has no pipe.
+        return vec!['x'];
+    }
+    let n = crate::buffer::line_content_len(l);
+    l.chars().take(n).collect()
+}
+
+fn delimiter_align(t: &[char]) -> Option<Align> {
+    let (l, r) = (t.first() == Some(&':'), t.len() > 1 && t.last() == Some(&':'));
+    let dashes = &t[usize::from(l)..t.len() - usize::from(r)];
+    if dashes.is_empty() || dashes.iter().any(|&c| c != '-') {
+        return None;
+    }
+    Some(match (l, r) {
+        (true, true) => Align::Center,
+        (true, false) => Align::Left,
+        (false, true) => Align::Right,
+        (false, false) => Align::None,
+    })
+}
+
+fn trim(chars: &[char], r: Range<usize>) -> Range<usize> {
+    let (mut s, mut e) = (r.start, r.end);
+    while s < e && chars[s].is_whitespace() {
+        s += 1;
+    }
+    while e > s && chars[e - 1].is_whitespace() {
+        e -= 1;
+    }
+    if s == e {
+        // Empty: just after one padding space, if there is one.
+        let p = (r.start + 1).min(r.end);
+        return p..p;
+    }
+    s..e
+}
+
+fn make_row(rope: &Rope, line: usize, kind: RowKind, chars: &[char], parts: &Parts) -> Row {
+    let start = rope.line_to_char(line);
+    let cells = parts
+        .cells
+        .iter()
+        .map(|r| {
+            let c = trim(chars, r.clone());
+            Cell { span: start + r.start..start + r.end, content: start + c.start..start + c.end }
+        })
+        .collect();
+    Row { line, kind, start, end: start + chars.len(), cells, lead: parts.lead, trail: parts.trail }
+}
+
+/// Is `line` inside a fenced code block? Scans the text before it (bytes,
+/// so it is fast even for large files; the caller caches the answer).
+pub fn in_fence(rope: &Rope, line: usize) -> bool {
+    let limit = rope.line_to_byte(line.min(rope.len_lines()));
+    let mut open: Option<(u8, usize)> = None;
+    let (mut indent, mut run_char, mut run, mut at_start) = (0usize, 0u8, 0usize, true);
+    let mut marker: Option<(u8, usize)> = None;
+    let mut seen = 0usize;
+    let end_line = |marker: &mut Option<(u8, usize)>, open: &mut Option<(u8, usize)>| {
+        if let Some((c, n)) = marker.take() {
+            match *open {
+                None => *open = Some((c, n)),
+                Some((oc, on)) if oc == c && n >= on => *open = None,
+                Some(_) => {}
+            }
+        }
+    };
+    'outer: for chunk in rope.chunks() {
+        for &b in chunk.as_bytes() {
+            if seen >= limit {
+                break 'outer;
+            }
+            seen += 1;
+            if b == b'\n' {
+                if run >= 3 {
+                    marker = Some((run_char, run));
+                }
+                end_line(&mut marker, &mut open);
+                (indent, run, at_start) = (0, 0, true);
+                continue;
+            }
+            if !at_start {
+                continue;
+            }
+            match b {
+                b' ' if run == 0 && indent < 3 => indent += 1,
+                b'`' | b'~' if run == 0 || b == run_char => {
+                    run_char = b;
+                    run += 1;
+                }
+                _ => {
+                    if run >= 3 {
+                        marker = Some((run_char, run));
+                    }
+                    at_start = false;
+                }
+            }
+        }
+    }
+    open.is_some()
+}
+
+impl Table {
+    /// The table containing `line`, if any. Costs O(table size) plus a
+    /// fence scan of the text above it.
+    pub fn at(rope: &Rope, line: usize) -> Option<Table> {
+        if line >= rope.len_lines() {
+            return None;
+        }
+        let first = line_chars(rope, line);
+        split_row(&first)?;
+        let mut a = line;
+        while a > 0 && split_row(&line_chars(rope, a - 1)).is_some() {
+            a -= 1;
+        }
+        let mut b = line;
+        while b + 1 < rope.len_lines() && split_row(&line_chars(rope, b + 1)).is_some() {
+            b += 1;
+        }
+        // The first header + delimiter pair in the block starts the table;
+        // pipe lines above it are prose.
+        let mut header = None;
+        let mut prev = split_row(&line_chars(rope, a)).map(|p| (line_chars(rope, a), p));
+        for k in a + 1..=b.min(line + 1) {
+            let chars = line_chars(rope, k);
+            let parts = split_row(&chars).expect("block line");
+            let (pc, pp) = prev.take().expect("previous line");
+            let aligns: Option<Vec<Align>> = parts.cells.iter().map(|r| delimiter_align(&chars[trim(&chars, r.clone())])).collect();
+            if let Some(aligns) = aligns
+                && aligns.len() == pp.cells.len()
+            {
+                header = Some((k - 1, pc, pp, chars, parts, aligns));
+                break;
+            }
+            prev = Some((chars, parts));
+        }
+        let (h, hc, hp, dc, dp, aligns) = header?;
+        if line < h || in_fence(rope, h) {
+            return None;
+        }
+        let spaced = hp.cells.iter().any(|r| r.end > r.start && hc[r.start] == ' ');
+        let delim_spaced = dp.cells.iter().any(|r| r.end > r.start && dc[r.start] == ' ');
+        let mut rows = vec![make_row(rope, h, RowKind::Header, &hc, &hp), make_row(rope, h + 1, RowKind::Delimiter, &dc, &dp)];
+        for l in h + 2..=b {
+            let chars = line_chars(rope, l);
+            let parts = split_row(&chars).expect("block line");
+            rows.push(make_row(rope, l, RowKind::Body, &chars, &parts));
+        }
+        Some(Table { rows, aligns, lead: hp.lead, trail: hp.trail, spaced, delim_spaced, indent: " ".repeat(hp.indent) })
+    }
+
+    pub fn first_line(&self) -> usize {
+        self.rows[0].line
+    }
+
+    pub fn last_line(&self) -> usize {
+        self.rows[self.rows.len() - 1].line
+    }
+
+    /// Columns: the most cells in any row.
+    pub fn cols(&self) -> usize {
+        self.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0)
+    }
+
+    /// Char positions of row `r`'s cell-separating pipes.
+    pub fn pipes(&self, r: usize) -> Vec<usize> {
+        let cells = &self.rows[r].cells;
+        let mut v = Vec::with_capacity(cells.len() + 1);
+        if self.rows[r].lead {
+            v.push(cells[0].span.start - 1);
+        }
+        for (i, c) in cells.iter().enumerate() {
+            if i + 1 < cells.len() || self.rows[r].trail {
+                v.push(c.span.end);
+            }
+        }
+        v
+    }
+
+    pub fn row_of_line(&self, line: usize) -> Option<usize> {
+        line.checked_sub(self.first_line()).filter(|&i| i < self.rows.len())
+    }
+
+    /// (row, column) of the cell holding char position `pos`. A position on
+    /// a pipe belongs to the cell before it; the line's edges to the first
+    /// and last cell.
+    pub fn cell_at(&self, rope: &Rope, pos: usize) -> Option<(usize, usize)> {
+        let r = self.row_of_line(rope.char_to_line(pos))?;
+        let cells = &self.rows[r].cells;
+        let c = cells.iter().position(|c| pos <= c.span.end).unwrap_or(cells.len() - 1);
+        Some((r, c))
+    }
+
+    fn text(rope: &Rope, r: &Range<usize>) -> String {
+        rope.slice(r.clone()).to_string()
+    }
+
+    fn align(&self, c: usize) -> Align {
+        self.aligns.get(c).copied().unwrap_or(Align::None)
+    }
+
+    /// Padding spaces left and right of the content in column `c`.
+    fn sides(&self, c: usize, ncols: usize) -> (usize, usize) {
+        let left = self.spaced && (c > 0 || self.lead);
+        let right = self.spaced && !(c + 1 == ncols && !self.trail);
+        (usize::from(left), usize::from(right))
+    }
+
+    /// The narrowest content width that leaves the delimiter 3 dashes.
+    fn min_inner(&self, c: usize, ncols: usize) -> usize {
+        let (l, r) = self.sides(c, ncols);
+        if self.delim_spaced { 3 } else { 3usize.saturating_sub(l + r) }
+    }
+
+    /// Widest content per column (at least `min_inner`), optionally with
+    /// one cell's content replaced.
+    fn inner_widths(&self, rope: &Rope, over: Option<(usize, usize, &str)>) -> Vec<usize> {
+        let ncols = self.cols();
+        (0..ncols)
+            .map(|c| {
+                self.rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| r.kind != RowKind::Delimiter)
+                    .filter_map(|(i, r)| match over {
+                        Some((or, oc, t)) if or == i && oc == c => Some(text_width(t)),
+                        _ => r.cells.get(c).map(|cell| text_width(&Self::text(rope, &cell.content))),
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    .max(self.min_inner(c, ncols))
+            })
+            .collect()
+    }
+
+    /// Left and right padding that places `text` in `width` cells.
+    fn pad_split(text: &str, width: usize, align: Align) -> (usize, usize) {
+        let gap = width.saturating_sub(text_width(text));
+        match align {
+            Align::Right => (gap, 0),
+            Align::Center => (gap / 2, gap - gap / 2),
+            Align::None | Align::Left => (0, gap),
+        }
+    }
+
+    fn dashes(width: usize, align: Align) -> String {
+        let w = width.max(3);
+        match align {
+            Align::None => "-".repeat(w),
+            Align::Left => format!(":{}", "-".repeat(w - 1)),
+            Align::Right => format!("{}:", "-".repeat(w - 1)),
+            Align::Center => format!(":{}:", "-".repeat(w - 2)),
+        }
+    }
+
+    /// Cell `c` of a row of `kind` with content `inner` cells wide, in the
+    /// table's spacing. The last cell of a table without a trailing pipe
+    /// gets no trailing spaces.
+    fn cell_text(&self, kind: RowKind, c: usize, ncols: usize, content: &str, inner: usize) -> String {
+        let (l, r) = self.sides(c, ncols);
+        let s = match kind {
+            RowKind::Delimiter if self.delim_spaced => format!("{}{}{}", " ".repeat(l), Self::dashes(inner, self.align(c)), " ".repeat(r)),
+            RowKind::Delimiter => Self::dashes(l + inner + r, self.align(c)),
+            _ => {
+                let (pl, pr) = Self::pad_split(content, inner, self.align(c));
+                format!("{}{content}{}", " ".repeat(l + pl), " ".repeat(pr + r))
+            }
+        };
+        if c + 1 == ncols && !self.trail { s.trim_end().to_string() } else { s }
+    }
+
+    fn row_text(&self, kind: RowKind, contents: &[String], widths: &[usize]) -> String {
+        let n = widths.len();
+        let cells: Vec<String> = (0..n).map(|c| self.cell_text(kind, c, n, contents.get(c).map_or("", String::as_str), widths[c])).collect();
+        format!("{}{}{}{}", self.indent, if self.lead { "|" } else { "" }, cells.join("|"), if self.trail { "|" } else { "" })
+    }
+
+    /// Re-align every row (the Format table command). Rows already in
+    /// shape are left alone; short rows gain empty cells.
+    pub fn format(&self, rope: &Rope) -> Vec<(usize, usize, String)> {
+        let widths = self.inner_widths(rope, None);
+        self.rows
+            .iter()
+            .filter_map(|r| {
+                let contents: Vec<String> = r.cells.iter().map(|c| Self::text(rope, &c.content)).collect();
+                let new = self.row_text(r.kind, &contents, &widths);
+                (Self::text(rope, &(r.start..r.end)) != new).then(|| (r.start, r.end - r.start, new))
+            })
+            .collect()
+    }
+
+    /// True if column `c` lines up: every row that has the cell gives it
+    /// the same display width.
+    pub fn column_aligned(&self, rope: &Rope, c: usize) -> bool {
+        let mut w = None;
+        for r in &self.rows {
+            if let Some(cell) = r.cells.get(c) {
+                let cw = text_width(&Self::text(rope, &cell.span));
+                if *w.get_or_insert(cw) != cw {
+                    return false;
+                }
+            }
+        }
+        w.is_some()
+    }
+
+    /// Replace cell (r, c)'s content with `new`. With `realign`, if the rest
+    /// of the column lines up, the column is re-padded to fit: it grows as
+    /// needed, and shrinks back only if it had no slack before. Returns the
+    /// replacements (positions in the old text) and where the new content
+    /// starts in the new text.
+    pub fn edit_cell(&self, rope: &Rope, r: usize, c: usize, new: &str, realign: bool) -> (Vec<(usize, usize, String)>, usize) {
+        let ncols = self.cols();
+        let cell = &self.rows[r].cells[c];
+        let last_open = c + 1 == ncols && !self.trail;
+        if !realign || last_open || !self.column_aligned(rope, c) {
+            let ops = vec![(cell.content.start, cell.content.len(), new.to_string())];
+            return (ops, cell.content.start);
+        }
+        let (l, rr) = self.sides(c, ncols);
+        // The column's current inner width, from any other row.
+        let other = self.rows.iter().enumerate().find_map(|(i, row)| (i != r).then(|| row.cells.get(c)).flatten()).expect("aligned column");
+        let inner_old = text_width(&Self::text(rope, &other.span)).saturating_sub(l + rr);
+        let widest_old = self.inner_widths(rope, None)[c];
+        let needed = self.inner_widths(rope, Some((r, c, new)))[c];
+        let inner = if widest_old < inner_old { needed.max(inner_old) } else { needed };
+        let mut ops = Vec::new();
+        let mut delta: isize = 0;
+        let mut start_new = cell.content.start;
+        for (i, row) in self.rows.iter().enumerate() {
+            let Some(cl) = row.cells.get(c) else { continue };
+            if inner == inner_old && i != r {
+                continue;
+            }
+            let content = if i == r { new.to_string() } else { Self::text(rope, &cl.content) };
+            let text = self.cell_text(row.kind, c, ncols, &content, inner);
+            if i == r {
+                let (pl, _) = Self::pad_split(new, inner, self.align(c));
+                start_new = (cl.span.start as isize + delta) as usize + l + pl;
+            }
+            if Self::text(rope, &cl.span) != text {
+                delta += text.chars().count() as isize - cl.span.len() as isize;
+                ops.push((cl.span.start, cl.span.len(), text));
+            }
+        }
+        (ops, start_new)
+    }
+
+    /// A new empty row (as text, no line terminator) in the table's style.
+    pub fn empty_row(&self, rope: &Rope) -> String {
+        let widths = self.inner_widths(rope, None);
+        let n = self.rows[0].cells.len().max(1);
+        self.row_text(RowKind::Body, &[], &widths[..n.min(widths.len())])
+    }
+}
+
+/// Display width as the editor lays it out (tabs count 1).
+pub fn text_width(s: &str) -> usize {
+    crate::layout::text_width(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(text: &str, mut ops: Vec<(usize, usize, String)>) -> String {
+        let mut rope = Rope::from_str(text);
+        ops.sort_by_key(|o| std::cmp::Reverse(o.0));
+        for (at, del, ins) in ops {
+            rope.remove(at..at + del);
+            rope.insert(at, &ins);
+        }
+        rope.to_string()
+    }
+
+    fn table(text: &str, line: usize) -> Option<(Rope, Table)> {
+        let rope = Rope::from_str(text);
+        let t = Table::at(&rope, line)?;
+        Some((rope, t))
+    }
+
+    const DOC: &str = "Intro | not a table\n\n| Device | Type | Status |\n|:--|:-:|--:|\n| MPC One | Sampler | Active |\n| Electribe 2 | Groovebox |\nAfter.\n";
+
+    #[test]
+    fn recognises_spans_aligns_and_bounds() {
+        assert!(table(DOC, 0).is_none(), "prose with a pipe");
+        assert!(table(DOC, 1).is_none());
+        let (rope, t) = table(DOC, 4).unwrap();
+        assert_eq!((t.first_line(), t.last_line()), (2, 5));
+        assert_eq!(t.aligns, [Align::Left, Align::Center, Align::Right]);
+        assert!(t.lead && t.trail && t.spaced);
+        let cell = &t.rows[2].cells[0];
+        assert_eq!(rope.slice(cell.content.clone()).to_string(), "MPC One");
+        assert_eq!(rope.slice(cell.span.clone()).to_string(), " MPC One ");
+        assert_eq!(t.rows[3].cells.len(), 2, "ragged row kept as is");
+        assert!(table(DOC, 6).is_none(), "after the table");
+        assert_eq!(t.cell_at(&rope, rope.line_to_char(4) + 3), Some((2, 0)));
+        assert_eq!(t.cell_at(&rope, rope.line_to_char(4) + 11), Some((2, 1)));
+        let l3 = rope.line_to_char(3);
+        assert_eq!(t.pipes(1), [l3, l3 + 4, l3 + 8, l3 + 12]);
+        let (rope, t) = table("  a | b\n  --|--\n", 0).unwrap();
+        assert_eq!(t.pipes(0), [rope.line_to_char(0) + 4], "no edge pipes, indented");
+    }
+
+    #[test]
+    fn escapes_code_spans_and_pipeless_edges() {
+        let (rope, t) = table("a | b\n--|--\nx \\| y | `c|d`\n", 2).unwrap();
+        assert!(!t.lead && !t.trail);
+        let row: Vec<String> = t.rows[2].cells.iter().map(|c| rope.slice(c.content.clone()).to_string()).collect();
+        // As on GitHub: \| is cell text; a pipe in a code span still splits.
+        assert_eq!(row, ["x \\| y", "`c", "d`"]);
+        // \\| is an escaped backslash followed by a real pipe.
+        let (rope, t) = table("|a|b|\n|-|-|\n|\\\\|z|\n", 2).unwrap();
+        assert_eq!(rope.slice(t.rows[2].cells[0].content.clone()).to_string(), "\\\\");
+    }
+
+    #[test]
+    fn rejects_mismatch_fences_and_code() {
+        assert!(table("| a | b |\n|---|\n| 1 | 2 |\n", 0).is_none(), "delimiter count differs");
+        assert!(table("| a |\n| b |\n", 0).is_none(), "no delimiter row");
+        assert!(table("```\n| a | b |\n|---|---|\n```\n", 1).is_none(), "fenced");
+        assert!(table("~~~~\n```\n~~~~\n| a | b |\n|---|---|\n", 3).is_some(), "fence closed by a longer run");
+        assert!(table("    | a | b |\n    |---|---|\n", 0).is_none(), "indented code");
+        assert!(table("Title\n---\n", 0).is_none(), "setext heading");
+        assert!(table("| a | b |\n| - | x |\n", 0).is_none(), "bad delimiter cell");
+    }
+
+    #[test]
+    fn format_aligns_and_keeps_every_cell() {
+        let src = "|a|bb|\n|:-:|--:|\n|ccc|d|e|\n|f|\n";
+        let (rope, t) = table(src, 0).unwrap();
+        let out = apply(src, t.format(&rope));
+        // No spaces inside pipes in the source, so none are added.
+        assert_eq!(out, "| a | bb|   |\n|:-:|--:|---|\n|ccc|  d|e  |\n| f |   |   |\n", "{out}");
+    }
+
+    #[test]
+    fn format_spaced_table_and_unicode_widths() {
+        let src = "| Name | Kanji |\n|---|---|\n| Ann | 日本 |\n| Émile | 🎹 |\n";
+        let (rope, t) = table(src, 0).unwrap();
+        let out = apply(src, t.format(&rope));
+        assert_eq!(out, "| Name  | Kanji |\n|-------|-------|\n| Ann   | 日本  |\n| Émile | 🎹    |\n", "{out}");
+        // Formatting is idempotent: nothing left to change.
+        let rope2 = Rope::from_str(&out);
+        assert!(Table::at(&rope2, 0).unwrap().format(&rope2).is_empty());
+    }
+
+    #[test]
+    fn edit_cell_realigns_only_its_column() {
+        let src = "Before\n| Device | Type |\n| ------ | ---- |\n| MPC    | Samp |\nAfter\n";
+        let (rope, t) = table(src, 2).unwrap();
+        assert!(t.column_aligned(&rope, 0));
+        let (ops, at) = t.edit_cell(&rope, 2, 0, "MPC One Plus", true);
+        let out = apply(src, ops);
+        assert_eq!(out, "Before\n| Device       | Type |\n| ------------ | ---- |\n| MPC One Plus | Samp |\nAfter\n", "{out}");
+        assert_eq!(Rope::from_str(&out).slice(at..at + 12).to_string(), "MPC One Plus");
+        // Shrinking it back restores the original layout.
+        let (rope, t) = table(&out, 2).unwrap();
+        let (ops, _) = t.edit_cell(&rope, 2, 0, "MPC", true);
+        assert_eq!(apply(&out, ops), src);
+    }
+
+    #[test]
+    fn edit_cell_in_unaligned_column_changes_only_the_content() {
+        let src = "|a|b|\n|-|-|\n|x|yy|\n";
+        let (rope, t) = table(src, 0).unwrap();
+        assert!(!t.column_aligned(&rope, 1));
+        let (ops, at) = t.edit_cell(&rope, 2, 1, "zzz", true);
+        let out = apply(src, ops);
+        assert_eq!(out, "|a|b|\n|-|-|\n|x|zzz|\n");
+        assert_eq!(at, src.find("yy").unwrap());
+        // An empty cell gets content right after its padding space.
+        let src = "| a | b |\n|---|---|\n|   | 1 |\n";
+        let (rope, t) = table(src, 2).unwrap();
+        let (ops, at) = t.edit_cell(&rope, 2, 0, "q", true);
+        let out = apply(src, ops);
+        assert_eq!(out, "| a | b |\n|---|---|\n| q | 1 |\n");
+        assert_eq!(&out[at..at + 1], "q");
+    }
+
+    #[test]
+    fn empty_row_matches_style() {
+        let (rope, t) = table("| Device | Type |\n|:------:|-----:|\n", 0).unwrap();
+        assert_eq!(t.empty_row(&rope), "|        |      |");
+        let (rope, t) = table("a | b\n--|--\n", 0).unwrap();
+        assert_eq!(t.empty_row(&rope), "   |");
+        // The common GitHub style stays as it is when formatted.
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let (rope, t) = table(src, 0).unwrap();
+        assert!(t.format(&rope).is_empty());
+    }
+
+    #[test]
+    fn fence_scan() {
+        let rope = Rope::from_str("a\n```rust\nx\n```\nb\n~~~\nc\n");
+        let inside: Vec<bool> = (0..7).map(|l| in_fence(&rope, l)).collect();
+        assert_eq!(inside, [false, false, true, true, false, false, true]);
+        let rope = Rope::from_str("   ```\nin\n    ```\nstill in\n");
+        assert!(in_fence(&rope, 3), "a 4-space indented line can't close a fence");
+    }
+
+    /// Formatting never loses or changes cell contents, whatever the input.
+    #[test]
+    fn format_preserves_contents_on_messy_input() {
+        let pieces = ["|", "a", " ", "\\|", "--", ":", "日", "\\", "`", "x y", "", "|-|"];
+        let mut seed = 0x2545_f491_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as usize
+        };
+        for _ in 0..3000 {
+            let mut lines = vec!["| h1 | h2 |".to_string(), "|---|:-:|".to_string()];
+            for _ in 0..next() % 5 {
+                lines.push((0..next() % 6).map(|_| pieces[next() % pieces.len()]).collect::<String>() + "|");
+            }
+            let src = lines.join("\n") + "\n";
+            let Some((rope, t)) = table(&src, 0) else { continue };
+            let before: Vec<Vec<String>> = t.rows.iter().filter(|r| r.kind != RowKind::Delimiter).map(|r| r.cells.iter().map(|c| rope.slice(c.content.clone()).to_string()).collect()).collect();
+            let out = apply(&src, t.format(&rope));
+            let rope2 = Rope::from_str(&out);
+            let t2 = Table::at(&rope2, 0).unwrap_or_else(|| panic!("table lost:\n{src}\n=>\n{out}"));
+            let after: Vec<Vec<String>> = t2.rows.iter().filter(|r| r.kind != RowKind::Delimiter).map(|r| r.cells.iter().map(|c| rope2.slice(c.content.clone()).to_string()).collect()).collect();
+            for (b, a) in before.iter().zip(&after) {
+                assert_eq!(&a[..b.len()], &b[..], "\n{src}\n=>\n{out}");
+                assert!(a[b.len()..].iter().all(String::is_empty));
+            }
+            assert_eq!(t2.last_line(), t.last_line(), "rows kept:\n{src}\n=>\n{out}");
+            assert!(t2.format(&rope2).is_empty(), "idempotent:\n{out}");
+        }
+    }
+}
