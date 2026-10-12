@@ -49,6 +49,16 @@ pub struct FindBar {
     /// Caret when the bar opened: incremental search starts here.
     origin: usize,
     cache: Option<Cache>,
+    /// The searched text (and its lowercased copy) for one buffer version
+    /// and scope, so typing a query doesn't copy and lowercase the whole
+    /// document on every keystroke.
+    hay: Option<Hay>,
+}
+
+pub struct Hay {
+    key: ((u64, u64), Option<(usize, usize)>),
+    text: String,
+    lower: Option<String>,
 }
 
 /// (buffer id+version, query, options, scope): matches are valid while equal.
@@ -71,6 +81,7 @@ impl FindBar {
             scope: None,
             origin,
             cache: None,
+            hay: None,
         }
     }
 
@@ -78,7 +89,7 @@ impl FindBar {
     pub fn matches(&mut self, buf: &Buffer) -> &[(usize, usize)] {
         let key = (buf.cache_key(), self.query.text().to_string(), self.opts, self.scope);
         if self.cache.as_ref().is_none_or(|c| c.key != key) {
-            let (matches, truncated) = find_all_chars(buf, self.query.text(), self.opts, self.scope);
+            let (matches, truncated) = find_all_chars_with(buf, self.query.text(), self.opts, self.scope, &mut self.hay);
             self.cache = Some(Cache { key, matches, truncated });
         }
         &self.cache.as_ref().unwrap().matches
@@ -99,15 +110,22 @@ impl FindBar {
 /// Lowercase only where it keeps the UTF-8 length identical, so byte offsets
 /// in the lowered string still map onto the original text.
 pub fn lower_same_len(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            let mut l = c.to_lowercase();
-            match (l.next(), l.next()) {
-                (Some(lc), None) if lc.len_utf8() == c.len_utf8() => lc,
-                _ => c,
-            }
-        })
-        .collect()
+    if s.is_ascii() {
+        return s.to_ascii_lowercase();
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c.to_ascii_lowercase());
+            continue;
+        }
+        let mut l = c.to_lowercase();
+        out.push(match (l.next(), l.next()) {
+            (Some(lc), None) if lc.len_utf8() == c.len_utf8() => lc,
+            _ => c,
+        });
+    }
+    out
 }
 
 /// Non-overlapping literal matches in `text` as byte ranges.
@@ -115,10 +133,19 @@ pub fn find_all_bytes(text: &str, query: &str, opts: SearchOpts) -> Vec<(usize, 
     if query.is_empty() {
         return Vec::new();
     }
-    let (hay, needle) = if opts.match_case {
-        (std::borrow::Cow::Borrowed(text), query.to_string())
-    } else {
-        (std::borrow::Cow::Owned(lower_same_len(text)), lower_same_len(query))
+    let lower = (!opts.match_case).then(|| lower_same_len(text));
+    find_in(text, lower.as_deref(), query, opts)
+}
+
+/// `find_all_bytes` with the lowercased text already made (needed unless
+/// `opts.match_case`).
+fn find_in(text: &str, lower: Option<&str>, query: &str, opts: SearchOpts) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let (hay, needle) = match lower {
+        Some(l) if !opts.match_case => (l, lower_same_len(query)),
+        _ => (text, query.to_string()),
     };
     let mut out = Vec::new();
     let mut from = 0;
@@ -142,11 +169,23 @@ pub fn find_all_bytes(text: &str, query: &str, opts: SearchOpts) -> Vec<(usize, 
 }
 
 /// Matches in the buffer as char ranges, optionally limited to a scope.
+#[cfg(test)]
 pub fn find_all_chars(
     buf: &Buffer,
     query: &str,
     opts: SearchOpts,
     scope: Option<(usize, usize)>,
+) -> (Vec<(usize, usize)>, bool) {
+    find_all_chars_with(buf, query, opts, scope, &mut None)
+}
+
+/// `find_all_chars`, reusing (or refreshing) the searched text in `hay`.
+fn find_all_chars_with(
+    buf: &Buffer,
+    query: &str,
+    opts: SearchOpts,
+    scope: Option<(usize, usize)>,
+    hay: &mut Option<Hay>,
 ) -> (Vec<(usize, usize)>, bool) {
     let rope = buf.rope();
     let (start, end) = scope.unwrap_or((0, buf.len_chars()));
@@ -154,9 +193,16 @@ pub fn find_all_chars(
     if query.is_empty() || start >= end {
         return (Vec::new(), false);
     }
-    let text = rope.slice(start..end).to_string();
+    let key = (buf.cache_key(), scope);
+    if hay.as_ref().is_none_or(|h| h.key != key) {
+        *hay = Some(Hay { key, text: rope.slice(start..end).to_string(), lower: None });
+    }
+    let h = hay.as_mut().expect("just set");
+    if !opts.match_case && h.lower.is_none() {
+        h.lower = Some(lower_same_len(&h.text));
+    }
     let base = rope.char_to_byte(start);
-    let mut v = find_all_bytes(&text, query, opts);
+    let mut v = find_in(&h.text, h.lower.as_deref(), query, opts);
     let truncated = v.len() > MAX_MATCHES;
     v.truncate(MAX_MATCHES);
     let out = v

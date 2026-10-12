@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 (2026-10-12): faster find
+
+- **Find is about 5× faster in large files.** Typing a query in a 35 MB file now takes about 270 ms for the whole query instead of about 1.4 s, and uses less memory. Highlighting long lines benefits too.
+
 ## 0.4.0 (2026-10-12): Phase 4, Markdown tables
 
 Completes Phase 4: table recognition and cell editing (0.3.2), rows, columns and the table menu (0.3.3), cell selection with tab-separated copy and paste (0.3.5), and wide tables (0.3.6). Text encodings came in 0.3.1. Manual gate checklist: `docs/phase4-checklist.md`.
