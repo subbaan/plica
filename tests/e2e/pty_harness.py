@@ -402,7 +402,7 @@ check("starts with Dracula background", t.cell(10, 5).bg.lower() == "282a36", t.
 t.send("\x1b[20~", 0.4)  # F9
 check("preferences open", "Preferences" in t.text(), t.text())
 t.send("\t\t", 0.3)  # -> Appearance
-t.send("\x1b[C\x1b[C\x1b[C", 0.4)  # Colours: auto -> palette -> dracula -> terminal
+t.send("\x1b[D", 0.4)  # Colours: auto -> (wraps back to) terminal
 check("theme previews live (terminal colours)", t.cell(10, ROWS - 3).bg == "default", t.cell(10, ROWS - 3).bg)
 row = next(y for y in range(ROWS) if " Save " in t.line(y) and "Cancel" in t.line(y))
 t.click(t.col_of(row, " Save ") + 2, row); t.pump(0.4)
@@ -455,6 +455,17 @@ t.click(xb + 1, 1); t.send("\x1b[19~", 0.4)  # F8 (fallback key) removes it
 check("F8 toggles the document highlight off", t.cell(xb, 1).bg.lower() != "c678dd" and "about" not in open(docs_toml).read(), t.cell(xb, 1).bg)
 t.send("\x11", 0.5)
 os.remove(docs_toml)
+os.remove(cfg_file)
+
+# ---------------------------------------------------------------- session 11b: built-in themes, overrides
+t = Term(["--theme", "solarized-light", fp])
+check("--theme solarized-light", t.cell(10, 5).bg.lower() == "fdf6e3" and "Solarized Light" in t.line(ROWS - 1), (t.cell(10, 5).bg, t.line(ROWS - 1)))
+t.send("\x11", 0.5)
+open(cfg_file, "w").write('[appearance]\ntheme = "nord"\n[appearance.colours]\nbackground = "color1"\n')
+t = Term([fp])
+check("colour override follows the theme's palette slot (Nord color1)", t.cell(10, 5).bg.lower() == "bf616a", t.cell(10, 5).bg)
+check("override with poor contrast is reported", "low contrast" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x11", 0.5)
 os.remove(cfg_file)
 
 # ---------------------------------------------------------------- session 12: Highlights in Preferences

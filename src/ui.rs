@@ -544,7 +544,7 @@ fn status_right(app: &App, compact: bool) -> String {
     let le = app.tab.doc.line_ending.label();
     parts.push(if app.tab.doc.mixed_line_endings { format!("{le}*") } else { le.into() });
     parts.push(match &app.theme_source {
-        ThemeSource::Builtin => "Dracula".into(),
+        ThemeSource::Builtin(b) => b.title().into(),
         ThemeSource::TerminalDefault => "no colour".into(),
         ThemeSource::File { path, last_error } => {
             let n = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -807,6 +807,38 @@ fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
             }
             if let Some(row) = rows.get(state.row) {
                 buf.set_stringn(rx, inner.y + rows.len() as u16 + 1, row.hint(), rw as usize, dim);
+            }
+            if section == Section::Appearance {
+                // A strip of the current roles, so a theme can be judged
+                // before saving.
+                let py = inner.y + rows.len() as u16 + 3;
+                if py + 2 < inner.bottom().saturating_sub(2) {
+                    let base = p.style(t.editor_fg, t.editor_bg);
+                    let sel_style = p.plain_or(p.style(t.selection_fg, t.selection_bg), Modifier::REVERSED);
+                    let search_style = p.plain_or(p.style(t.search_fg, t.search_bg), Modifier::UNDERLINED);
+                    let accent = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::REVERSED | Modifier::BOLD);
+                    let surface = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
+                    let todo = crate::highlight::samples().into_iter().find(|g| g.name == "Todo");
+                    let todo_style = todo.map_or(base, |g| base.patch(highlight_style(p, &crate::highlight::resolve(&g, &t))));
+                    let chips: [(&str, Style); 7] = [
+                        (" Text ", base),
+                        (" Selected ", sel_style),
+                        (" Match ", search_style),
+                        (" Accent ", accent),
+                        (" Bar ", surface),
+                        (" Muted ", p.plain_or(p.style(t.muted, t.editor_bg), Modifier::DIM)),
+                        (" TODO ", todo_style),
+                    ];
+                    buf.set_stringn(rx, py, "Preview", rw as usize, dim);
+                    let mut x = rx;
+                    for (label, style) in chips {
+                        if x >= inner.right() {
+                            break;
+                        }
+                        let (nx, _) = buf.set_stringn(x, py + 1, label, inner.right().saturating_sub(x) as usize, style);
+                        x = nx + 1;
+                    }
+                }
             }
         }
     }

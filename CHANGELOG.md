@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.5 (2026-10-12): built-in themes, high contrast, colour overrides
+
+- **Built-in themes:** Gruvbox, Nord, Solarized Dark and Solarized Light join Dracula (`appearance.theme`, Preferences → Appearance, or `--theme NAME`). The status bar names the active theme.
+- **High contrast** (`appearance.high_contrast`, or Preferences → Appearance): text, selection, search, bars and accents are pushed to 7:1 contrast (WCAG AAA), muted text to 4.5:1. Works with any palette or theme.
+- **Colour overrides** in `[appearance.colours]`: set any role (foreground, background, accent, selection, search, bar, current_line, line_numbers, …) to `#rrggbb`, a palette slot (`color4`) or another role. Slots follow the live palette. Overrides are applied as written; if one makes text hard to read, Plica says so at startup and `--check-palette` lists it.
+- Preferences → Appearance shows a **preview strip** of text, selection, find match, accent, bars, muted text and a highlight, so you can judge a theme before saving.
+
 ## 0.2.4 (2026-10-12): Highlights in Preferences
 
 - **Preferences → Highlights** manages highlight groups. The list shows each group's name in its own colours, with switches for all highlighting and for the sample groups. Space switches a group on/off, Enter edits it, N adds a group, Delete removes one, Alt+↑/↓ (or Ctrl+↑/↓) changes priority. Everything is clickable.

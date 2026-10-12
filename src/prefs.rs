@@ -24,6 +24,7 @@ pub struct Settings {
     pub primary_selection: bool,
     pub theme: ThemeChoice,
     pub palette: Option<PathBuf>,
+    pub high_contrast: bool,
     pub recovery: bool,
     pub highlights: crate::highlight::Highlights,
 }
@@ -40,6 +41,7 @@ impl Settings {
             primary_selection: c.primary_selection,
             theme: c.theme,
             palette: c.palette.clone(),
+            high_contrast: c.high_contrast,
             recovery: c.recovery,
             highlights: c.highlights.clone(),
         }
@@ -57,6 +59,7 @@ pub enum Row {
     Primary,
     Theme,
     Palette,
+    HighContrast,
     Recovery,
 }
 
@@ -98,7 +101,7 @@ impl Section {
         match self {
             Section::Editor => &[Row::TabWidth, Row::Wrap, Row::LineNumbers, Row::Whitespace, Row::Indent],
             Section::Interaction => &[Row::Mouse, Row::Primary],
-            Section::Appearance => &[Row::Theme, Row::Palette],
+            Section::Appearance => &[Row::Theme, Row::Palette, Row::HighContrast],
             Section::Files => &[Row::Recovery],
             _ => &[],
         }
@@ -117,6 +120,7 @@ impl Row {
             Row::Primary => "Primary selection",
             Row::Theme => "Colours",
             Row::Palette => "Palette file",
+            Row::HighContrast => "High contrast",
             Row::Recovery => "Crash recovery",
         }
     }
@@ -132,6 +136,7 @@ impl Row {
             Row::Primary => "Select to copy, middle-click to paste",
             Row::Theme => "auto: palette file if found, else Dracula",
             Row::Palette => "Enter to edit, Delete to clear (Kitty format)",
+            Row::HighContrast => "Text contrast 7:1 instead of 4.5:1",
             Row::Recovery => "Snapshot unsaved work for crash recovery",
         }
     }
@@ -153,15 +158,8 @@ impl Row {
             ),
             Row::Mouse => b(s.mouse),
             Row::Primary => b(s.primary_selection),
-            Row::Theme => format!(
-                "‹ {} ›",
-                match s.theme {
-                    ThemeChoice::Auto => "auto",
-                    ThemeChoice::Palette => "palette",
-                    ThemeChoice::Dracula => "dracula",
-                    ThemeChoice::Terminal => "terminal",
-                }
-            ),
+            Row::Theme => format!("‹ {} ›", s.theme.name()),
+            Row::HighContrast => b(s.high_contrast),
             Row::Palette => s.palette.as_ref().map_or_else(|| "(none)".into(), |p| tilde(p)),
             Row::Recovery => b(s.recovery),
         }
@@ -181,13 +179,8 @@ impl Row {
             Row::Indent => s.indent = cycle(&[IndentMode::Auto, IndentMode::Tabs, IndentMode::Spaces], s.indent, dir),
             Row::Mouse => s.mouse = !s.mouse,
             Row::Primary => s.primary_selection = !s.primary_selection,
-            Row::Theme => {
-                s.theme = cycle(
-                    &[ThemeChoice::Auto, ThemeChoice::Palette, ThemeChoice::Dracula, ThemeChoice::Terminal],
-                    s.theme,
-                    dir,
-                )
-            }
+            Row::Theme => s.theme = cycle(&ThemeChoice::all(), s.theme, dir),
+            Row::HighContrast => s.high_contrast = !s.high_contrast,
             Row::Recovery => s.recovery = !s.recovery,
             // Edited through a text prompt instead.
             Row::Palette => {}
@@ -243,6 +236,7 @@ impl App {
             primary_selection: self.primary_selection,
             theme: self.theme_choice,
             palette: self.palette_setting.clone(),
+            high_contrast: self.adjust.high_contrast,
             recovery: self.recovery_enabled,
             highlights: self.highlights.clone(),
         }
@@ -273,11 +267,12 @@ impl App {
             self.mouse_enabled = s.mouse;
             let _ = term::set_mouse(s.mouse);
         }
-        if s.theme != old.theme || s.palette != old.palette {
+        if s.theme != old.theme || s.palette != old.palette || s.high_contrast != old.high_contrast {
             self.theme_choice = s.theme;
             self.palette_setting = s.palette.clone();
+            self.adjust.high_contrast = s.high_contrast;
             let (c, note) = colours::decide(s.theme, s.palette.as_deref());
-            let (theme, source, warning) = colours::load(c, note);
+            let (theme, source, warning) = colours::load(c, note, &self.adjust);
             self.theme = theme;
             self.theme_source = source;
             self.palette_watch_dirty = true;
@@ -328,7 +323,7 @@ impl App {
     pub fn set_palette_path(&mut self, input: &str) {
         let mut s = self.current_settings();
         s.palette = (!input.trim().is_empty()).then(|| crate::app::expand_tilde(input.trim()));
-        if s.palette.is_some() && s.theme == ThemeChoice::Dracula {
+        if s.palette.is_some() && matches!(s.theme, ThemeChoice::Builtin(_)) {
             s.theme = ThemeChoice::Palette;
         }
         self.apply_settings(&s);
@@ -475,12 +470,6 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
         IndentMode::Tabs => "tabs",
         IndentMode::Spaces => "spaces",
     };
-    let theme = |t: ThemeChoice| match t {
-        ThemeChoice::Auto => "auto",
-        ThemeChoice::Palette => "palette",
-        ThemeChoice::Dracula => "dracula",
-        ThemeChoice::Terminal => "terminal",
-    };
     let hl_changed = config::parse(&doc.to_string()).0.highlights != s.highlights;
     let mut set = |section: &str, key: &str, v: toml_edit::Value, is_default: bool| {
         let present = doc.get(section).and_then(|t| t.get(key)).is_some();
@@ -508,7 +497,8 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
     set("editor", "indent", indent(s.indent).into(), s.indent == d.indent);
     set("interaction", "mouse", s.mouse.into(), s.mouse == d.mouse);
     set("interaction", "primary_selection", s.primary_selection.into(), s.primary_selection == d.primary_selection);
-    set("appearance", "theme", theme(s.theme).into(), s.theme == d.theme);
+    set("appearance", "theme", s.theme.name().into(), s.theme == d.theme);
+    set("appearance", "high_contrast", s.high_contrast.into(), s.high_contrast == d.high_contrast);
     set("files", "recovery", s.recovery.into(), s.recovery == d.recovery);
     if hl_changed {
         set("highlights", "enabled", s.highlights.enabled.into(), s.highlights.enabled == d.highlights.enabled);

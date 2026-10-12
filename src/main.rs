@@ -47,7 +47,9 @@ Arguments:
 
 Options:
   --palette PATH       Follow a Kitty-format colour file, reloading live
-  --builtin-theme      Use the built-in Dracula theme
+  --theme NAME         Use a built-in theme: dracula, gruvbox, nord,
+                       solarized-dark, solarized-light, or terminal
+  --builtin-theme      Same as --theme dracula
   --config PATH        Use this config file instead of the default
   --print-config       Print a commented default config and exit
   --check-config       Check the config file, list any problems and exit
@@ -70,14 +72,14 @@ struct Args {
     files: Vec<PathBuf>,
     line: Option<usize>,
     palette: Option<PathBuf>,
-    builtin: bool,
+    builtin: Option<config::ThemeChoice>,
     check_palette: Option<PathBuf>,
     config: Option<PathBuf>,
     check_config: bool,
 }
 
 fn parse_args() -> Result<Option<Args>> {
-    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: false, check_palette: None, config: None, check_config: false };
+    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: None, check_palette: None, config: None, check_config: false };
     let mut it = std::env::args_os().skip(1);
     let mut only_files = false;
     while let Some(arg) = it.next() {
@@ -96,8 +98,16 @@ fn parse_args() -> Result<Option<Args>> {
                     a.palette = Some(it.next().context("--palette needs a path")?.into());
                     continue;
                 }
+                "--theme" => {
+                    let name = it.next().context("--theme needs a name")?;
+                    let name = name.to_string_lossy();
+                    match config::ThemeChoice::from_name(&name) {
+                        Some(c @ (config::ThemeChoice::Builtin(_) | config::ThemeChoice::Terminal)) => a.builtin = Some(c),
+                        _ => bail!("unknown theme `{name}` (dracula, gruvbox, nord, solarized-dark, solarized-light, terminal)"),
+                    }
+                }
                 "--builtin-theme" => {
-                    a.builtin = true;
+                    a.builtin = Some(config::ThemeChoice::Builtin(theme::Builtin::Dracula));
                     continue;
                 }
                 "--check-palette" => {
@@ -137,14 +147,20 @@ fn env_palette() -> Option<PathBuf> {
     std::env::var_os("PLICA_PALETTE").filter(|p| !p.is_empty()).map(|p| app::expand_tilde(&p.to_string_lossy()))
 }
 
-fn check_palette(path: &Path, highlights: &highlight::Highlights) -> Result<()> {
+fn check_palette(path: &Path, highlights: &highlight::Highlights, adjust: &theme::Adjust) -> Result<()> {
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let report = theme::parse_kitty(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     for w in &report.warnings {
         println!("warning: {w}");
     }
-    let t = theme::resolve(&report.palette);
+    let t = theme::resolve_with(&report.palette, adjust);
     println!("{t:#?}");
+    if adjust.high_contrast || !adjust.overrides.is_empty() {
+        println!("(with high_contrast = {} and {} colour override(s) from the config)", adjust.high_contrast, adjust.overrides.len());
+    }
+    for w in theme::contrast_warnings(&t, adjust) {
+        println!("low contrast: {w}");
+    }
     let pairs = [
         ("text", t.editor_fg, t.editor_bg),
         ("selection", t.selection_fg, t.selection_bg),
@@ -188,7 +204,7 @@ fn run() -> Result<()> {
         None => (config::Config::default(), Vec::new()),
     };
     if let Some(p) = &args.check_palette {
-        return check_palette(p, &cfg.highlights);
+        return check_palette(p, &cfg.highlights, &theme::Adjust { high_contrast: cfg.high_contrast, overrides: cfg.colour_overrides.clone() });
     }
     if args.check_config {
         let shown = config_path.as_ref().map_or_else(|| "(no config path)".into(), |p| p.display().to_string());
@@ -216,15 +232,21 @@ fn run() -> Result<()> {
     }
 
     // Choose the colour source (CLI > environment > config > auto).
-    let palette_overridden = args.builtin || args.palette.is_some() || env_palette().is_some();
-    let (colour_choice, theme_note) = if args.builtin {
-        (colours::Colours::Builtin, None)
+    let palette_overridden = args.builtin.is_some() || args.palette.is_some() || env_palette().is_some();
+    let adjust = theme::Adjust { high_contrast: cfg.high_contrast, overrides: cfg.colour_overrides.clone() };
+    let (colour_choice, theme_note) = if let Some(c) = args.builtin {
+        colours::decide(c, None)
     } else if let Some(p) = args.palette.clone().or_else(env_palette) {
         (colours::Colours::Palette(p), None)
     } else {
         colours::decide(cfg.theme, cfg.palette.as_deref())
     };
-    let (theme, source, startup_warning) = colours::load(colour_choice, theme_note);
+    let (theme, source, startup_warning) = colours::load(colour_choice, theme_note, &adjust);
+    // Built-in roles are repaired automatically; only overrides can fall short.
+    let override_warning = (!adjust.overrides.is_empty())
+        .then(|| theme::contrast_warnings(&theme, &adjust).into_iter().next())
+        .flatten()
+        .map(|w| format!("Colour overrides give low contrast: {w}"));
 
     let (guard, caps) = term::TermGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
@@ -244,6 +266,7 @@ fn run() -> Result<()> {
     app.keymap = cfg.keymap();
     app.primary_selection = cfg.primary_selection;
     app.highlights = cfg.highlights.clone();
+    app.adjust = adjust;
     let (doc_rules, doc_warnings) = dochl::DocRules::load(config_path.as_ref().and_then(|p| p.parent()).map(|d| d.join("documents.toml")));
     app.doc_rules = doc_rules;
     if let Some(w) = doc_warnings.first() {
@@ -261,7 +284,8 @@ fn run() -> Result<()> {
                 app.theme_choice = config::ThemeChoice::Palette;
                 app.palette_setting = Some(path.clone());
             }
-            _ => app.theme_choice = config::ThemeChoice::Dracula,
+            ThemeSource::Builtin(b) => app.theme_choice = config::ThemeChoice::Builtin(*b),
+            ThemeSource::TerminalDefault => app.theme_choice = config::ThemeChoice::Terminal,
         }
     }
     if !cfg.mouse {
@@ -281,7 +305,7 @@ fn run() -> Result<()> {
         app.warn("Recovery snapshots unavailable (cannot create $XDG_STATE_HOME/plica/recovery)");
     }
     app.offer_recovery(orphans);
-    if let Some(w) = startup_warning {
+    if let Some(w) = startup_warning.or(override_warning) {
         app.warn(w);
     } else if app.tab.doc.mixed_line_endings {
         app.warn("File has mixed line endings; they are preserved as-is");

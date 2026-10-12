@@ -8,6 +8,7 @@
 
 use crate::highlight::{Colour, Group, Highlights};
 use crate::keymap::{Chord, Command, Keymap};
+use crate::theme::{Builtin, OverrideRole};
 use std::path::{Path, PathBuf};
 use toml::{Table, Value};
 
@@ -26,8 +27,31 @@ pub enum ThemeChoice {
     /// The palette file if one is configured or found, else Dracula.
     Auto,
     Palette,
-    Dracula,
+    Builtin(Builtin),
     Terminal,
+}
+
+impl ThemeChoice {
+    /// Every choice, in the order Preferences cycles through them.
+    pub fn all() -> Vec<ThemeChoice> {
+        let mut v = vec![ThemeChoice::Auto, ThemeChoice::Palette];
+        v.extend(Builtin::ALL.map(ThemeChoice::Builtin));
+        v.push(ThemeChoice::Terminal);
+        v
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ThemeChoice::Auto => "auto",
+            ThemeChoice::Palette => "palette",
+            ThemeChoice::Builtin(b) => b.config_name(),
+            ThemeChoice::Terminal => "terminal",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<ThemeChoice> {
+        Self::all().into_iter().find(|c| c.name() == s)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +65,8 @@ pub struct Config {
     pub primary_selection: bool,
     pub theme: ThemeChoice,
     pub palette: Option<PathBuf>,
+    pub high_contrast: bool,
+    pub colour_overrides: Vec<(OverrideRole, Colour)>,
     pub recovery: bool,
     pub keymap_overrides: Vec<(Command, Vec<Chord>)>,
     pub highlights: Highlights,
@@ -58,6 +84,8 @@ impl Default for Config {
             primary_selection: true,
             theme: ThemeChoice::Auto,
             palette: None,
+            high_contrast: false,
+            colour_overrides: Vec::new(),
             recovery: true,
             keymap_overrides: Vec::new(),
             highlights: Highlights::default(),
@@ -137,16 +165,33 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                 _ => false,
             }),
             "appearance" => section(val, "appearance", &mut w, |k, v, w| match k {
-                "theme" => known(choice(v, "appearance.theme", &["auto", "palette", "dracula", "terminal"], w)
-                    .map(|s| {
-                        cfg.theme = match s {
-                            "palette" => ThemeChoice::Palette,
-                            "dracula" => ThemeChoice::Dracula,
-                            "terminal" => ThemeChoice::Terminal,
-                            _ => ThemeChoice::Auto,
+                "theme" => {
+                    let names: Vec<&str> = ThemeChoice::all().iter().map(|c| c.name()).collect();
+                    known(choice(v, "appearance.theme", &names, w).and_then(ThemeChoice::from_name).map(|c| cfg.theme = c))
+                }
+                "high_contrast" => known(boolean(v, "appearance.high_contrast", w).map(|b| cfg.high_contrast = b)),
+                "colours" | "colors" => {
+                    match v.as_table() {
+                        Some(t) => {
+                            for (role, c) in t {
+                                let Some(r) = OverrideRole::from_name(role) else {
+                                    w.push(format!(
+                                        "unknown colour role `appearance.colours.{role}` (roles: {})",
+                                        OverrideRole::ALL.map(|r| r.name()).join(", ")
+                                    ));
+                                    continue;
+                                };
+                                match c.as_str().map(Colour::parse) {
+                                    Some(Ok(c)) => cfg.colour_overrides.push((r, c)),
+                                    Some(Err(e)) => w.push(format!("`appearance.colours.{role}`: {e}")),
+                                    None => w.push(format!("`appearance.colours.{role}` should be a colour string")),
+                                }
+                            }
                         }
-                    })
-                    ),
+                        None => w.push("`appearance.colours` should be a table".into()),
+                    }
+                    true
+                }
                 "palette" => match v.as_str() {
                     Some(s) if !s.trim().is_empty() => {
                         cfg.palette = Some(expand_tilde(s.trim()));
@@ -372,8 +417,18 @@ mouse = true             # false: leave the mouse to the terminal
 primary_selection = true # select to copy, middle-click to paste (X11/Wayland)
 
 [appearance]
-theme = "auto"           # auto | palette | dracula | terminal
+theme = "auto"           # auto | palette | dracula | gruvbox | nord | solarized-dark | solarized-light | terminal
 # palette = "~/.config/kitty/current-theme.conf"   # Kitty-format colour file, reloaded live
+high_contrast = false    # raise text contrast to 7:1 (WCAG AAA)
+
+# Override individual colour roles on top of any theme or palette:
+# "#rrggbb", a palette slot "color0".."color15", or another role (e.g.
+# "accent"). Slots and roles follow the live palette. Roles: foreground,
+# background, muted, accent, accent_text, selection, selection_text, search,
+# search_text, bar, bar_text, current_line, line_numbers, warning, control_chars.
+# [appearance.colours]
+# current_line = "color0"
+# accent = "#e5a50a"
 
 [files]
 recovery = true          # snapshot unsaved work for crash recovery
@@ -517,6 +572,22 @@ terms = []
             assert!(w.iter().any(|m| m.contains(needle)), "missing warning for {needle}: {w:?}");
         }
         assert_eq!(w.len(), 3, "{w:?}");
+    }
+
+    #[test]
+    fn themes_contrast_and_overrides() {
+        let (cfg, w) = parse(
+            "[appearance]\ntheme = \"solarized-light\"\nhigh_contrast = true\n[appearance.colours]\naccent = \"color2\"\nbar = \"#123456\"\nsparkle = \"#fff\"\nmuted = \"nope\"\n",
+        );
+        assert_eq!(cfg.theme, ThemeChoice::Builtin(Builtin::SolarizedLight));
+        assert!(cfg.high_contrast);
+        assert_eq!(cfg.colour_overrides.len(), 2);
+        assert_eq!(cfg.colour_overrides[0], (OverrideRole::Accent, Colour::Slot(2)));
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("sparkle") || w[1].contains("sparkle"));
+        let (cfg, w) = parse("[appearance]\ntheme = \"neon\"\n");
+        assert_eq!(cfg.theme, ThemeChoice::Auto);
+        assert!(w[0].contains("gruvbox"), "lists valid names: {w:?}");
     }
 
     #[test]

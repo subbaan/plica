@@ -59,6 +59,25 @@ pub fn ensure_contrast(fg: Rgb, bg: Rgb, min: f64) -> Rgb {
     target
 }
 
+/// Like `ensure_contrast`, but if no text colour can reach `min` on `bg`
+/// (a mid-tone accent at high-contrast targets), the background is moved
+/// away from the text as well. Returns (fg, bg).
+pub fn readable_pair(fg: Rgb, bg: Rgb, min: f64) -> (Rgb, Rgb) {
+    let f = ensure_contrast(fg, bg, min);
+    if contrast(f, bg) >= min {
+        return (f, bg);
+    }
+    let away = if f.luminance() < 0.5 { Rgb(255, 255, 255) } else { Rgb(0, 0, 0) };
+    for step in 1..=10 {
+        let b = bg.mix(away, step as f64 / 10.0);
+        let f = ensure_contrast(fg, b, min);
+        if contrast(f, b) >= min {
+            return (f, b);
+        }
+    }
+    (f, bg)
+}
+
 /// Raw colours as supplied by a palette source. Everything is optional except
 /// foreground/background, which a palette must define to be accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +222,102 @@ pub fn parse_kitty(text: &str) -> Result<ParseReport, ThemeError> {
     Ok(ParseReport { palette: p, warnings })
 }
 
+/// Built-in palettes. All are MIT licensed; values from each project's
+/// published specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    Dracula,
+    Gruvbox,
+    Nord,
+    SolarizedDark,
+    SolarizedLight,
+}
+
+impl Builtin {
+    pub const ALL: [Builtin; 5] = [Builtin::Dracula, Builtin::Gruvbox, Builtin::Nord, Builtin::SolarizedDark, Builtin::SolarizedLight];
+
+    /// Name for the config file and `--theme`.
+    pub fn config_name(self) -> &'static str {
+        match self {
+            Builtin::Dracula => "dracula",
+            Builtin::Gruvbox => "gruvbox",
+            Builtin::Nord => "nord",
+            Builtin::SolarizedDark => "solarized-dark",
+            Builtin::SolarizedLight => "solarized-light",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Builtin::Dracula => "Dracula",
+            Builtin::Gruvbox => "Gruvbox",
+            Builtin::Nord => "Nord",
+            Builtin::SolarizedDark => "Solarized Dark",
+            Builtin::SolarizedLight => "Solarized Light",
+        }
+    }
+
+    pub fn palette(self) -> Palette {
+        match self {
+            Builtin::Dracula => dracula(),
+            Builtin::Gruvbox => gruvbox(),
+            Builtin::Nord => nord(),
+            Builtin::SolarizedDark => solarized(false),
+            Builtin::SolarizedLight => solarized(true),
+        }
+    }
+}
+
+/// A palette from fg/bg, selection background and the 16 ANSI colours.
+fn simple(fg: &str, bg: &str, sel: &str, ansi: [&str; 16]) -> Palette {
+    let c = |s: &str| parse_color(s).expect("valid built-in colour").expect("not none");
+    Palette {
+        foreground: c(fg),
+        background: c(bg),
+        cursor: Some(c(fg)),
+        cursor_text: Some(c(bg)),
+        selection_fg: None,
+        selection_bg: Some(c(sel)),
+        url: None,
+        active_tab_fg: None,
+        active_tab_bg: None,
+        inactive_tab_fg: None,
+        inactive_tab_bg: None,
+        inactive_border: None,
+        ansi: ansi.map(|s| Some(c(s))),
+    }
+}
+
+/// Gruvbox dark, medium contrast (https://github.com/morhetz/gruvbox, MIT).
+fn gruvbox() -> Palette {
+    simple("#ebdbb2", "#282828", "#504945", [
+        "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+        "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+    ])
+}
+
+/// Nord (https://www.nordtheme.com, MIT).
+fn nord() -> Palette {
+    simple("#d8dee9", "#2e3440", "#434c5e", [
+        "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+        "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+    ])
+}
+
+/// Solarized (https://ethanschoonover.com/solarized, MIT), with the
+/// canonical terminal slot layout.
+fn solarized(light: bool) -> Palette {
+    let ansi = [
+        "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+        "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+    ];
+    if light {
+        simple("#657b83", "#fdf6e3", "#eee8d5", ansi)
+    } else {
+        simple("#839496", "#002b36", "#073642", ansi)
+    }
+}
+
 /// Built-in Dracula palette (https://draculatheme.com, MIT).
 pub fn dracula() -> Palette {
     let c = |s: &str| parse_color(s).unwrap();
@@ -251,34 +366,163 @@ pub struct Theme {
     pub ansi: [Rgb; 16],
 }
 
+/// Theme-wide adjustments applied on top of any palette.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Adjust {
+    /// Raise text contrast targets from 4.5:1 to 7:1 (WCAG AAA) and muted
+    /// text from 2.5:1 to 4.5:1.
+    pub high_contrast: bool,
+    /// Role overrides from `[appearance.colours]`, resolved against the
+    /// palette's own theme (so `color4` follows palette changes). Applied
+    /// as given: the user chose them, `contrast_warnings` reports problems.
+    pub overrides: Vec<(OverrideRole, crate::highlight::Colour)>,
+}
+
+/// Roles that `[appearance.colours]` can set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverrideRole {
+    Foreground,
+    Background,
+    Muted,
+    Accent,
+    AccentText,
+    Selection,
+    SelectionText,
+    Search,
+    SearchText,
+    Bar,
+    BarText,
+    CurrentLine,
+    LineNumbers,
+    Warning,
+    ControlChars,
+}
+
+impl OverrideRole {
+    pub const ALL: [OverrideRole; 15] = [
+        OverrideRole::Foreground,
+        OverrideRole::Background,
+        OverrideRole::Muted,
+        OverrideRole::Accent,
+        OverrideRole::AccentText,
+        OverrideRole::Selection,
+        OverrideRole::SelectionText,
+        OverrideRole::Search,
+        OverrideRole::SearchText,
+        OverrideRole::Bar,
+        OverrideRole::BarText,
+        OverrideRole::CurrentLine,
+        OverrideRole::LineNumbers,
+        OverrideRole::Warning,
+        OverrideRole::ControlChars,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            OverrideRole::Foreground => "foreground",
+            OverrideRole::Background => "background",
+            OverrideRole::Muted => "muted",
+            OverrideRole::Accent => "accent",
+            OverrideRole::AccentText => "accent_text",
+            OverrideRole::Selection => "selection",
+            OverrideRole::SelectionText => "selection_text",
+            OverrideRole::Search => "search",
+            OverrideRole::SearchText => "search_text",
+            OverrideRole::Bar => "bar",
+            OverrideRole::BarText => "bar_text",
+            OverrideRole::CurrentLine => "current_line",
+            OverrideRole::LineNumbers => "line_numbers",
+            OverrideRole::Warning => "warning",
+            OverrideRole::ControlChars => "control_chars",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|r| r.name() == s)
+    }
+
+    fn slot(self, t: &mut Theme) -> &mut Rgb {
+        match self {
+            OverrideRole::Foreground => &mut t.editor_fg,
+            OverrideRole::Background => &mut t.editor_bg,
+            OverrideRole::Muted => &mut t.muted,
+            OverrideRole::Accent => &mut t.accent,
+            OverrideRole::AccentText => &mut t.accent_fg,
+            OverrideRole::Selection => &mut t.selection_bg,
+            OverrideRole::SelectionText => &mut t.selection_fg,
+            OverrideRole::Search => &mut t.search_bg,
+            OverrideRole::SearchText => &mut t.search_fg,
+            OverrideRole::Bar => &mut t.surface_bg,
+            OverrideRole::BarText => &mut t.surface_fg,
+            OverrideRole::CurrentLine => &mut t.current_line_bg,
+            OverrideRole::LineNumbers => &mut t.gutter_fg,
+            OverrideRole::Warning => &mut t.warning,
+            OverrideRole::ControlChars => &mut t.substitute,
+        }
+    }
+}
+
+/// Resolve with the default adjustments.
+#[cfg(test)]
 pub fn resolve(p: &Palette) -> Theme {
+    resolve_with(p, &Adjust::default())
+}
+
+pub fn resolve_with(p: &Palette, adj: &Adjust) -> Theme {
+    let mut t = resolve_base(p, if adj.high_contrast { 7.0 } else { 4.5 }, if adj.high_contrast { 4.5 } else { 2.5 });
+    let base = t.clone();
+    for (role, c) in &adj.overrides {
+        *role.slot(&mut t) = c.resolve(&base);
+    }
+    t
+}
+
+/// Pairs below their contrast target (after overrides), for diagnostics.
+pub fn contrast_warnings(t: &Theme, adj: &Adjust) -> Vec<String> {
+    let text = if adj.high_contrast { 7.0 } else { 4.5 };
+    let pairs = [
+        ("text", t.editor_fg, t.editor_bg, text),
+        ("selection", t.selection_fg, t.selection_bg, text),
+        ("search", t.search_fg, t.search_bg, text),
+        ("bars", t.surface_fg, t.surface_bg, text),
+        ("accent", t.accent_fg, t.accent, text),
+        ("muted", t.muted, t.editor_bg, if adj.high_contrast { 4.5 } else { 2.5 }),
+    ];
+    pairs
+        .iter()
+        .filter(|(_, fg, bg, min)| contrast(*fg, *bg) + 0.005 < *min)
+        .map(|(name, fg, bg, min)| format!("{name}: {fg} on {bg} is {:.2}:1 (want {min}:1)", contrast(*fg, *bg)))
+        .collect()
+}
+
+fn resolve_base(p: &Palette, text_min: f64, muted_min: f64) -> Theme {
     let fg = p.foreground;
     let bg = p.background;
     let a = |i: usize| p.ansi[i];
 
     let muted = a(8)
-        .filter(|&c| contrast(c, bg) >= 2.5)
+        .filter(|&c| contrast(c, bg) >= muted_min)
         .unwrap_or_else(|| fg.mix(bg, 0.45));
-    let muted = ensure_contrast(muted, bg, 2.5);
+    let muted = ensure_contrast(muted, bg, muted_min);
 
     let accent = p.active_tab_bg.or(p.selection_bg).or(a(4)).unwrap_or(fg);
-    let accent_fg = ensure_contrast(p.active_tab_fg.unwrap_or(bg), accent, 4.5);
+    let (accent_fg, accent) = readable_pair(p.active_tab_fg.unwrap_or(bg), accent, text_min);
 
     let selection_bg = p.selection_bg.unwrap_or_else(|| fg.mix(bg, 0.7));
-    let selection_fg = ensure_contrast(p.selection_fg.unwrap_or(fg), selection_bg, 4.5);
+    let (selection_fg, selection_bg) = readable_pair(p.selection_fg.unwrap_or(fg), selection_bg, text_min);
 
     let search_bg = a(3).or(a(11)).unwrap_or(accent);
-    let search_fg = ensure_contrast(bg, search_bg, 4.5);
+    let (search_fg, search_bg) = readable_pair(bg, search_bg, text_min);
 
     // Status/menu bars: a slightly lifted surface, distinct from the editor.
     let surface_bg = match a(0) {
         Some(c) if contrast(c, bg) >= 1.08 => c,
         _ => bg.mix(fg, 0.10),
     };
-    let surface_fg = ensure_contrast(p.inactive_tab_fg.unwrap_or(fg), surface_bg, 4.5);
+    let surface_fg = ensure_contrast(p.inactive_tab_fg.unwrap_or(fg), surface_bg, text_min);
 
     Theme {
-        editor_fg: ensure_contrast(fg, bg, 4.5),
+        editor_fg: ensure_contrast(fg, bg, text_min),
         editor_bg: bg,
         muted,
         accent,
@@ -370,6 +614,35 @@ color15                   #e0e1e1
             assert!(contrast(t.accent_fg, t.accent) >= 4.5);
             assert!(contrast(t.muted, t.editor_bg) >= 2.5);
         }
+    }
+
+    #[test]
+    fn builtins_light_and_dark_meet_targets() {
+        for b in Builtin::ALL {
+            for hc in [false, true] {
+                let adj = Adjust { high_contrast: hc, ..Adjust::default() };
+                let t = resolve_with(&b.palette(), &adj);
+                assert!(contrast_warnings(&t, &adj).is_empty(), "{b:?} hc={hc}: {:?}", contrast_warnings(&t, &adj));
+            }
+            assert_eq!(crate::config::ThemeChoice::from_name(b.config_name()), Some(crate::config::ThemeChoice::Builtin(b)));
+        }
+        // Solarized Light really is light.
+        assert!(resolve(&Builtin::SolarizedLight.palette()).editor_bg.luminance() > 0.8);
+    }
+
+    #[test]
+    fn overrides_follow_the_palette_and_are_reported() {
+        use crate::highlight::Colour;
+        let adj = Adjust {
+            high_contrast: false,
+            overrides: vec![(OverrideRole::Accent, Colour::Slot(2)), (OverrideRole::Foreground, Colour::Fixed(Rgb(0x30, 0x30, 0x30)))],
+        };
+        let d = resolve_with(&dracula(), &adj);
+        assert_eq!(d.accent, Rgb(0x50, 0xfa, 0x7b), "color2 of Dracula");
+        let n = resolve_with(&Builtin::Nord.palette(), &adj);
+        assert_eq!(n.accent, Rgb(0xa3, 0xbe, 0x8c), "color2 of Nord");
+        assert_eq!(d.editor_fg, Rgb(0x30, 0x30, 0x30), "applied as given");
+        assert!(contrast_warnings(&d, &adj).iter().any(|w| w.starts_with("text")));
     }
 
     #[test]

@@ -53,6 +53,14 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.2.5
+
+- **`theme::Adjust` (high contrast + role overrides) is applied wherever a theme is resolved**: startup (`colours::load`), Preferences, and every live palette reload (`App::adjust`). Overrides resolve against the palette's own theme before overriding, so `"color4"` or `"accent"` follow palette changes and can't loop.
+- **Overrides are applied as written, not contrast-repaired.** Automatic repair would silently change a colour the user picked; instead `contrast_warnings` reports pairs below target (status bar at startup, `--check-palette`). Built-in roles are still always repaired.
+- **`readable_pair`: when no text colour can reach the target on a background, nudge the background too.** *Found by the new built-in theme test:* at 7:1, black on Solarized yellow (`#b58900`) only reaches 6.5:1, so search matches failed high contrast. Only kicks in when the text colour alone can't meet the target, so normal palettes (including the user's ThemeWall file) resolve exactly as before.
+- **Built-in palettes come from each project's published values** (all MIT): Gruvbox dark medium, Nord, Solarized with the canonical terminal slot layout. Solarized Light provides a light palette for the contrast tests.
+- **`ThemeChoice::Builtin(Builtin)`** replaces the single Dracula variant; `ThemeChoice::all()` is the one list for config validation, the Preferences cycle and `--theme`.
+
 ### 2026-10-12 · 0.2.4
 
 - **A user group named like a sample takes the sample's slot in priority** (`Highlights::ordered`, with `Origin::User / Sample / Override`). *Bug found by e2e:* the first version listed copies with the user's groups, so switching a sample off made its row jump up the list under the mouse. Keeping the slot keeps the list stable, and "replace a sample" now means exactly that. Only plain user groups can be reordered.

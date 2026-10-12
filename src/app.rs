@@ -30,7 +30,7 @@ const SCROLL_STEP: usize = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeSource {
-    Builtin,
+    Builtin(theme::Builtin),
     /// Palette file; `last_error` is set while the file is unusable and the
     /// last-known-good palette remains active.
     File { path: PathBuf, last_error: Option<String> },
@@ -162,6 +162,8 @@ pub struct App {
     /// X11/Wayland primary selection: select to copy, middle-click to paste.
     pub primary_selection: bool,
     pub highlights: crate::highlight::Highlights,
+    /// High contrast and colour-role overrides, applied to every theme.
+    pub adjust: theme::Adjust,
     pub doc_rules: crate::dochl::DocRules,
     primary_due: Option<Instant>,
     pub show_help: bool,
@@ -214,6 +216,7 @@ impl App {
             mouse_enabled: true,
             primary_selection: true,
             highlights: crate::highlight::Highlights::default(),
+            adjust: theme::Adjust::default(),
             doc_rules: crate::dochl::DocRules::default(),
             primary_due: None,
             show_help: false,
@@ -691,7 +694,7 @@ impl App {
             .and_then(|t| theme::parse_kitty(&t).map_err(|e| e.to_string()));
         match result {
             Ok(report) => {
-                self.theme = theme::resolve(&report.palette);
+                self.theme = theme::resolve_with(&report.palette, &self.adjust);
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 if report.warnings.is_empty() {
                     self.info(format!("Palette reloaded from {name}"));
@@ -1748,7 +1751,7 @@ mod tests {
         let caps = Capabilities { keyboard_enhanced: true, truecolor: true };
         let theme = theme::resolve(&theme::dracula());
         let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto });
-        let mut a = App::new(tab, theme, ThemeSource::Builtin, caps);
+        let mut a = App::new(tab, theme, ThemeSource::Builtin(theme::Builtin::Dracula), caps);
         a.clipboard = Clipboard::internal_only();
         a.regions.text = Rect { x: 5, y: 1, width: w, height: h };
         a.regions.gutter = Rect { x: 0, y: 1, width: 5, height: h };
