@@ -58,6 +58,11 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.5.0
+
+- **Bordered tables ignore fences and indentation; Markdown tables don't.** GFM defines pipe tables, so they follow its rules (no code blocks, indent < 4). Bordered tables are a plain-text convention, and their complete-border grammar can't match prose. In Markdown files they typically sit in code blocks *so that* they render monospaced, which is exactly where editing them as tables helps. An ASCII-art box in a code block reads as a one-column table, but editing it only keeps the box closed.
+- **Gate evidence:** `no_false_positives_on_aligned_prose_and_code` (corpus) plus the cross-format invariant fuzz. Six seeds × 2500 rounds passed before release.
+
 ### 2026-10-12 · 0.4.4
 
 - **Failed table recognition returns the range it rules out.** `Table::scan` gives `Err((a, b))`: the lines around the asked one that can't hold a table in either format. Markdown now scans the whole block for its first header + delimiter pair (not just up to the asked line), so its answer holds for every line of the block. The cache keeps single-line misses in a HashSet and longer ranges in a short list. *Found by profiling:* a 50 000-row ASCII table broken by an edit made every visible line re-scan the whole block twice (bordered, then Markdown), about 1 s per frame.

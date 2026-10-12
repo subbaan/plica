@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (2026-10-12): Phase 5, plain-text tables and polish
+
+Completes Phase 5: bordered plain-text tables, inserting and converting (0.4.3), and the Table button, guide, column click, protected borders and speed work (0.4.4). Manual gate checklist: `docs/phase5-checklist.md`.
+
+- Bordered tables now count wherever they appear, including indented or inside a code fence. That's where Markdown documents keep them so they show monospaced. Markdown pipe tables still follow GitHub's rules: never inside code blocks.
+- New gate tests: a corpus of text laid out in columns, command output, diagrams and code that must never be read as a table, and the randomised table test across all three formats and conversions.
+
 ## 0.4.4 (2026-10-12): table menus, help and speed
 
 - **Table button** in the title bar (when the window is wide enough): the table menu inside a table, or "insert a table" outside one. It is highlighted while the caret is in a table.

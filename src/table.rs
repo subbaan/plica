@@ -1330,6 +1330,44 @@ mod tests {
         assert_eq!(t2.grid(&rope2)[1], ["e\u{301}te\u{301}", "中文字"]);
     }
 
+    /// Phase 5 gate: text laid out in columns, command output, diagrams and
+    /// code are never tables. Only a complete Markdown header + delimiter or
+    /// a fully bordered block counts.
+    #[test]
+    fn no_false_positives_on_aligned_prose_and_code() {
+        let corpus = [
+            "Name        Type        Status\nMPC One     Sampler     Active\nElectribe   Groovebox   Active\n",
+            "drwxr-xr-x  2 me me 4096 Oct 12 notes\n-rw-r--r--  1 me me  120 Oct 12 a.txt\n",
+            " id | name\n----+------\n  1 | Alice\n  2 | Bob\n(2 rows)\n",
+            "* 1a2b3c (HEAD -> main) Fix\n|\\\n| * 4d5e6f Topic\n|/\n* 7a8b9c Start\n",
+            "cat log | grep error | sort | uniq -c\nps aux | less\n",
+            "+-----+     +-----+\n| A   | --> | B   |\n+-----+     +-----+\n",
+            "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\n",
+            "key: value | other\nlist:\n  - a | b\n",
+            "a | b\nc | d\ne | f\n",
+            "| just | pipes |\n| no | delimiter |\n",
+            "Total ............ 12\nTax   ............  3\n",
+            "+--------------------------------+\n|  A heading in a comment box    |\n",
+            "┌──────┐\n│ open │\n",
+            "|---|---|\n| 1 | 2 |\n",
+        ];
+        for text in corpus {
+            let rope = Rope::from_str(text);
+            for line in 0..rope.len_lines() {
+                assert!(Table::at(&rope, line).is_none(), "line {line} read as a table in:\n{text}");
+            }
+        }
+        // Bordered tables count anywhere, also indented or in a fence.
+        for text in ["    +---+---+\n    | a | b |\n    +---+---+\n", "~~~text\n+---+\n| x |\n+---+\n~~~\n"] {
+            let rope = Rope::from_str(text);
+            assert!((0..rope.len_lines()).any(|l| Table::at(&rope, l).is_some()), "{text}");
+        }
+        // And the real thing still is one, in each format.
+        for text in ["| a | b |\n|---|---|\n", "+---+---+\n| a | b |\n+---+---+\n", "┌───┬───┐\n│ a │ b │\n└───┴───┘\n"] {
+            assert!(Table::at(&Rope::from_str(text), 1).is_some(), "{text}");
+        }
+    }
+
     #[test]
     fn fence_scan() {
         let rope = Rope::from_str("a\n```rust\nx\n```\nb\n~~~\nc\n");

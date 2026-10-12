@@ -21,6 +21,9 @@
 //!   line must have its joint or bar at exactly those columns, so a `|`
 //!   inside a cell is just text (no escaping in bordered tables).
 //! - A rule right after the first row makes that row a header.
+//! - Unlike Markdown tables, bordered tables count anywhere, also indented
+//!   or inside a code fence: that's where Markdown documents put them so
+//!   they show monospaced, and their structure can't be mistaken for prose.
 //!
 //! The model presents the same shape as a Markdown table: rows are
 //! `[header, separator, body…]`, where the separator is the header rule,
@@ -292,9 +295,6 @@ fn build(rope: &Rope, line: usize, style: Style, indent: usize, lines: &[Vec<cha
             _ => rules.push((l, *kind, cells)),
         }
     }
-    if in_fence(rope, top) {
-        return None;
-    }
     // Header: a rule right after the first row (that isn't the bottom).
     let first_row = rows_raw[0].0;
     let header_rule = rules.iter().find(|(l, _, _)| *l == first_row + 1 && *l != bottom);
@@ -337,10 +337,6 @@ fn build(rope: &Rope, line: usize, style: Style, indent: usize, lines: &[Vec<cha
     };
     t.aligns = infer_aligns(rope, &t);
     Some(t)
-}
-
-fn in_fence(rope: &Rope, line: usize) -> bool {
-    crate::table::in_fence(rope, line)
 }
 
 /// Bordered tables have no alignment syntax: read it from how the cells
@@ -516,7 +512,6 @@ mod tests {
             "+---+---+\n+---+---+\n",                        // no rows
             "Name      Type\nMPC       Sampler\n",           // aligned prose
             "┌───┬───┐\n│ a │ b │\n+---+---+\n",             // mixed families
-            "```\n+---+\n| a |\n+---+\n```\n",               // fenced
         ] {
             let rope = Rope::from_str(bad);
             assert!((0..rope.len_lines()).all(|l| Table::at(&rope, l).is_none_or(|t| t.style == Style::Markdown)), "{bad}");
