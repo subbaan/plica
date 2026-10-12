@@ -258,7 +258,7 @@ impl App {
         let le = self.tab.doc.line_ending.as_str();
         let body_r = r.max(2);
         // (ops, target cell, message when refused)
-        let (ops, target, refused): (Option<Vec<(usize, usize, String)>>, (usize, usize), &str) = match a {
+        let (ops, target, refused): (Option<crate::table::Ops>, (usize, usize), &str) = match a {
             TableAction::Format => unreachable!(),
             TableAction::RowAbove => (Some(t.insert_row(rope, body_r, le)), (body_r, c), ""),
             TableAction::RowBelow => (Some(t.insert_row(rope, r.max(1) + 1, le)), (r.max(1) + 1, c), ""),

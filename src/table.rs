@@ -20,6 +20,10 @@
 use ropey::Rope;
 use std::ops::Range;
 
+/// Replacements `(at, delete_len, insert)` in the old text, applied as one
+/// transaction by `Buffer::edit`.
+pub type Ops = Vec<(usize, usize, String)>;
+
 /// Lines longer than this are never table rows (keeps huge single-line
 /// files from being scanned on every keystroke).
 const MAX_ROW_CHARS: usize = 20_000;
@@ -412,7 +416,7 @@ impl Table {
 
     /// Re-align every row (the Format table command). Rows already in
     /// shape are left alone; short rows gain empty cells.
-    pub fn format(&self, rope: &Rope) -> Vec<(usize, usize, String)> {
+    pub fn format(&self, rope: &Rope) -> Ops {
         let widths = self.inner_widths(rope, None);
         self.rows
             .iter()
@@ -444,7 +448,7 @@ impl Table {
     /// needed, and shrinks back only if it had no slack before. Returns the
     /// replacements (positions in the old text) and where the new content
     /// starts in the new text.
-    pub fn edit_cell(&self, rope: &Rope, r: usize, c: usize, new: &str, realign: bool) -> (Vec<(usize, usize, String)>, usize) {
+    pub fn edit_cell(&self, rope: &Rope, r: usize, c: usize, new: &str, realign: bool) -> (Ops, usize) {
         let ncols = self.cols();
         let cell = &self.rows[r].cells[c];
         let last_open = c + 1 == ncols && !self.trail;
@@ -483,7 +487,7 @@ impl Table {
 
     /// Insert an empty row before row `at` (2 ..= rows.len(); body rows
     /// only). `le` is the document's line ending.
-    pub fn insert_row(&self, rope: &Rope, at: usize, le: &str) -> Vec<(usize, usize, String)> {
+    pub fn insert_row(&self, rope: &Rope, at: usize, le: &str) -> Ops {
         let row = self.empty_row(rope);
         let at = at.clamp(2, self.rows.len());
         if at < self.rows.len() {
@@ -494,7 +498,7 @@ impl Table {
     }
 
     /// Delete body row `r`, line terminator included.
-    pub fn delete_row(&self, rope: &Rope, r: usize) -> Option<Vec<(usize, usize, String)>> {
+    pub fn delete_row(&self, rope: &Rope, r: usize) -> Option<Ops> {
         let row = self.rows.get(r).filter(|row| row.kind == RowKind::Body)?;
         let op = if row.line + 1 < rope.len_lines() {
             let next = rope.line_to_char(row.line + 1);
@@ -508,7 +512,7 @@ impl Table {
     }
 
     /// Swap body row `r` with its neighbour above (`up`) or below.
-    pub fn move_row(&self, rope: &Rope, r: usize, up: bool) -> Option<(Vec<(usize, usize, String)>, usize)> {
+    pub fn move_row(&self, rope: &Rope, r: usize, up: bool) -> Option<(Ops, usize)> {
         let t = if up { r.checked_sub(1)? } else { r + 1 };
         let (a, b) = (self.rows.get(r)?, self.rows.get(t)?);
         if a.kind != RowKind::Body || b.kind != RowKind::Body {
@@ -521,7 +525,7 @@ impl Table {
 
     /// Insert an empty column at index `at` (0 ..= columns) in every row
     /// that reaches it. Other cells keep their exact text.
-    pub fn insert_col(&self, at: usize) -> Vec<(usize, usize, String)> {
+    pub fn insert_col(&self, at: usize) -> Ops {
         let ncols = self.cols() + 1;
         let mut ops = Vec::new();
         for row in &self.rows {
@@ -549,7 +553,7 @@ impl Table {
 
     /// Delete column `c` (and one pipe next to it) from every row that has
     /// it. Refused for a single-column table.
-    pub fn delete_col(&self, c: usize) -> Option<Vec<(usize, usize, String)>> {
+    pub fn delete_col(&self, c: usize) -> Option<Ops> {
         if self.rows[0].cells.len() < 2 || c >= self.rows[0].cells.len() {
             return None;
         }
@@ -572,7 +576,7 @@ impl Table {
 
     /// Swap column `c` with its left (`left`) or right neighbour in every
     /// row that has both.
-    pub fn move_col(&self, rope: &Rope, c: usize, left: bool) -> Option<(Vec<(usize, usize, String)>, usize)> {
+    pub fn move_col(&self, rope: &Rope, c: usize, left: bool) -> Option<(Ops, usize)> {
         let t = if left { c.checked_sub(1)? } else { c + 1 };
         if t >= self.rows[0].cells.len() {
             return None;
@@ -590,7 +594,7 @@ impl Table {
 
     /// Set column `c`'s alignment: the delimiter cell gets the colons, and
     /// if the column lines up its cells are re-padded (same width).
-    pub fn set_align(&self, rope: &Rope, c: usize, align: Align) -> Vec<(usize, usize, String)> {
+    pub fn set_align(&self, rope: &Rope, c: usize, align: Align) -> Ops {
         let t = self;
         let ncols = t.cols();
         let (l, r) = t.sides(c, ncols);
@@ -635,7 +639,7 @@ pub fn text_width(s: &str) -> usize {
 mod tests {
     use super::*;
 
-    fn apply(text: &str, mut ops: Vec<(usize, usize, String)>) -> String {
+    fn apply(text: &str, mut ops: Ops) -> String {
         let mut rope = Rope::from_str(text);
         ops.sort_by_key(|o| std::cmp::Reverse(o.0));
         for (at, del, ins) in ops {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4 (2026-10-12): build fix
+
+- No user-visible change. Fixes a lint error (an overly complex type in the table code) that 0.3.3 was published with: `make check` failed and the commit went out anyway. `make check` and `make e2e` pass again.
+
 ## 0.3.3 (2026-10-12): table rows and columns
 
 - The **table menu** (Alt+T, F6, or **right-click in a table**) now has: insert row above / below, delete row, move row up / down, insert column left / right, delete column, move column left / right, and align a column left / centre / right / none. Type to filter, e.g. "col right".

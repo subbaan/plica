@@ -57,6 +57,10 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.3.4
+
+- **`table::Ops`** names the `(at, delete_len, insert)` replacement list that all table edits return (clippy's type-complexity lint). Process note: 0.3.3 was committed after a failing `make check`, because the commands were chained with `;`. The release step now chains `make check && make e2e && git commit`.
+
 ### 2026-10-12 · 0.3.3
 
 - **Structural table edits touch as little as possible.** A row insert, delete or move rewrites only those lines. A column insert or delete edits one span per row and leaves every other cell's exact text and padding alone. A column move swaps whole spans, so lined-up columns stay lined up. Only Format rewrites rows wholesale. Header and delimiter rows are never deleted or moved; a single-column table refuses to lose its column.
