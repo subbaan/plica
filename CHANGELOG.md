@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5 (2026-10-12): config file and key remapping
+
+- Config file `$XDG_CONFIG_HOME/plica/config.toml` (schema version 1): tab width, soft wrap, line numbers, visible whitespace, indent style (auto / tabs / spaces), mouse, theme (auto / palette / dracula / terminal) and palette path, crash recovery on/off.
+- `plica --print-config` prints a commented default config; `plica --check-config` lists problems (exit code 1 if any); `--config PATH` uses another file.
+- Every setting is validated on its own: a bad value or unknown key is a warning (shown on the status bar, naming the value you wrote) and that setting keeps its default; a syntax error falls back to defaults. Plica never writes the file.
+- `[keys]` rebinds any command, e.g. `save_as = ["ctrl+shift+s", "f12"]`; `[]` unbinds. Rebinding a key that another command used moves it. Cursor movement and basic editing keys stay fixed.
+- F1 help is generated from the live keymap, so it always shows your bindings.
+- Colours: command line > `PLICA_PALETTE` > config > auto (Kitty palette if found, else Dracula). `NO_COLOR` applies only to the auto theme without a configured palette.
+
 ## 0.1.4 (2026-10-12): crash recovery
 
 - Unsaved work is snapshotted automatically to `$XDG_STATE_HOME/plica/recovery/` (private: 0700 directory, 0600 files) after 2 s of idle time, or at least every 30 s while editing continues. The original file is never touched.

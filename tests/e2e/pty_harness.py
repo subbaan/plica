@@ -33,7 +33,7 @@ def check(name, cond, extra=""):
 class Term:
     def __init__(self, args, env_extra=None):
         env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor",
-                   XDG_STATE_HOME=os.path.join(WORK, "state"), DISPLAY="", WAYLAND_DISPLAY="")
+                   XDG_STATE_HOME=os.path.join(WORK, "state"), XDG_CONFIG_HOME=os.path.join(WORK, "config"), DISPLAY="", WAYLAND_DISPLAY="")
         env.pop("NO_COLOR", None)
         env.pop("PLICA_PALETTE", None)
         env.update(env_extra or {})
@@ -357,6 +357,31 @@ check("replace all undoes in one step", "apple Apple apple pie" in t.text(), t.t
 t.send("\x11", 0.3)
 if t.p.isalive(): t.send("n", 0.4)
 check("quit after find tests", not t.p.isalive())
+
+# ---------------------------------------------------------------- session 9: config file
+cfg_dir = os.path.join(WORK, "config", "plica"); os.makedirs(cfg_dir, exist_ok=True)
+open(os.path.join(cfg_dir, "config.toml"), "w").write("""version = 1
+[editor]
+line_numbers = false
+tab_width = 99
+[keys]
+save = "f2"
+quit = ["ctrl+k"]
+""")
+fc = os.path.join(WORK, "cfg.txt"); open(fc, "w").write("config test\n")
+t = Term([fc])
+check("config: line numbers off", not t.line(1).lstrip().startswith("1 "), t.line(1))
+check("config: bad value warned", "Config:" in t.line(ROWS - 1) and "tab_width" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x1bOP", 0.4)  # F1
+check("help shows remapped key", "F2" in t.text() and "Ctrl+K" in t.text(), t.text())
+t.send("x", 0.2)  # close help
+t.send("edit ", 0.2)
+t.send("\x1bOQ", 0.4)  # F2 = save
+check("remapped save works", open(fc).read().startswith("edit "), open(fc).read())
+t.send("\x13", 0.3)  # Ctrl+S no longer bound: nothing happens
+t.send("\x0b", 0.5)  # Ctrl+K = quit
+check("remapped quit works", not t.p.isalive())
+os.remove(os.path.join(cfg_dir, "config.toml"))
 
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))

@@ -509,35 +509,44 @@ fn draw_scrollbar(buf: &mut TermBuf, app: &App, r: Rect, _rows: usize, p: &Paint
 fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
     let t = &app.theme;
     let caps = &app.caps;
-    let lines: Vec<String> = vec![
-        format!("Plica {VERSION} — keys"),
+    // Command keys come from the live keymap, so remapping shows here.
+    use crate::keymap::Command as C;
+    let km = &app.keymap;
+    let pair = |a: C, b: C| {
+        format!("{:>17}  {:<20}{:>17}  {}", km.label(a), a.describe(), km.label(b), b.describe())
+    };
+    let mut lines: Vec<String> = vec![format!("Plica {VERSION} — keys (rebind in config.toml, see plica --print-config)"), String::new()];
+    for (a, b) in [
+        (C::Save, C::SaveAs),
+        (C::Open, C::NewTab),
+        (C::CloseTab, C::Quit),
+        (C::Undo, C::Redo),
+        (C::Copy, C::Cut),
+        (C::Paste, C::SelectAll),
+        (C::Find, C::Replace),
+        (C::FindNext, C::FindPrev),
+        (C::GotoLine, C::Help),
+        (C::NextTab, C::PrevTab),
+        (C::ToggleWrap, C::ToggleLineNumbers),
+        (C::ToggleWhitespace, C::ToggleMouse),
+        (C::ScrollUp, C::ScrollDown),
+    ] {
+        lines.push(pair(a, b));
+    }
+    lines.extend([
         String::new(),
-        "Ctrl+S  Save            F12 / Ctrl+Shift+S  Save as".into(),
-        "Ctrl+N  New tab   Ctrl+O  Open   Ctrl+W  Close tab   Ctrl+Q  Quit".into(),
-        "Ctrl+PgUp/PgDn or Ctrl+Tab  Switch tabs   Alt+1..9  Go to tab".into(),
-        "Ctrl+Z  Undo            Ctrl+Y / Ctrl+Shift+Z  Redo".into(),
-        "Ctrl+C/X/V  Copy/Cut/Paste      Ctrl+A  Select all".into(),
-        "Ctrl+F  Find   Ctrl+H / Ctrl+R  Replace   F3 / Shift+F3  Next/prev".into(),
-        "  in the bar: Alt+C case · Alt+W whole word · Alt+L in selection · Alt+A all".into(),
-        "Ctrl+G  Go to line".into(),
-        "Ctrl+←/→ (or Alt+←/→)  Word left/right".into(),
-        "Tab / Shift+Tab  Indent/outdent lines   Ctrl+↑/↓  Scroll".into(),
-        "Alt+Z  Wrap   Alt+L  Line numbers   Alt+W  Whitespace   Alt+M  Mouse".into(),
-        String::new(),
-        "Mouse: click caret · drag select · double/triple click word/line".into(),
-        "       Shift+click (or Alt+click) extend · wheel · Shift+wheel sideways".into(),
-        "       Click/drag line numbers to select lines · drop files to open them".into(),
-        "       Tabs: click to switch · × or middle-click to close · wheel to cycle".into(),
-        "       Alt+M or the Mouse button gives the mouse to the terminal.".into(),
+        "Fixed: Alt+1..9 go to tab · Tab/Shift+Tab indent · Ctrl/Alt+←/→ word · Esc clears selection".into(),
+        "Find bar: Alt+C case · Alt+W whole word · Alt+L in selection · Alt+A replace all".into(),
+        "Mouse: click · drag · double/triple-click · Shift/Alt+click extend · wheel (Shift: sideways)".into(),
+        "       line numbers select lines · tabs: click, ×, middle-click, wheel · drop files to open".into(),
         String::new(),
         format!(
             "Terminal: keyboard protocol {} · {}",
             if caps.keyboard_enhanced { "on" } else { "off (some Ctrl+Shift keys unavailable)" },
             if caps.truecolor { "truecolour" } else { "256 colours" }
         ),
-        String::new(),
         "Press any key or click to close".into(),
-    ];
+    ]);
     let w = (lines.iter().map(|l| l.chars().count()).max().unwrap_or(10) + 4).min(area.width as usize) as u16;
     let h = (lines.len() + 2).min(area.height as usize) as u16;
     let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };

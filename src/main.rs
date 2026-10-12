@@ -1,10 +1,12 @@
 mod app;
 mod buffer;
 mod clipboard;
+mod config;
 mod dialog;
 mod document;
 mod drop;
 mod find;
+mod keymap;
 mod layout;
 mod recovery;
 mod tab;
@@ -16,7 +18,7 @@ mod watch;
 use anyhow::{Context, Result, bail};
 use app::{App, ThemeSource};
 use buffer::Selection;
-use tab::Tab;
+use tab::{Tab, TabOpts};
 use ratatui::Terminal;
 use ratatui::crossterm::event;
 use ratatui::prelude::CrosstermBackend;
@@ -40,16 +42,22 @@ Arguments:
 Options:
   --palette PATH       Follow a Kitty-format colour file, reloading live
   --builtin-theme      Use the built-in Dracula theme
+  --config PATH        Use this config file instead of the default
+  --print-config       Print a commented default config and exit
+  --check-config       Check the config file, list any problems and exit
   --check-palette PATH Parse a palette file, print the resolved colours and exit
   -h, --help           Print help
   -V, --version        Print version
 
 Environment:
   PLICA_PALETTE        Palette file to follow (same as --palette)
-  NO_COLOR             Use the terminal's default colours (unless a palette is given)
+  NO_COLOR             Use the terminal's default colours (when theme is \"auto\" and
+                       no palette is configured)
 
-Without --palette/PLICA_PALETTE, Plica follows $XDG_CONFIG_HOME/kitty/current-theme.conf
-if it exists, otherwise uses Dracula. Press F1 inside Plica for keys.
+Config: $XDG_CONFIG_HOME/plica/config.toml (see --print-config). Colours come from
+--palette / PLICA_PALETTE, else the config's [appearance], else
+$XDG_CONFIG_HOME/kitty/current-theme.conf if it exists, else Dracula.
+Press F1 inside Plica for keys.
 ";
 
 struct Args {
@@ -58,10 +66,12 @@ struct Args {
     palette: Option<PathBuf>,
     builtin: bool,
     check_palette: Option<PathBuf>,
+    config: Option<PathBuf>,
+    check_config: bool,
 }
 
 fn parse_args() -> Result<Option<Args>> {
-    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: false, check_palette: None };
+    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: false, check_palette: None, config: None, check_config: false };
     let mut it = std::env::args_os().skip(1);
     let mut only_files = false;
     while let Some(arg) = it.next() {
@@ -88,6 +98,18 @@ fn parse_args() -> Result<Option<Args>> {
                     a.check_palette = Some(it.next().context("--check-palette needs a path")?.into());
                     continue;
                 }
+                "--config" => {
+                    a.config = Some(it.next().context("--config needs a path")?.into());
+                    continue;
+                }
+                "--print-config" => {
+                    print!("{}", config::default_text());
+                    return Ok(None);
+                }
+                "--check-config" => {
+                    a.check_config = true;
+                    continue;
+                }
                 "--" => {
                     only_files = true;
                     continue;
@@ -105,10 +127,12 @@ fn parse_args() -> Result<Option<Args>> {
     Ok(Some(a))
 }
 
-fn default_palette_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("PLICA_PALETTE").filter(|p| !p.is_empty()) {
-        return Some(app::expand_tilde(&p.to_string_lossy()));
-    }
+fn env_palette() -> Option<PathBuf> {
+    std::env::var_os("PLICA_PALETTE").filter(|p| !p.is_empty()).map(|p| app::expand_tilde(&p.to_string_lossy()))
+}
+
+/// Candidate shared desktop palette (only if it exists).
+fn kitty_palette() -> Option<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
@@ -153,27 +177,70 @@ fn run() -> Result<()> {
         return check_palette(p);
     }
 
+    let config_path = args.config.clone().or_else(config::default_path);
+    let (cfg, cfg_warnings) = match &config_path {
+        Some(p) => config::load(p),
+        None => (config::Config::default(), Vec::new()),
+    };
+    if args.check_config {
+        let shown = config_path.as_ref().map_or_else(|| "(no config path)".into(), |p| p.display().to_string());
+        if cfg_warnings.is_empty() {
+            println!("{shown}: OK");
+            return Ok(());
+        }
+        for w in &cfg_warnings {
+            println!("{shown}: {w}");
+        }
+        std::process::exit(1);
+    }
+
     // Load documents before touching the terminal so errors print cleanly.
-    const TAB_WIDTH: usize = 4;
+    let tab_opts = TabOpts { tab_width: cfg.tab_width, indent: cfg.indent };
     let mut tabs: Vec<Tab> = Vec::new();
     for path in &args.files {
         if tabs.iter().any(|t| t.shows(path)) {
             continue;
         }
-        tabs.push(Tab::open(path, TAB_WIDTH)?.0);
+        tabs.push(Tab::open(path, tab_opts)?.0);
     }
     if tabs.is_empty() {
-        tabs.push(Tab::untitled(TAB_WIDTH));
+        tabs.push(Tab::untitled(tab_opts));
     }
 
-    // Choose the colour source.
-    let palette_path = if args.builtin { None } else { args.palette.clone().or_else(default_palette_path) };
+    // Choose the colour source (CLI > environment > config > auto).
+    enum Colours {
+        Builtin,
+        Terminal,
+        Palette(PathBuf),
+    }
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-    let (theme, source, startup_warning) = match palette_path {
-        _ if no_color && args.palette.is_none() && !args.builtin => {
-            (theme::resolve(&theme::dracula()), ThemeSource::TerminalDefault, None)
+    let mut theme_note = None;
+    let colours = if args.builtin {
+        Colours::Builtin
+    } else if let Some(p) = args.palette.clone().or_else(env_palette) {
+        Colours::Palette(p)
+    } else {
+        use config::ThemeChoice;
+        match cfg.theme {
+            ThemeChoice::Dracula => Colours::Builtin,
+            ThemeChoice::Terminal => Colours::Terminal,
+            ThemeChoice::Palette => match cfg.palette.clone().or_else(kitty_palette) {
+                Some(p) => Colours::Palette(p),
+                None => {
+                    theme_note = Some("theme = \"palette\" but no palette file is set or found; using Dracula".to_string());
+                    Colours::Builtin
+                }
+            },
+            ThemeChoice::Auto => match cfg.palette.clone() {
+                Some(p) => Colours::Palette(p),
+                None if no_color => Colours::Terminal,
+                None => kitty_palette().map_or(Colours::Builtin, Colours::Palette),
+            },
         }
-        Some(path) => {
+    };
+    let (theme, source, startup_warning) = match colours {
+        Colours::Terminal => (theme::resolve(&theme::dracula()), ThemeSource::TerminalDefault, theme_note),
+        Colours::Palette(path) => {
             let path = std::path::absolute(&path).unwrap_or(path);
             let parsed = std::fs::read_to_string(&path)
                 .map_err(|e| e.to_string())
@@ -187,25 +254,39 @@ fn run() -> Result<()> {
                 ),
             }
         }
-        None => (theme::resolve(&theme::dracula()), ThemeSource::Builtin, None),
+        Colours::Builtin => (theme::resolve(&theme::dracula()), ThemeSource::Builtin, theme_note),
     };
 
     let (guard, caps) = term::TermGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     terminal.clear()?;
 
-    let recovery = recovery::default_dir().and_then(|d| recovery::Recovery::new(d).ok());
+    let recovery = if cfg.recovery { recovery::default_dir().and_then(|d| recovery::Recovery::new(d).ok()) } else { None };
     let orphans = recovery.as_ref().map(|r| r.orphans()).unwrap_or_default();
 
     let mut tabs = tabs.into_iter();
     let mut app = App::new(tabs.next().expect("at least one tab"), theme, source, caps);
     app.bg_tabs = tabs.collect();
+    app.tab_width = cfg.tab_width;
+    app.indent_mode = cfg.indent;
+    app.wrap = cfg.wrap;
+    app.line_numbers = cfg.line_numbers;
+    app.show_whitespace = cfg.show_whitespace;
+    app.keymap = cfg.keymap();
+    if !cfg.mouse {
+        app.mouse_enabled = false;
+        let _ = term::set_mouse(false);
+    }
     if let Some(line) = args.line {
         let l = line.saturating_sub(1).min(app.tab.buf.len_lines() - 1);
         app.tab.buf.sel = Selection::caret(app.tab.buf.line_start(l));
     }
     app.recovery = recovery;
-    if recovery_unavailable(&app) {
+    if !cfg_warnings.is_empty() {
+        let more = if cfg_warnings.len() > 1 { format!(" (+{} more; run plica --check-config)", cfg_warnings.len() - 1) } else { String::new() };
+        app.warn(format!("Config: {}{more}", cfg_warnings[0]));
+    }
+    if cfg.recovery && recovery_unavailable(&app) {
         app.warn("Recovery snapshots unavailable (cannot create $XDG_STATE_HOME/plica/recovery)");
     }
     app.offer_recovery(orphans);

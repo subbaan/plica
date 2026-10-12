@@ -6,7 +6,9 @@ use crate::dialog::{Action, Button as DButton, Dialog};
 use crate::drop;
 use crate::recovery::{Recovery, Snapshot};
 use crate::find::{FindBar, FindHit, SearchOpts};
-use crate::tab::Tab;
+use crate::config::IndentMode;
+use crate::keymap::{Command, Keymap};
+use crate::tab::{Tab, TabOpts};
 use crate::layout::{LayoutOpts, VisualRow, layout_line, row_index_for};
 use crate::term::{self, Capabilities};
 use crate::theme::{self, Theme};
@@ -129,6 +131,8 @@ pub struct App {
     pub wrap: bool,
     pub line_numbers: bool,
     pub tab_width: usize,
+    pub indent_mode: IndentMode,
+    pub keymap: Keymap,
     pub show_whitespace: bool,
     pub mouse_enabled: bool,
     pub show_help: bool,
@@ -167,6 +171,8 @@ impl App {
             wrap: true,
             line_numbers: true,
             tab_width: 4,
+            indent_mode: IndentMode::Auto,
+            keymap: Keymap::defaults(),
             show_whitespace: false,
             mouse_enabled: true,
             show_help: false,
@@ -191,6 +197,10 @@ impl App {
 
     // ---- tabs ----------------------------------------------------------------------
 
+    pub fn tab_opts(&self) -> TabOpts {
+        TabOpts { tab_width: self.tab_width, indent: self.indent_mode }
+    }
+
     pub fn tab_count(&self) -> usize {
         self.bg_tabs.len() + 1
     }
@@ -207,7 +217,8 @@ impl App {
         if i == self.active || i >= self.tab_count() {
             return;
         }
-        let cur = std::mem::replace(&mut self.tab, Tab::untitled(self.tab_width));
+        let placeholder = Tab::untitled(self.tab_opts());
+        let cur = std::mem::replace(&mut self.tab, placeholder);
         self.bg_tabs.insert(self.active, cur);
         self.tab = self.bg_tabs.remove(i);
         self.active = i;
@@ -409,7 +420,7 @@ impl App {
             let opened = match &s.doc_path {
                 Some(p) => self.open_file(p),
                 None => {
-                    self.add_tab(Tab::untitled(self.tab_width));
+                    self.add_tab(Tab::untitled(self.tab_opts()));
                     true
                 }
             };
@@ -695,62 +706,17 @@ impl App {
             return;
         }
 
-        let lower = match k.code {
-            KeyCode::Char(c) => Some(c.to_ascii_lowercase()),
-            _ => None,
-        };
-        match (k.code, lower) {
-            // -- file / app --
-            (_, Some('s')) if ctrl && shift => self.open_prompt(PromptKind::SaveAs),
-            (KeyCode::F(12), _) => self.open_prompt(PromptKind::SaveAs),
-            (_, Some('s')) if ctrl => {
-                self.after_save = None;
-                self.save_active(false);
-            }
-            (_, Some('o')) if ctrl => self.open_prompt(PromptKind::Open),
-            (_, Some('q')) if ctrl => self.request_quit(),
-            (_, Some('w')) if ctrl => self.request_close_tab(),
-            (_, Some('n')) if ctrl => {
-                self.add_tab(Tab::untitled(self.tab_width));
-                self.info("New file");
-            }
-            (KeyCode::PageUp, _) if ctrl => self.cycle_tab(-1),
-            (KeyCode::PageDown, _) if ctrl => self.cycle_tab(1),
-            (KeyCode::Tab, _) if ctrl => self.cycle_tab(if shift { -1 } else { 1 }),
-            (KeyCode::BackTab, _) if ctrl => self.cycle_tab(-1),
+        if let Some(cmd) = self.keymap.lookup(&k) {
+            self.run_command(cmd);
+            return;
+        }
+
+        match (k.code, ()) {
             (KeyCode::Char(c @ '1'..='9'), _) if alt => {
                 // Alt+9 is always the last tab, like browsers.
                 let n = c as usize - '1' as usize;
                 self.switch_to(if c == '9' { self.tab_count() - 1 } else { n });
             }
-            (KeyCode::F(1), _) => self.show_help = true,
-            (_, Some('w')) if alt => {
-                self.show_whitespace = !self.show_whitespace;
-                self.info(if self.show_whitespace { "Whitespace shown" } else { "Whitespace hidden" });
-            }
-            (_, Some('m')) if alt => self.toggle_mouse(),
-            (_, Some('z')) if alt => self.toggle_wrap(),
-            (_, Some('l')) if alt => self.line_numbers = !self.line_numbers,
-
-            // -- edit --
-            (_, Some('z')) if ctrl && shift => self.redo(),
-            (_, Some('z')) if ctrl => self.undo(),
-            (_, Some('y')) if ctrl => self.redo(),
-            (_, Some('c')) if ctrl => self.copy(),
-            (_, Some('x')) if ctrl => self.cut(),
-            (_, Some('v')) if ctrl => {
-                let t = self.clipboard.paste();
-                self.paste_text(&t);
-            }
-            (_, Some('a')) if ctrl => {
-                self.tab.buf.sel = Selection { anchor: 0, head: self.tab.buf.len_chars() };
-                self.tab.buf.break_undo_group();
-            }
-            (_, Some('f')) if ctrl => self.open_find(false),
-            (_, Some('h') | Some('r')) if ctrl => self.open_find(true),
-            (_, Some('g')) if ctrl => self.open_prompt(PromptKind::GotoLine),
-            (KeyCode::F(3), _) => self.find_step(!shift),
-
             (KeyCode::Esc, _) => {
                 self.tab.buf.sel = Selection::caret(self.tab.buf.sel.head);
             }
@@ -776,9 +742,6 @@ impl App {
             // -- motion --
             (KeyCode::Left, _) => self.move_horiz(false, ctrl || alt, shift),
             (KeyCode::Right, _) => self.move_horiz(true, ctrl || alt, shift),
-            // Ctrl+Up/Down scroll the view without moving the caret.
-            (KeyCode::Up, _) if ctrl && !shift => return self.scroll_rows(-1),
-            (KeyCode::Down, _) if ctrl && !shift => return self.scroll_rows(1),
             (KeyCode::Up, _) => self.move_vert(-1, shift),
             (KeyCode::Down, _) => self.move_vert(1, shift),
             (KeyCode::PageUp, _) => self.move_vert(-(self.page_rows() as isize), shift),
@@ -792,6 +755,55 @@ impl App {
                 self.move_to(to, shift);
             }
             _ => return,
+        }
+        self.tab.follow_caret = true;
+    }
+
+    /// Run a (remappable) command.
+    pub fn run_command(&mut self, cmd: Command) {
+        match cmd {
+            Command::Save => {
+                self.after_save = None;
+                self.save_active(false);
+            }
+            Command::SaveAs => self.open_prompt(PromptKind::SaveAs),
+            Command::Open => self.open_prompt(PromptKind::Open),
+            Command::NewTab => {
+                self.add_tab(Tab::untitled(self.tab_opts()));
+                self.info("New file");
+            }
+            Command::CloseTab => self.request_close_tab(),
+            Command::Quit => self.request_quit(),
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
+            Command::Copy => self.copy(),
+            Command::Cut => self.cut(),
+            Command::Paste => {
+                let t = self.clipboard.paste();
+                self.paste_text(&t);
+            }
+            Command::SelectAll => {
+                self.tab.buf.sel = Selection { anchor: 0, head: self.tab.buf.len_chars() };
+                self.tab.buf.break_undo_group();
+            }
+            Command::Find => self.open_find(false),
+            Command::Replace => self.open_find(true),
+            Command::FindNext => self.find_step(true),
+            Command::FindPrev => self.find_step(false),
+            Command::GotoLine => self.open_prompt(PromptKind::GotoLine),
+            Command::NextTab => self.cycle_tab(1),
+            Command::PrevTab => self.cycle_tab(-1),
+            Command::ToggleWrap => self.toggle_wrap(),
+            Command::ToggleLineNumbers => self.line_numbers = !self.line_numbers,
+            Command::ToggleWhitespace => {
+                self.show_whitespace = !self.show_whitespace;
+                self.info(if self.show_whitespace { "Whitespace shown" } else { "Whitespace hidden" });
+            }
+            Command::ToggleMouse => self.toggle_mouse(),
+            // Scrolling leaves the caret where it is (and off-screen if need be).
+            Command::ScrollUp => return self.scroll_rows(-1),
+            Command::ScrollDown => return self.scroll_rows(1),
+            Command::Help => self.show_help = true,
         }
         self.tab.follow_caret = true;
     }
@@ -1123,7 +1135,7 @@ impl App {
             self.info(format!("{} is already open", self.tab.doc.display_name()));
             return true;
         }
-        match Tab::open(path, self.tab_width) {
+        match Tab::open(path, self.tab_opts()) {
             Ok((tab, is_new)) => {
                 self.add_tab(tab);
                 let name = self.tab.doc.display_name();
@@ -1570,7 +1582,7 @@ mod tests {
     fn app_with(text: &str, w: u16, h: u16) -> App {
         let caps = Capabilities { keyboard_enhanced: true, truecolor: true };
         let theme = theme::resolve(&theme::dracula());
-        let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), 4);
+        let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto });
         let mut a = App::new(tab, theme, ThemeSource::Builtin, caps);
         a.regions.text = Rect { x: 5, y: 1, width: w, height: h };
         a.regions.gutter = Rect { x: 0, y: 1, width: 5, height: h };

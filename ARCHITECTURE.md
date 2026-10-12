@@ -22,6 +22,8 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ dialog.rs ── modal dialogs (buttons, mnemonics, focus) → Action
         ├─ find.rs ──── search engine, match cache, find/replace bar commands
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
+        ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
+        ├─ config.rs ── config.toml loading/validation, defaults text
         └─ theme.rs ─── parse_kitty → Palette → resolve → Theme (semantic roles, contrast repair)
 ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → truecolour / 256 / plain
 ```
@@ -44,6 +46,16 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.1.5
+
+- **Config is parsed into a raw `toml::Table` and validated field by field** (`config.rs`), not deserialised with serde. *Why:* serde fails the whole struct on one bad value; walking the table lets each setting fall back on its own and lets every unknown key or bad value produce a precise warning (including the value written). A syntax error is the only whole-file fallback. Plica never writes the file (a Preferences UI will need a comment-preserving writer such as `toml_edit`).
+- **Commands are a single table** (`commands!` macro in `keymap.rs`): config name, description and default chords live together, so the config parser, `--print-config` and the F1 help can't drift apart.
+- **Chord normalisation:** an uppercase char means Shift (terminals send `S` with or without the SHIFT flag); BackTab means Shift+Tab. Legacy terminals can't send Ctrl+Shift+letter at all, so defaults always include a non-Shift alternative (F12 for Save As, Ctrl+Y for Redo).
+- **Rebinding a chord already used by another command takes it over** (config wins over defaults), and that command's help entry shows "unbound" if it lost its only key.
+- **Motion and editing keys are fixed** (arrows, Home/End, Backspace/Delete, Enter, Tab indent, typing, Alt+1..9): remapping them adds complexity without a user need yet.
+- **The find bar consults the keymap first**, so a remapped Find/Replace/Find next still works while the bar has focus.
+- **The e2e harness sets `XDG_CONFIG_HOME` to its temp dir**, so a real user config (or Kitty palette) can never change test results.
 
 ### 2026-10-12 · 0.1.4
 

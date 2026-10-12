@@ -3,6 +3,7 @@
 
 use crate::app::App;
 use crate::buffer::{Buffer, EditKind, Selection, is_word_char};
+use crate::keymap::Command;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Cap on cached matches so a one-letter query in a huge file stays cheap.
@@ -201,6 +202,31 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        // Remappable commands keep working inside the bar.
+        match self.keymap.lookup(&k) {
+            Some(Command::Find) => {
+                if let Some(bar) = &mut self.find {
+                    bar.focus = Field::Find;
+                }
+                return true;
+            }
+            Some(Command::Replace) => {
+                if let Some(bar) = &mut self.find {
+                    bar.replace_mode = true;
+                    bar.focus = Field::Replace;
+                }
+                return true;
+            }
+            Some(Command::FindNext) => {
+                self.find_step(true);
+                return true;
+            }
+            Some(Command::FindPrev) => {
+                self.find_step(false);
+                return true;
+            }
+            _ => {}
+        }
         let Some(bar) = &mut self.find else { return false };
         let lower = match k.code {
             KeyCode::Char(c) => Some(c.to_ascii_lowercase()),
@@ -208,11 +234,6 @@ impl App {
         };
         match (k.code, lower) {
             (KeyCode::Esc, _) => self.close_find(),
-            (_, Some('f')) if ctrl => bar.focus = Field::Find,
-            (_, Some('h' | 'r')) if ctrl => {
-                bar.replace_mode = true;
-                bar.focus = Field::Replace;
-            }
             (_, Some('c')) if alt => self.toggle_find_opt(FindHit::MatchCase),
             (_, Some('w')) if alt => self.toggle_find_opt(FindHit::WholeWord),
             (_, Some('l')) if alt => self.toggle_find_opt(FindHit::InSelection),
@@ -220,7 +241,6 @@ impl App {
             (KeyCode::Enter, _) if alt || (ctrl && alt) => self.replace_all(),
             (KeyCode::Enter, _) if bar.focus == Field::Replace => self.replace_one(),
             (KeyCode::Enter, _) => self.find_step(!shift),
-            (KeyCode::F(3), _) => self.find_step(!shift),
             (KeyCode::Tab | KeyCode::BackTab, _) if bar.replace_mode => {
                 bar.focus = if bar.focus == Field::Find { Field::Replace } else { Field::Find };
             }

@@ -2,7 +2,15 @@
 
 use crate::buffer::Buffer;
 use crate::document::{self, Document};
+use crate::config::IndentMode;
 use std::path::Path;
+
+/// Per-document settings that come from the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabOpts {
+    pub tab_width: usize,
+    pub indent: IndentMode,
+}
 
 pub struct Tab {
     pub buf: Buffer,
@@ -30,8 +38,12 @@ pub struct Tab {
 static NEXT_TAB_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Tab {
-    pub fn new(buf: Buffer, doc: Document, tab_width: usize) -> Self {
-        let indent_unit = detect_indent(&buf, tab_width);
+    pub fn new(buf: Buffer, doc: Document, opts: TabOpts) -> Self {
+        let indent_unit = match opts.indent {
+            IndentMode::Auto => detect_indent(&buf, opts.tab_width),
+            IndentMode::Tabs => "\t".to_string(),
+            IndentMode::Spaces => " ".repeat(opts.tab_width),
+        };
         let now = std::time::Instant::now();
         let seen_key = buf.cache_key();
         Self {
@@ -51,13 +63,13 @@ impl Tab {
         }
     }
 
-    pub fn untitled(tab_width: usize) -> Self {
-        Self::new(Buffer::new(), Document::untitled(), tab_width)
+    pub fn untitled(opts: TabOpts) -> Self {
+        Self::new(Buffer::new(), Document::untitled(), opts)
     }
 
-    pub fn open(path: &Path, tab_width: usize) -> anyhow::Result<(Self, bool)> {
+    pub fn open(path: &Path, opts: TabOpts) -> anyhow::Result<(Self, bool)> {
         let l = document::load(path)?;
-        Ok((Self::new(Buffer::from_str(&l.text), l.doc, tab_width), l.is_new))
+        Ok((Self::new(Buffer::from_str(&l.text), l.doc, opts), l.is_new))
     }
 
     /// Replace the buffer with the file's current contents as one undoable
