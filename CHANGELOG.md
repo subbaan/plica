@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1 (2026-10-12): getting around a table
+
+- **Enter at the very start of a table** (column 1 of its first line) now breaks the line like in plain text, so you can push a table down to write above it. Before, it added a table row.
+- **Enter at the very end of a table** (after the last row's closing `|`, or after a bordered table's bottom border) opens a new line below it, so you can carry on writing after a table at the end of a file.
+- Inside a table Enter still adds a row. (In a Markdown table whose rows have no closing pipe, the end of the last row is also the end of its last cell, so Enter there adds a row; use Esc for plain keys.)
+
 ## 0.5.0 (2026-10-12): Phase 5, plain-text tables and polish
 
 Completes Phase 5: bordered plain-text tables, inserting and converting (0.4.3), and the Table button, guide, column click, protected borders and speed work (0.4.4). Manual gate checklist: `docs/phase5-checklist.md`.

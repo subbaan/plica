@@ -58,6 +58,10 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.5.1
+
+- **The table's outer corners are outside it for Enter** (user report: with a table at line 1, column 1, there was no way to push it down). The 0.3.2 fix that maps an edge caret to the edge cell (so typed text can't land outside a row) made column 1 of the first line "in the first cell", so Enter added a row. Now Enter at the start of the first line, or at the end of the last line past its closing pipe or border, falls through to plain editing (`at_table_edge`). Typing at those spots still goes into the cell, and Enter anywhere else still adds a row: a plain line break mid-table would split it.
+
 ### 2026-10-12 · 0.5.0
 
 - **Bordered tables ignore fences and indentation; Markdown tables don't.** GFM defines pipe tables, so they follow its rules (no code blocks, indent < 4). Bordered tables are a plain-text convention, and their complete-border grammar can't match prose. In Markdown files they typically sit in code blocks *so that* they render monospaced, which is exactly where editing them as tables helps. An ASCII-art box in a code block reads as a one-column table, but editing it only keeps the box closed.

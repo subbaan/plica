@@ -291,6 +291,12 @@ impl App {
                 _ => {}
             }
         }
+        // Enter at the very start of the table, or the very end of it (past
+        // the closing pipe or border), breaks the line like in plain text:
+        // that's how to push a table down or get below it.
+        if k.code == KeyCode::Enter && !ctrl && !alt && !shift && sel_empty && self.at_table_edge(&t) {
+            return false;
+        }
         // On a bordered table's rule line, editing keys would break the
         // border: they do nothing there (Esc still gives plain keys).
         let on_rule = t.style != Style::Markdown && {
@@ -338,6 +344,25 @@ impl App {
             self.tab.follow_caret = true;
         }
         done
+    }
+
+    /// Is the caret just outside the table: at the start of its first line,
+    /// or at the end of its last line past the closing pipe / border?
+    fn at_table_edge(&self, t: &Table) -> bool {
+        let buf = &self.tab.buf;
+        let head = buf.sel.head;
+        if head == buf.line_start(t.first_line()) {
+            return true;
+        }
+        if head != buf.line_end(t.last_line()) {
+            return false;
+        }
+        // The last line is a bottom border, or a row ending with a pipe
+        // (without one, its end is also the end of the last cell's text).
+        match t.row_of_line(t.last_line()) {
+            Some(r) => t.rows[r].trail && t.rows[r].cells.last().is_some_and(|c| c.span.end < head),
+            None => true,
+        }
     }
 
     /// Paste into a table: one line goes into the cell; several lines or
@@ -575,6 +600,8 @@ impl App {
             "a cell's edge, or click the --- under a column.".into(),
             "Ctrl+C copies cells for a spreadsheet; paste".into(),
             "spreadsheet cells into a table to fill it.".into(),
+            "Enter at the very start or end of a table".into(),
+            "moves it down / opens a line below it.".into(),
             "Esc: plain keys in this table.".into(),
         ];
         self.dialog = Some(crate::dialog::Dialog::new("How tables work", lines, vec![crate::dialog::Button::new("&OK", crate::dialog::Action::Cancel)]));
@@ -963,6 +990,36 @@ mod tests {
         assert!(!a.click_selects_column(a.tab.buf.rope().byte_to_char(text(&a).find("MPC").unwrap())), "other rows: normal click");
         a.table_action(crate::app::TableAction::Help);
         assert_eq!(a.dialog.as_ref().map(|d| d.title.as_str()), Some("How tables work"));
+    }
+
+    #[test]
+    fn enter_at_the_tables_outer_edges_breaks_the_line() {
+        // A table at the very top: Enter at 1,1 pushes it down.
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let mut a = app_with(src, 60, 12);
+        a.tab.buf.sel = crate::buffer::Selection::caret(0);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(text(&a), format!("\n{src}"));
+        // At the end of the last row, past the pipe: a line below it.
+        let end = a.tab.buf.len_chars();
+        a.tab.buf.sel = crate::buffer::Selection::caret(end);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        type_str(&mut a, "after");
+        assert_eq!(text(&a), format!("\n{src}\nafter"));
+        // Inside, Enter still adds a row.
+        caret_at(&mut a, "2 |");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(text(&a).contains("| 1 | 2 |\n|   |   |\nafter"), "{}", text(&a));
+        // Bordered: the same at the top-left of the top border and after
+        // the bottom border.
+        let src = "+---+\n| a |\n+---+";
+        let mut a = app_with(src, 60, 12);
+        a.tab.buf.sel = crate::buffer::Selection::caret(0);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let end = a.tab.buf.len_chars();
+        a.tab.buf.sel = crate::buffer::Selection::caret(end);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(text(&a), format!("\n{src}\n"));
     }
 
     #[test]
