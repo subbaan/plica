@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0 (2026-10-12): Phase 4, Markdown tables
+
+Completes Phase 4: table recognition and cell editing (0.3.2), rows, columns and the table menu (0.3.3), cell selection with tab-separated copy and paste (0.3.5), and wide tables (0.3.6). Text encodings came in 0.3.1. Manual gate checklist: `docs/phase4-checklist.md`.
+
+- **Fix:** a backslash typed or pasted right before a pipe (`a\|b` as data) could split a cell in two and stop the table being a table. Cell text is now escaped exactly the way GitHub reads it:
+  - a pipe that would split the cell always becomes `\|`;
+  - backslashes before a pipe are doubled where needed;
+  - copying cells undoes the escaping exactly.
+
+  Found by the new randomised table test.
+- New gate tests: random tables (Unicode, escaped pipes, empty cells, CRLF) put through thousands of random edits, checking that text outside the table never changes, the table survives, no cell text is lost, and undo and redo are exact. Plus combining-accent and emoji alignment, and save-then-reopen.
+
 ## 0.3.6 (2026-10-12): wide tables
 
 - **Table rows never soft-wrap.** With soft wrap on, prose still wraps, but a table wider than the window keeps one screen line per row. A `›` at the right edge shows that a row continues.

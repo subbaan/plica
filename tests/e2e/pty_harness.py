@@ -696,6 +696,13 @@ t.click(t.col_of(3, "a |"), 3)
 t.send("\x1b[200~X\tY\nZ\tW\n\x1b[201~", 0.4)  # bracketed paste
 t.send("\x13", 0.4)
 check("table: tab-separated paste fills and extends the table", open(tdoc).read().startswith("| k | v |   |\n|---|---|---|\n| 1 | X | Y |\n| 2 | Z | W |\n"), open(tdoc).read())
+# Save, quit and reopen: the pasted table is read back as a table.
+t.send("\x11", 0.5)
+if t.p.isalive(): t.send("n", 0.4)
+t = Term([tdoc])
+t.send("\x1b[B\x1b[B", 0.3)
+check("table: reopened file is a table with the pasted values", "Table" in t.line(ROWS - 1) or "Table:" in t.text(), t.text())
+check("table: pasted values survive reopening", "| 1 | X | Y |" in t.text() and "| 2 | Z | W |" in t.text(), t.text())
 # A table wider than the window doesn't wrap; the caret's table scrolls.
 wide = "| " + " | ".join(f"column{i}" for i in range(8)) + " |\n" + "|---" * 8 + "|\n" + "| " + " | ".join(f"v{i}" for i in range(8)) + " |\n"
 open(tdoc, "w").write("intro\n" + wide); t.pump(0.8)

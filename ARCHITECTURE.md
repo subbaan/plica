@@ -57,6 +57,14 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.4.0
+
+- **Cell escaping follows GFM's scanner exactly.** cmark-gfm reads a backslash and the char after it as one unit, so `\\|` is an escaped backslash followed by a *real* pipe. *Bug found by the invariant test:* pasting the data `a\|b`, or typing a backslash before an existing `\|`, produced `a\\|b` and split the cell, so the header and delimiter counts no longer matched and the table vanished. Three functions now handle it:
+  - `table::sanitize` runs on every edited cell and escapes any bare pipe;
+  - `escape` (data → cell) doubles runs of backslashes before a pipe or at the end;
+  - `unescape` (cell → data) halves them again, so copy and paste round-trip exactly.
+- **The invariant test drives the App, not just the model.** It uses keys, menu actions and paste events, so it covers the real code paths: caret placement, undo grouping, cell-selection clearing. `PLICA_FUZZ_ROUNDS` and `PLICA_FUZZ_SEED` scale it up. 150 rounds run in `make check`; 2000-round runs with several seeds passed before release.
+
 ### 2026-10-12 · 0.3.6
 
 - **Soft-wrap policy for tables: never wrap a table row.** A wrapped Markdown row is unreadable and its cells don't line up. `App::rows_of` lays out table lines with `wrap_width: None`, and because every layout path (viewport, caret motion, hit-testing) goes through `rows_of`, they all agree.

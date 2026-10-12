@@ -353,10 +353,11 @@ impl App {
         let left: String = full[..ra].iter().collect::<String>() + ins;
         let right: String = full[rb..].iter().collect();
         let left_trimmed = left.trim_start();
-        let lead = left.chars().count() - left_trimmed.chars().count();
         // Whitespace after the edit point is padding unless text follows it.
-        let new = if right.trim().is_empty() { left_trimmed.to_string() } else { format!("{left_trimmed}{}", right.trim_end()) };
-        let caret_off = (ra + ins.chars().count()).saturating_sub(lead).min(new.chars().count());
+        // A pipe that would split the cell is escaped (so typing `|` gives
+        // `\|`, and a backslash typed before `\|` can't break the row).
+        let new = crate::table::sanitize(&if right.trim().is_empty() { left_trimmed.to_string() } else { format!("{left_trimmed}{}", right.trim_end()) });
+        let caret_off = crate::table::sanitize(left_trimmed).chars().count().min(new.chars().count());
         let (ops, start) = t.edit_cell(rope, r, c, &new, self.table_realign);
         let caret = start + caret_off;
         // Like plain typing: a typed space starts a new undo step.
@@ -368,8 +369,6 @@ impl App {
 
     fn table_type(&mut self, t: &Table, text: &str) -> bool {
         let Some((r, c)) = self.sel_cell(t) else { return false };
-        // A literal pipe would split the cell: type it escaped.
-        let text = text.replace('|', "\\|");
         let sel = self.tab.buf.sel;
         let (a, b) = if sel.is_empty() {
             let p = self.edit_point(t, r, c);
@@ -377,7 +376,7 @@ impl App {
         } else {
             (sel.start(), sel.end())
         };
-        self.cell_replace(t, (r, c), (a, b), &text, EditKind::Typing)
+        self.cell_replace(t, (r, c), (a, b), text, EditKind::Typing)
     }
 
     fn table_erase(&mut self, t: &Table, forward: bool, word: bool) -> bool {
@@ -768,5 +767,135 @@ mod tests {
         a.tab.buf.sel = crate::buffer::Selection::caret(a.tab.buf.sel.head + 4);
         type_str(&mut a, " pad x");
         assert!(text(&a).contains("| Samp pad x |"), "{}", text(&a));
+    }
+
+    /// The Phase 4 invariants, over random tables and random operations:
+    /// text outside the table never changes, the table stays a table,
+    /// reflowing operations lose no cell text, and every operation undoes
+    /// and redoes exactly.
+    #[test]
+    fn table_invariants_under_random_operations() {
+        use crate::app::TableAction as A;
+        use crate::table::{Align, Table};
+        let words = ["MPC", "Électribe", "日本語", "🎹", "a\\|b", "", "x y", "e\u{301}", "👩‍💻", "--", "`c`"];
+        let mut seed = std::env::var("PLICA_FUZZ_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(0x9e37_79b9_u32);
+        let mut rnd = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as usize % n.max(1)
+        };
+        let rounds = std::env::var("PLICA_FUZZ_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
+        for round in 0..rounds {
+            let cols = 1 + rnd(4);
+            let rows = rnd(4);
+            let cell = |rnd: &mut dyn FnMut(usize) -> usize| words[rnd(words.len())].to_string();
+            let mut lines = vec![format!("| {} |", (0..cols).map(|_| cell(&mut rnd)).collect::<Vec<_>>().join(" | "))];
+            lines.push(format!("|{}|", (0..cols).map(|_| ["---", ":--", "--:", ":-:"][rnd(4)]).collect::<Vec<_>>().join("|")));
+            for _ in 0..rows {
+                lines.push(format!("| {} |", (0..cols).map(|_| cell(&mut rnd)).collect::<Vec<_>>().join(" | ")));
+            }
+            let crlf = round % 5 == 0;
+            let le = if crlf { "\r\n" } else { "\n" };
+            let before = format!("Intro | with a pipe{le}{le}");
+            let after = format!("{le}After.{le}{le}| other | table |{le}|---|---|{le}| 1 | 2 |{le}");
+            let doc = format!("{before}{}{after}", lines.join(le));
+            let mut a = app_with(&doc, 40, 12);
+            a.tab.doc.line_ending = if crlf { crate::document::LineEnding::CrLf } else { crate::document::LineEnding::Lf };
+            if round % 3 == 0 {
+                a.tab.buf.sel = crate::buffer::Selection::caret(before.chars().count());
+                a.format_table();
+            }
+            for step in 0..12 {
+                let start_line = 2;
+                let t = a.tab.table_at(start_line).unwrap_or_else(|| panic!("table lost (round {round} step {step}):\n{}", text(&a)));
+                let rope = a.tab.buf.rope().clone();
+                let prefix: String = rope.slice(..t.rows[0].start).into();
+                let suffix: String = rope.slice(t.rows[t.rows.len() - 1].end..).into();
+                let contents = |t: &Table, rope: &ropey::Rope| -> Vec<String> {
+                    let mut v: Vec<String> = t.grid(rope).into_iter().flatten().filter(|s| !s.is_empty()).collect();
+                    v.sort();
+                    v
+                };
+                let before_cells = contents(&t, &rope);
+                // Caret into a random cell.
+                let r = [0, 2, 3, 4][rnd(4)].min(t.rows.len() - 1);
+                let r = if r == 1 { 0 } else { r };
+                let c = rnd(t.rows[r].cells.len());
+                a.cell_sel = None;
+                a.table_keys_off = None;
+                a.tab.buf.sel = crate::buffer::Selection::caret(t.rows[r].cells[c].content.start);
+                let pre = text(&a);
+                let old_content: String = rope.slice(t.rows[r].cells[c].content.clone()).into();
+                let word = words[rnd(words.len())];
+                let op = rnd(14);
+                let reflow_only = matches!(op, 0 | 7 | 8 | 9);
+                match op {
+                    0 => a.format_table(),
+                    1 => type_str(&mut a, word),
+                    2 => key(&mut a, KeyCode::Backspace, KeyModifiers::NONE),
+                    3 => key(&mut a, KeyCode::Tab, KeyModifiers::NONE),
+                    4 => key(&mut a, KeyCode::Enter, KeyModifiers::NONE),
+                    5 => a.table_action([A::RowAbove, A::RowBelow, A::DeleteRow][rnd(3)]),
+                    6 => a.table_action([A::ColLeft, A::ColRight, A::DeleteCol][rnd(3)]),
+                    7 => a.table_action([A::RowUp, A::RowDown][rnd(2)]),
+                    8 => a.table_action([A::MoveColLeft, A::MoveColRight][rnd(2)]),
+                    9 => a.table_action(A::Align([Align::Left, Align::Center, Align::Right, Align::None][rnd(4)])),
+                    10 => a.handle_event(ratatui::crossterm::event::Event::Paste(format!("{word}\t{}\n{}\n", words[rnd(words.len())], words[rnd(words.len())]))),
+                    11 => {
+                        a.table_action(A::SelectRow);
+                        key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
+                    }
+                    12 => type_str(&mut a, "|"),
+                    _ => key(&mut a, KeyCode::Delete, KeyModifiers::NONE),
+                }
+                let post = text(&a);
+                let ctx = format!("round {round} step {step} op {op} cell ({r},{c})\nbefore:\n{pre}\nafter:\n{post}");
+                assert!(post.starts_with(&prefix), "text before the table changed: {ctx}");
+                assert!(post.ends_with(&suffix), "text after the table changed: {ctx}");
+                let nt = a.tab.table_at(start_line).unwrap_or_else(|| panic!("no longer a table: {ctx}"));
+                if reflow_only {
+                    assert_eq!(contents(&nt, a.tab.buf.rope()), before_cells, "cell text lost: {ctx}");
+                }
+                match op {
+                    // Typed at the start of the cell's text.
+                    1 => {
+                        // Typed char by char, so a backslash typed before
+                        // an escaped pipe gets escaped itself: compare the
+                        // text without escape backslashes.
+                        let got: String = a.tab.buf.rope().slice(nt.rows[r].cells[c].content.clone()).into();
+                        assert_eq!(got.replace('\\', ""), format!("{word}{old_content}").replace('\\', ""), "typed text: {ctx}");
+                    }
+                    4 => assert_eq!(nt.rows.len(), t.rows.len() + 1, "Enter adds one row: {ctx}"),
+                    // Pasted data reads back exactly.
+                    10 => {
+                        let got: String = a.tab.buf.rope().slice(nt.rows[r].cells[c].content.clone()).into();
+                        assert_eq!(crate::table::unescape(&got), word, "pasted value: {ctx}");
+                    }
+                    _ => {}
+                }
+                if post != pre {
+                    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+                    // Typing may have coalesced with an earlier step: undo
+                    // until the text is back, at most a few steps.
+                    let mut n = 1;
+                    while text(&a) != pre && n < 8 && a.tab.buf.is_dirty() {
+                        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+                        n += 1;
+                    }
+                    if text(&a) == pre {
+                        for _ in 0..n {
+                            key(&mut a, KeyCode::Char('y'), KeyModifiers::CONTROL);
+                        }
+                        assert_eq!(text(&a), post, "redo differs: {ctx}");
+                    } else {
+                        // Undo went past `pre` into earlier coalesced
+                        // typing: redo everything back.
+                        while a.tab.buf.redo() {}
+                        assert_eq!(text(&a), post, "undo/redo round trip broken: {ctx}");
+                    }
+                }
+            }
+        }
     }
 }

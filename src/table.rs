@@ -710,15 +710,94 @@ fn merge_inserts(ops: Ops) -> Ops {
     out
 }
 
-/// Cell text as plain data: `\|` becomes `|`.
+/// Cell text as plain data, inverting `escape`: a run of backslashes
+/// followed by `|` stands for half as many backslashes and a pipe (`\|`
+/// is `|`, `\\\|` is `\|`), and an even run at the end for half as many.
+/// Any other backslashes are left as written.
 pub fn unescape(s: &str) -> String {
-    s.replace("\\|", "|")
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '\\' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let n = chars[i..].iter().take_while(|&&c| c == '\\').count();
+        match chars.get(i + n) {
+            Some('|') => {
+                out.extend(std::iter::repeat_n('\\', n / 2));
+                out.push('|');
+                i += n + 1;
+            }
+            None if n % 2 == 0 => {
+                out.extend(std::iter::repeat_n('\\', n / 2));
+                i += n;
+            }
+            _ => {
+                out.extend(std::iter::repeat_n('\\', n));
+                i += n;
+            }
+        }
+    }
+    out
 }
 
-/// Plain data as cell text: newlines and tabs become spaces, `|` becomes
-/// `\|`, and surrounding spaces go.
+/// Plain data as cell text: newlines and tabs become spaces, surrounding
+/// spaces go, `|` becomes `\|`, and a run of backslashes before a pipe (or
+/// at the end, where the cell's closing pipe follows) is doubled so it
+/// can't pair with that pipe.
 pub fn escape(s: &str) -> String {
-    s.replace(['\n', '\r', '\t'], " ").trim().replace('|', "\\|")
+    let flat = s.replace(['\n', '\r', '\t'], " ");
+    let chars: Vec<char> = flat.trim().chars().collect();
+    let mut out = String::with_capacity(chars.len() + 4);
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '|' => {
+                out.push_str("\\|");
+                i += 1;
+            }
+            '\\' => {
+                let n = chars[i..].iter().take_while(|&&c| c == '\\').count();
+                let doubled = matches!(chars.get(i + n), None | Some('|'));
+                out.extend(std::iter::repeat_n('\\', if doubled { 2 * n } else { n }));
+                i += n;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Make edited cell text safe: a bare `|` (one that would split the cell,
+/// following the same scanning as `split_row`) becomes `\|`.
+pub fn sanitize(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len() + 2);
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' if i + 1 < chars.len() => {
+                out.push('\\');
+                out.push(chars[i + 1]);
+                i += 2;
+            }
+            '|' => {
+                out.push_str("\\|");
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// Pasted text as a grid of cell texts: Markdown table rows (every line
@@ -958,6 +1037,35 @@ mod tests {
         assert_eq!(parse_paste("| x | y |\n|---|---|\n| 1 | \\| |\n"), [vec!["x", "y"], vec!["1", "\\|"]]);
         assert_eq!(parse_paste("one\ntwo"), [vec!["one"], vec!["two"]]);
         assert_eq!(unescape("a\\|b"), "a|b");
+        assert_eq!(parse_paste("a\\|b\n"), [vec!["a\\\\\\|b"]], "a backslash before a pipe is kept as data");
+    }
+
+    #[test]
+    fn escaping_round_trips_and_never_splits_a_cell() {
+        let samples = ["a|b", "a\\|b", "a\\\\|b", "ends\\", "\\", "|", "||", "x\\y", "C:\\path\\", "plain"];
+        for d in samples {
+            let cell = escape(d);
+            assert_eq!(unescape(&cell), d, "{d:?} -> {cell:?}");
+            // As a lone cell between pipes (no padding) it stays one cell.
+            let row: Vec<char> = format!("|{cell}|").chars().collect();
+            assert_eq!(split_row(&row).unwrap().cells.len(), 1, "{d:?} -> {cell:?}");
+        }
+        assert_eq!(sanitize("a|b"), "a\\|b");
+        assert_eq!(sanitize("a\\|b"), "a\\|b", "already escaped");
+        assert_eq!(sanitize("a\\\\|b"), "a\\\\\\|b", "escaped backslash, bare pipe");
+    }
+
+    #[test]
+    fn format_lines_up_combining_marks_wide_glyphs_and_zwj_emoji() {
+        let src = "| a | b |\n|---|---|\n| e\u{301}te\u{301} | 中文字 |\n| 👩‍💻 | x |\n| plain text | 🎹🎹 |\n";
+        let (rope, t) = table(src, 0).unwrap();
+        let out = apply(src, t.format(&rope));
+        let widths: Vec<usize> = out.lines().map(text_width).collect();
+        assert!(widths.windows(2).all(|w| w[0] == w[1]), "rows line up on screen: {widths:?}\n{out}");
+        let rope2 = Rope::from_str(&out);
+        let t2 = Table::at(&rope2, 0).unwrap();
+        assert!(t2.format(&rope2).is_empty());
+        assert_eq!(t2.grid(&rope2)[1], ["e\u{301}te\u{301}", "中文字"]);
     }
 
     #[test]
