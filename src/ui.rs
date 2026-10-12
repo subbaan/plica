@@ -776,7 +776,15 @@ fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
             buf.set_stringn(rx, inner.y, "Markdown table editing arrives in Plica 0.4.", rw as usize, dim);
         }
         Section::Highlights => {
-            buf.set_stringn(rx, inner.y, "Word and phrase highlighting arrives in Plica 0.3.", rw as usize, dim);
+            let area = Rect { x: rx, y: inner.y, width: rw, height: inner.height.saturating_sub(3) };
+            let styles = PrefsStyles { st, sel, dim, base: p.style(t.editor_fg, t.editor_bg) };
+            let scroll = draw_prefs_hl(buf, app, state, area, &styles, p, &t, &mut hits);
+            if let Some(s) = app.prefs.as_mut() {
+                s.hl_scroll = scroll;
+            }
+            app.regions.prefs_hits = hits;
+            draw_prefs_footer(buf, app, inner, rx, rw, st, dim);
+            return;
         }
         _ => {
             let rows = section.rows();
@@ -803,6 +811,13 @@ fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
         }
     }
 
+    app.regions.prefs_hits = hits;
+    draw_prefs_footer(buf, app, inner, rx, rw, st, dim);
+}
+
+fn draw_prefs_footer(buf: &mut TermBuf, app: &mut App, inner: Rect, rx: u16, rw: u16, st: Style, dim: Style) {
+    use crate::prefs::PrefsHit;
+    let hits = &mut app.regions.prefs_hits;
     // Footer: buttons and hints.
     let fy = inner.bottom() - 1;
     let mut x = inner.x;
@@ -819,7 +834,143 @@ fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
             .unwrap_or_else(|| path.display().to_string());
         buf.set_stringn(rx, fy - 1, format!("Changes preview live · Save writes {shown}"), rw as usize, dim);
     }
-    app.regions.prefs_hits = hits;
+}
+
+struct PrefsStyles {
+    st: Style,
+    sel: Style,
+    dim: Style,
+    /// Document text colours, for previews.
+    base: Style,
+}
+
+/// The Highlights page. Returns the list's scroll offset.
+#[allow(clippy::too_many_arguments)]
+fn draw_prefs_hl(
+    buf: &mut TermBuf,
+    app: &App,
+    state: &crate::prefs::PrefsState,
+    r: Rect,
+    s: &PrefsStyles,
+    p: &Painter,
+    t: &crate::theme::Theme,
+    hits: &mut Vec<(Rect, crate::prefs::PrefsHit)>,
+) -> usize {
+    use crate::prefs::PrefsHit;
+    use crate::highlight::Origin;
+    use crate::prefs_hl::{EditRow, HlHit, ListRow, list_rows};
+    let h = &app.highlights;
+    let w = r.width as usize;
+    let style_of = |g: &crate::highlight::Group| s.base.patch(highlight_style(p, &crate::highlight::resolve(g, t)));
+    if r.height < 3 {
+        return state.hl_scroll;
+    }
+
+    if let Some(gi) = state.hl_edit {
+        let Some(g) = h.groups.get(gi) else { return state.hl_scroll };
+        let avail = r.height as usize - 2; // preview + hint
+        let skip = state.hl_edit_row.saturating_sub(avail.saturating_sub(1));
+        for (i, row) in EditRow::ALL.iter().enumerate().skip(skip).take(avail) {
+            let y = r.y + (i - skip) as u16;
+            let focused = i == state.hl_edit_row;
+            let lst = if focused { s.st.add_modifier(Modifier::BOLD) } else { s.st };
+            if *row == EditRow::Back {
+                buf.set_stringn(r.x, y, row.label(), w, if focused { s.sel } else { s.st });
+                hits.push((Rect { x: r.x, y, width: r.width, height: 1 }, PrefsHit::Hl(HlHit::EditRow(i))));
+                continue;
+            }
+            buf.set_stringn(r.x, y, format!("{:<18}", row.label()), 18, lst);
+            let vx = r.x + 19;
+            let val = row.value(g);
+            let (end, _) = buf.set_stringn(vx, y, &val, w.saturating_sub(19), if focused { s.sel } else { s.st });
+            hits.push((Rect { x: r.x, y, width: r.width, height: 1 }, PrefsHit::Hl(HlHit::EditRow(i))));
+            if val.starts_with('‹') {
+                let n = val.chars().count() as u16;
+                hits.insert(0, (Rect { x: vx, y, width: 2, height: 1 }, PrefsHit::Hl(HlHit::Dec(i))));
+                hits.insert(0, (Rect { x: vx + n - 2, y, width: 2, height: 1 }, PrefsHit::Hl(HlHit::Inc(i))));
+                // Swatch of the resolved colour.
+                let c = if *row == EditRow::Fg { g.fg } else { g.bg };
+                if let Some(c) = c
+                    && !p.plain
+                {
+                    buf.set_stringn(end + 1, y, "██", 2, Style::default().fg(p.c(c.resolve(t))));
+                }
+            }
+        }
+        // Preview: the group's own terms, drawn as they appear in a document.
+        let py = r.bottom() - 2;
+        let (mut x, _) = buf.set_stringn(r.x, py, "Preview  ", w, s.dim);
+        for term in &g.terms {
+            if x >= r.right() {
+                break;
+            }
+            let (nx, _) = buf.set_stringn(x, py, term, r.right().saturating_sub(x) as usize, style_of(g));
+            let (nx, _) = buf.set_stringn(nx, py, "  ", r.right().saturating_sub(nx) as usize, s.base);
+            x = nx;
+        }
+        if let Some(row) = EditRow::ALL.get(state.hl_edit_row) {
+            buf.set_stringn(r.x, r.bottom() - 1, row.hint(), w, s.dim);
+        }
+        return state.hl_scroll;
+    }
+
+    let rows = list_rows(h);
+    let groups = h.ordered();
+    let avail = r.height as usize - 2; // blank + hint
+    let cur = state.hl_row.min(rows.len() - 1);
+    let mut scroll = state.hl_scroll.min(rows.len().saturating_sub(1));
+    if cur < scroll {
+        scroll = cur;
+    } else if cur >= scroll + avail {
+        scroll = cur + 1 - avail;
+    }
+    let check = |on: bool| if on { "[x]" } else { "[ ]" };
+    for (i, row) in rows.iter().enumerate().skip(scroll).take(avail) {
+        let y = r.y + (i - scroll) as u16;
+        let focused = i == cur;
+        let fst = if focused { s.sel } else { s.st };
+        let row_hit = (Rect { x: r.x, y, width: r.width, height: 1 }, PrefsHit::Hl(HlHit::Row(i)));
+        match row {
+            ListRow::Enabled | ListRow::Samples => {
+                let (label, on) = if *row == ListRow::Enabled { ("Highlighting", h.enabled) } else { ("Sample groups", h.samples) };
+                buf.set_stringn(r.x, y, format!("{label:<18}"), 18, if focused { s.st.add_modifier(Modifier::BOLD) } else { s.st });
+                buf.set_stringn(r.x + 19, y, format!("{} {}", check(on), if on { "on" } else { "off" }), w.saturating_sub(19), fst);
+                hits.push(row_hit);
+            }
+            ListRow::Group(gi) => {
+                let (g, origin) = &groups[*gi];
+                buf.set_stringn(r.x, y, check(g.enabled), 3, fst);
+                hits.insert(0, (Rect { x: r.x, y, width: 3, height: 1 }, PrefsHit::Hl(HlHit::Toggle(i))));
+                let live = g.enabled && h.enabled;
+                let name: String = g.name.chars().take(16).collect();
+                let (nx, _) = buf.set_stringn(r.x + 4, y, &name, 16, if live { style_of(g) } else { s.dim });
+                let mut rest = String::new();
+                for _ in nx..r.x + 21 {
+                    rest.push(' ');
+                }
+                rest.push_str(&g.terms.join(", "));
+                match origin {
+                    Origin::Sample => rest.push_str("  (sample)"),
+                    Origin::Override(_) => rest.push_str("  (sample, edited)"),
+                    Origin::User(_) => {}
+                }
+                buf.set_stringn(nx, y, &rest, r.right().saturating_sub(nx) as usize, s.dim);
+                hits.push(row_hit);
+            }
+            ListRow::New => {
+                buf.set_stringn(r.x, y, "+ New group", w, fst);
+                hits.push(row_hit);
+            }
+        }
+    }
+    buf.set_stringn(
+        r.x,
+        r.bottom() - 1,
+        "Space toggle · Enter edit · N new · Del delete · Alt+↑↓ move",
+        w,
+        s.dim,
+    );
+    scroll
 }
 
 fn digits(n: usize) -> usize {

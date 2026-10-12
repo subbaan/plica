@@ -50,6 +50,11 @@ pub enum PromptKind {
     PalettePath,
     SaveAs,
     Open,
+    HlName,
+    HlTerms,
+    HlFileTypes,
+    HlFg,
+    HlBg,
 }
 
 pub struct Prompt {
@@ -70,6 +75,11 @@ impl PromptKind {
             PromptKind::PalettePath => "Palette file (empty = none)",
             PromptKind::SaveAs => "Save as",
             PromptKind::Open => "Open",
+            PromptKind::HlName => "Group name",
+            PromptKind::HlTerms => "Words and phrases (comma-separated)",
+            PromptKind::HlFileTypes => "File types, e.g. md, txt (empty = all files)",
+            PromptKind::HlFg => "Text colour: #rrggbb, color0-15, accent, warning... (empty = none)",
+            PromptKind::HlBg => "Background: #rrggbb, color0-15, accent, warning... (empty = none)",
         }
     }
 }
@@ -1326,6 +1336,9 @@ impl App {
                     PromptKind::PalettePath => self.set_palette_path(&input),
                     PromptKind::SaveAs if !input.is_empty() => self.save_as(&input),
                     PromptKind::Open if !input.is_empty() => self.open_path(&input),
+                    PromptKind::HlName | PromptKind::HlTerms | PromptKind::HlFileTypes | PromptKind::HlFg | PromptKind::HlBg => {
+                        self.hl_prompt_done(kind, &input)
+                    }
                     _ => {}
                 }
                 self.prompt = None;
@@ -2079,6 +2092,64 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "ask Alice now\n", "file untouched");
         a.highlight_word();
         assert_ne!(a.active_highlights()[0].name, crate::dochl::MARKED, "second press removes it");
+    }
+
+    #[test]
+    fn preferences_highlights_page() {
+        use crate::prefs::Section;
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("config.toml");
+        std::fs::write(&cfg, "# mine\n[editor]\nwrap = true\n").unwrap();
+        let mut a = app_with("ask Alice", 40, 10);
+        a.config_path = Some(cfg.clone());
+        a.open_prefs();
+        a.prefs.as_mut().unwrap().section = Section::ALL.iter().position(|s| *s == Section::Highlights).unwrap();
+        // Rows: Highlighting, Samples, then the samples. Switch the first sample off.
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+        assert_eq!(a.highlights.groups.len(), 1, "the sample became a user group");
+        assert!(!a.highlights.groups[0].enabled);
+        // New group: the words prompt opens first.
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(a.prompt.as_ref().unwrap().kind, PromptKind::HlTerms);
+        type_str(&mut a, "Alice, release day");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(a.highlights.groups[1].terms, ["Alice", "release day"]);
+        assert!(a.active_highlights().iter().any(|g| g.terms == ["Alice", "release day"]), "previews live");
+        // Editor: Text colour row, step right twice from accent -> search.
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        assert_eq!(a.highlights.groups[1].fg, Some(crate::highlight::Colour::Role(crate::highlight::Role::Search)));
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.prefs.as_ref().unwrap().hl_edit.is_none(), "Esc leaves the editor, not Preferences");
+        // Own groups come before the sample slots (the edited sample kept its place).
+        let order = a.highlights.ordered();
+        assert_eq!(order[0].0.terms, ["Alice", "release day"]);
+        assert_eq!(order[1].1, crate::highlight::Origin::Override(0));
+        // A second group, moved above the first with Alt+Up.
+        key(&mut a, KeyCode::Char('n'), KeyModifiers::NONE);
+        type_str(&mut a, "Bob");
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Up, KeyModifiers::ALT);
+        let order = a.highlights.ordered();
+        assert_eq!(order[0].0.terms, ["Bob"]);
+        assert_eq!(order[1].0.terms, ["Alice", "release day"]);
+        let expected = a.highlights.clone();
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(a.prefs.is_none(), "saved");
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(text.contains("# mine") && !text.contains("[highlights]\n"), "{text}");
+        let (parsed, w) = crate::config::parse(&text);
+        assert!(w.is_empty(), "{w:?}\n{text}");
+        assert_eq!(parsed.highlights, expected, "{text}");
+        // Cancel restores.
+        a.open_prefs();
+        a.highlights.groups.clear();
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(a.highlights, expected);
     }
 
     #[test]

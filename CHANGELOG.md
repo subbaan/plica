@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.4 (2026-10-12): Highlights in Preferences
+
+- **Preferences → Highlights** manages highlight groups. The list shows each group's name in its own colours, with switches for all highlighting and for the sample groups. Space switches a group on/off, Enter edits it, N adds a group, Delete removes one, Alt+↑/↓ (or Ctrl+↑/↓) changes priority. Everything is clickable.
+- The group editor sets the name, words and phrases (comma-separated), text and background colour (←/→ steps through palette roles and slots with a colour swatch; Enter accepts `#rrggbb` or any colour name), bold / italic / underline, whole words, match case, file types and on/off, with a live preview of the terms.
+- Changing a sample makes it yours (marked "sample, edited") without moving it in the list; deleting your copy brings the built-in sample back. Samples themselves can be switched off but not deleted.
+- Changes preview in the document as you make them. Save writes them to `[[highlights.group]]` in `config.toml` (only when highlights changed, so hand-written groups keep their comments otherwise); Cancel undoes them.
+
 ## 0.2.3 (2026-10-12): document highlights
 
 - **Alt+H** (or **F8**) highlights the selected text, or the word under the caret, everywhere in the current document; press it again on the same word to remove it. Rebindable as `highlight_word`.

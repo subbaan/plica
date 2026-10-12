@@ -25,6 +25,7 @@ pub struct Settings {
     pub theme: ThemeChoice,
     pub palette: Option<PathBuf>,
     pub recovery: bool,
+    pub highlights: crate::highlight::Highlights,
 }
 
 impl Settings {
@@ -40,6 +41,7 @@ impl Settings {
             theme: c.theme,
             palette: c.palette.clone(),
             recovery: c.recovery,
+            highlights: c.highlights.clone(),
         }
     }
 }
@@ -212,12 +214,19 @@ pub enum PrefsHit {
     Save,
     Apply,
     Cancel,
+    Hl(crate::prefs_hl::HlHit),
 }
 
 pub struct PrefsState {
     pub section: usize,
     pub row: usize,
     pub keys_scroll: usize,
+    /// Highlights page: selected list row, first visible row, the group
+    /// being edited (index into the user groups) and its selected row.
+    pub hl_row: usize,
+    pub hl_scroll: usize,
+    pub hl_edit: Option<usize>,
+    pub hl_edit_row: usize,
     /// Settings when the dialog opened (Cancel restores these).
     pub original: Settings,
 }
@@ -235,6 +244,7 @@ impl App {
             theme: self.theme_choice,
             palette: self.palette_setting.clone(),
             recovery: self.recovery_enabled,
+            highlights: self.highlights.clone(),
         }
     }
 
@@ -245,6 +255,7 @@ impl App {
         self.line_numbers = s.line_numbers;
         self.show_whitespace = s.show_whitespace;
         self.primary_selection = s.primary_selection;
+        self.highlights = s.highlights.clone();
         if s.tab_width != old.tab_width || s.indent != old.indent {
             self.tab_width = s.tab_width;
             self.indent_mode = s.indent;
@@ -280,7 +291,16 @@ impl App {
     }
 
     pub fn open_prefs(&mut self) {
-        self.prefs = Some(PrefsState { section: 0, row: 0, keys_scroll: 0, original: self.current_settings() });
+        self.prefs = Some(PrefsState {
+            section: 0,
+            row: 0,
+            keys_scroll: 0,
+            hl_row: 0,
+            hl_scroll: 0,
+            hl_edit: None,
+            hl_edit_row: 0,
+            original: self.current_settings(),
+        });
     }
 
     fn prefs_rows(&self) -> &'static [Row] {
@@ -317,6 +337,9 @@ impl App {
     pub fn on_prefs_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        if self.prefs.as_ref().is_some_and(|p| Section::ALL[p.section] == Section::Highlights) && self.on_prefs_hl_key(k) {
+            return;
+        }
         let Some(p) = &mut self.prefs else { return };
         let section = Section::ALL[p.section];
         let rows = section.rows();
@@ -365,6 +388,7 @@ impl App {
             PrefsHit::Section(i) => {
                 p.section = i;
                 p.row = 0;
+                p.hl_edit = None;
             }
             PrefsHit::Row(i) | PrefsHit::Inc(i) | PrefsHit::Dec(i) => {
                 p.row = i;
@@ -378,6 +402,7 @@ impl App {
                 }
             }
             PrefsHit::Save | PrefsHit::Apply | PrefsHit::Cancel => self.prefs_finish(hit),
+            PrefsHit::Hl(h) => self.on_prefs_hl_click(h),
         }
     }
 
@@ -456,6 +481,7 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
         ThemeChoice::Dracula => "dracula",
         ThemeChoice::Terminal => "terminal",
     };
+    let hl_changed = config::parse(&doc.to_string()).0.highlights != s.highlights;
     let mut set = |section: &str, key: &str, v: toml_edit::Value, is_default: bool| {
         let present = doc.get(section).and_then(|t| t.get(key)).is_some();
         if existing_file && is_default && !present {
@@ -484,12 +510,41 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
     set("interaction", "primary_selection", s.primary_selection.into(), s.primary_selection == d.primary_selection);
     set("appearance", "theme", theme(s.theme).into(), s.theme == d.theme);
     set("files", "recovery", s.recovery.into(), s.recovery == d.recovery);
+    if hl_changed {
+        set("highlights", "enabled", s.highlights.enabled.into(), s.highlights.enabled == d.highlights.enabled);
+        set("highlights", "samples", s.highlights.samples.into(), s.highlights.samples == d.highlights.samples);
+    }
     match &s.palette {
         Some(p) => set("appearance", "palette", tilde(p).into(), false),
         None => {
             if let Some(t) = doc.get_mut("appearance").and_then(Item::as_table_like_mut) {
                 t.remove("palette");
             }
+        }
+    }
+    // Groups are rewritten as a whole, and only when they changed, so an
+    // untouched [[highlights.group]] list keeps its comments.
+    if hl_changed {
+        let groups: Vec<_> = s.highlights.groups.iter().filter(|g| !g.terms.is_empty()).collect();
+        if groups.is_empty() {
+            if let Some(t) = doc.get_mut("highlights").and_then(Item::as_table_mut) {
+                t.remove("group");
+            }
+        } else if let Some(t) = doc
+            .entry("highlights")
+            .or_insert_with(|| {
+                // Implicit: no empty [highlights] header above the groups.
+                let mut t = Table::new();
+                t.set_implicit(true);
+                Item::Table(t)
+            })
+            .as_table_mut()
+        {
+            let mut arr = toml_edit::ArrayOfTables::new();
+            for g in groups {
+                arr.push(crate::dochl::group_table(g));
+            }
+            t.insert("group", Item::ArrayOfTables(arr));
         }
     }
 }

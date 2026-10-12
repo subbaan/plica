@@ -28,6 +28,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
         ├─ config.rs ── config.toml loading/validation, defaults text
         ├─ prefs.rs ─── Preferences model/dialog, live apply, comment-preserving save
+        ├─ prefs_hl.rs ─ Preferences → Highlights page (group list and editor)
         ├─ colours.rs ─ colour-source decision and loading (startup + Preferences)
         └─ theme.rs ─── parse_kitty → Palette → resolve → Theme (semantic roles, contrast repair)
 ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → truecolour / 256 / plain
@@ -51,6 +52,13 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-12 · 0.2.4
+
+- **A user group named like a sample takes the sample's slot in priority** (`Highlights::ordered`, with `Origin::User / Sample / Override`). *Bug found by e2e:* the first version listed copies with the user's groups, so switching a sample off made its row jump up the list under the mouse. Keeping the slot keeps the list stable, and "replace a sample" now means exactly that. Only plain user groups can be reordered.
+- **Preferences edit `App::highlights` directly for live preview**; `Settings` carries a `Highlights` clone so the existing snapshot/Cancel path restores it, and `write_settings` compares against what the file currently parses to, rewriting `[[highlights.group]]` as a whole only when highlights changed. A new `highlights` table is created implicit so no empty `[highlights]` header appears above the groups.
+- **New groups open the words prompt first**, and leaving the editor removes a group that still has no words, so an empty group never lingers or gets saved.
+- **Text fields reuse the bottom prompt** (`PromptKind::Hl*`) rather than inline editing inside the dialog: one text-entry path (with the 0.2.1 cursor) for everything.
 
 ### 2026-10-12 · 0.2.3
 

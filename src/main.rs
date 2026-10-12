@@ -10,6 +10,7 @@ mod find;
 mod dochl;
 mod highlight;
 mod prefs;
+mod prefs_hl;
 mod keymap;
 mod lineedit;
 mod layout;

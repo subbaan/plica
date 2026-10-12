@@ -88,7 +88,7 @@ impl Colour {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     pub name: String,
     pub terms: Vec<String>,
@@ -150,7 +150,7 @@ pub fn samples() -> Vec<Group> {
     ]
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Highlights {
     pub enabled: bool,
     pub samples: bool,
@@ -164,23 +164,53 @@ impl Default for Highlights {
     }
 }
 
+/// Where a group in `Highlights::ordered` comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// `groups[i]`, a group of the user's own.
+    User(usize),
+    /// A built-in sample.
+    Sample,
+    /// `groups[i]`, the user's copy of a sample (same name), which takes
+    /// the sample's place.
+    Override(usize),
+}
+
 impl Highlights {
-    /// Groups that apply to a file, in priority order: user groups, then the
-    /// samples they don't replace.
+    fn sample_slot(name: &str) -> bool {
+        samples().iter().any(|s| s.name.eq_ignore_ascii_case(name))
+    }
+
+    /// Every group in priority order: the user's own groups, then the
+    /// sample slots (each the user's copy if there is one). Copies of
+    /// samples stay in the sample's slot even when samples are hidden.
+    pub fn ordered(&self) -> Vec<(Group, Origin)> {
+        let mut out: Vec<(Group, Origin)> = Vec::new();
+        for (i, g) in self.groups.iter().enumerate() {
+            if !Self::sample_slot(&g.name) {
+                out.push((g.clone(), Origin::User(i)));
+            }
+        }
+        for s in samples() {
+            match self.groups.iter().position(|g| g.name.eq_ignore_ascii_case(&s.name)) {
+                Some(i) => out.push((self.groups[i].clone(), Origin::Override(i))),
+                None if self.samples => out.push((s, Origin::Sample)),
+                None => {}
+            }
+        }
+        out
+    }
+
+    /// Groups that apply to a file, in priority order.
     pub fn active(&self, path: Option<&Path>) -> Vec<Group> {
         if !self.enabled {
             return Vec::new();
         }
-        let mut out: Vec<Group> = self.groups.clone();
-        if self.samples {
-            for s in samples() {
-                if !self.groups.iter().any(|g| g.name.eq_ignore_ascii_case(&s.name)) {
-                    out.push(s);
-                }
-            }
-        }
-        out.retain(|g| g.enabled && !g.terms.is_empty() && g.applies_to(path));
-        out
+        self.ordered()
+            .into_iter()
+            .map(|(g, _)| g)
+            .filter(|g| g.enabled && !g.terms.is_empty() && g.applies_to(path))
+            .collect()
     }
 }
 

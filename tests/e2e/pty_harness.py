@@ -457,6 +457,28 @@ t.send("\x11", 0.5)
 os.remove(docs_toml)
 os.remove(cfg_file)
 
+# ---------------------------------------------------------------- session 12: Highlights in Preferences
+fq = os.path.join(WORK, "hlprefs.txt"); open(fq, "w").write("call Zed today\n")
+t = Term(["--builtin-theme", fq])
+t.send("\x1b[20~", 0.4)  # F9
+row = next(y for y in range(ROWS) if "Highlights" in t.line(y) and "│" in t.line(y))
+t.click(t.col_of(row, "Highlights") + 1, row); t.pump(0.3)
+check("Highlights page lists the samples", "IMPORTANT" in t.text() and "Sample groups" in t.text(), t.text())
+row = next(y for y in range(ROWS) if "Fixme" in t.line(y))
+t.click(t.col_of(row, "[x] Fixme") + 1, row); t.pump(0.3)
+check("clicking a sample's checkbox switches it off", "[ ] Fixme" in t.line(row), t.line(row))
+t.send("n", 0.3)  # new group (the list scrolls in this small terminal)
+t.send("Zed", 0.2); t.send("\r", 0.4)
+prow = next(y for y in range(ROWS) if "Preview" in t.line(y))
+xz = t.col_of(prow, "Zed")
+check("group editor previews in the group's colour (Dracula accent)", t.cell(xz, prow).fg.lower() == "bd93f9", t.cell(xz, prow).fg)
+t.send("\x1b", 0.2); t.send("\x13", 0.5)  # Esc (back to list), Ctrl+S
+check("Save writes the group to config.toml", os.path.exists(cfg_file) and 'terms = ["Zed"]' in open(cfg_file).read(), open(cfg_file).read() if os.path.exists(cfg_file) else "missing")
+xz = t.col_of(1, "Zed")
+check("document shows the new group", t.cell(xz, 1).fg.lower() == "bd93f9", t.cell(xz, 1).fg)
+t.send("\x11", 0.5)
+os.remove(cfg_file)
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)
