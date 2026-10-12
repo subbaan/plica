@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5 (2026-10-12): select, copy and paste table cells
+
+- **Cell selection:** drag from one cell into another, or use **Shift+↑/↓**, or **Shift+←/→** at the edge of a cell's text, to select a rectangle of cells. The table menu can also select the whole row, column or table. The status bar shows e.g. `2×3 cells`.
+- **Ctrl+C** copies the selected cells as **tab-separated text**, which pastes straight into a spreadsheet; `\|` becomes a plain `|`. Ctrl+X cuts them, and Delete/Backspace empties them, both as one undo step. Typing replaces the active cell's text, and Esc or any other key goes back to ordinary selection. For a plain-text copy of the table's source, select it with table keys off (Esc).
+- **Pasting into a table:** tab-separated text (from a spreadsheet, or copied cells) fills cells starting at the caret's cell or the selected cells. Rows and columns are added when the data reaches past the table, so nothing is dropped. Pasted Markdown table rows work the same way (their `---` rows are skipped), and several lines without tabs fill one column downwards. `|` in pasted data is escaped. A table that was lined up stays lined up; in one that wasn't, only the rows you pasted into change. The pasted cells are left selected; one undo removes the paste.
+
 ## 0.3.4 (2026-10-12): build fix
 
 - No user-visible change. Fixes a lint error (an overly complex type in the table code) that 0.3.3 was published with: `make check` failed and the commit went out anyway. `make check` and `make e2e` pass again.

@@ -622,11 +622,127 @@ impl Table {
         ops
     }
 
+    /// Cell contents as a grid: the header, then the body rows (the
+    /// delimiter row is not data).
+    pub fn grid(&self, rope: &Rope) -> Vec<Vec<String>> {
+        self.rows.iter().filter(|r| r.kind != RowKind::Delimiter).map(|r| r.cells.iter().map(|c| Self::text(rope, &c.content)).collect()).collect()
+    }
+
+    /// Table row of grid row `g`.
+    pub fn table_row(g: usize) -> usize {
+        if g == 0 { 0 } else { g + 1 }
+    }
+
+    /// Write `grid` (header + body rows, possibly longer or wider than the
+    /// table) back. Rows marked in `touched`, rows past the end, and every
+    /// row when columns were added are rewritten; if the table was lined
+    /// up before, all rows are re-padded to keep it so. Other rows keep
+    /// their exact text.
+    pub fn rewrite(&self, rope: &Rope, grid: &[Vec<String>], touched: &[bool], le: &str) -> Ops {
+        let formatted = self.format(rope).is_empty();
+        let old_cols = self.cols();
+        let ncols = grid.iter().map(Vec::len).max().unwrap_or(0).max(old_cols);
+        let widened = ncols > old_cols;
+        let mut widths: Vec<usize> = (0..ncols).map(|c| self.min_inner(c, ncols)).collect();
+        for row in grid {
+            for (c, v) in row.iter().enumerate() {
+                widths[c] = widths[c].max(text_width(v));
+            }
+        }
+        let mut ops = Vec::new();
+        // A lined-up table stays lined up; in one that wasn't, rewritten
+        // rows get no extra padding either.
+        let min: Vec<usize> = (0..ncols).map(|c| self.min_inner(c, ncols)).collect();
+        let rewrite_row = |kind: RowKind, contents: &[String]| {
+            if formatted || kind == RowKind::Delimiter {
+                let w = if formatted { &widths } else { &min };
+                return self.row_text(kind, contents, w);
+            }
+            let natural: Vec<usize> = (0..ncols).map(|c| contents.get(c).map_or(0, |v| text_width(v))).collect();
+            self.row_text(kind, contents, &natural)
+        };
+        let body_rows = self.rows.len() - 1;
+        for (g, contents) in grid.iter().enumerate() {
+            let tr = Self::table_row(g);
+            if g < body_rows {
+                let row = &self.rows[tr];
+                if !(formatted || widened || touched.get(g).copied().unwrap_or(false)) {
+                    continue;
+                }
+                let new = rewrite_row(row.kind, contents);
+                if Self::text(rope, &(row.start..row.end)) != new {
+                    ops.push((row.start, row.end - row.start, new));
+                }
+            } else {
+                let last = &self.rows[self.rows.len() - 1];
+                ops.push((last.end, 0, format!("{le}{}", rewrite_row(RowKind::Body, contents))));
+            }
+        }
+        if formatted || widened {
+            let d = &self.rows[1];
+            let new = rewrite_row(RowKind::Delimiter, &[]);
+            if Self::text(rope, &(d.start..d.end)) != new {
+                ops.push((d.start, d.end - d.start, new));
+            }
+        }
+        // New rows were pushed in order at the same position; keep them so.
+        merge_inserts(ops)
+    }
+
     /// A new empty row (as text, no line terminator) in the table's style.
     pub fn empty_row(&self, rope: &Rope) -> String {
         let widths = self.inner_widths(rope, None);
         let n = self.rows[0].cells.len().max(1);
         self.row_text(RowKind::Body, &[], &widths[..n.min(widths.len())])
+    }
+}
+
+/// Several inserts at the same position (new rows appended at the end)
+/// become one, in order, so applying them can't reverse them.
+fn merge_inserts(ops: Ops) -> Ops {
+    let mut out: Ops = Vec::with_capacity(ops.len());
+    for op in ops {
+        match out.last_mut() {
+            Some(last) if last.0 == op.0 && last.1 == 0 && op.1 == 0 => last.2.push_str(&op.2),
+            _ => out.push(op),
+        }
+    }
+    out
+}
+
+/// Cell text as plain data: `\|` becomes `|`.
+pub fn unescape(s: &str) -> String {
+    s.replace("\\|", "|")
+}
+
+/// Plain data as cell text: newlines and tabs become spaces, `|` becomes
+/// `\|`, and surrounding spaces go.
+pub fn escape(s: &str) -> String {
+    s.replace(['\n', '\r', '\t'], " ").trim().replace('|', "\\|")
+}
+
+/// Pasted text as a grid of cell texts: Markdown table rows (every line
+/// has a pipe; `---` rows are dropped) or tab-separated lines. A final
+/// line break doesn't add an empty row.
+pub fn parse_paste(text: &str) -> Vec<Vec<String>> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let md: Option<Vec<Vec<String>>> = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let chars: Vec<char> = l.chars().collect();
+            let parts = split_row(&chars)?;
+            Some(parts.cells.iter().map(|r| chars[trim(&chars, r.clone())].iter().collect::<String>()).collect::<Vec<String>>())
+        })
+        .collect();
+    match md {
+        Some(rows) if !rows.is_empty() => rows
+            .into_iter()
+            .filter(|cells| !cells.iter().all(|c| delimiter_align(&c.chars().collect::<Vec<_>>()).is_some()))
+            .collect(),
+        _ => lines.iter().map(|l| l.split('\t').map(escape).collect()).collect(),
     }
 }
 
@@ -813,6 +929,35 @@ mod tests {
         let src = "|a|b|\n|---|-|\n|xx|y|\n";
         let (rope, t) = table(src, 0).unwrap();
         assert_eq!(apply(src, t.set_align(&rope, 0, Align::Left)), "|a|b|\n|:--|-|\n|xx|y|\n");
+    }
+
+    #[test]
+    fn grid_rewrite_and_paste_parsing() {
+        let src = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let (rope, t) = table(src, 0).unwrap();
+        let mut grid = t.grid(&rope);
+        assert_eq!(grid, [vec!["a", "b"], vec!["1", "2"]]);
+        // Paste a 2x2 block at the body's second column: one new column
+        // and one new row; the table was lined up, so it stays lined up.
+        grid[1].resize(3, String::new());
+        grid[1][1] = "two".into();
+        grid[1][2] = "x".into();
+        grid.push(vec![String::new(), "three".into(), "y".into()]);
+        let out = apply(src, t.rewrite(&rope, &grid, &[false, true, true], "\n"));
+        assert_eq!(out, "| a | b     |   |\n|---|-------|---|\n| 1 | two   | x |\n|   | three | y |\n", "{out}");
+        // A sloppy table: only touched rows change.
+        let src = "|a|b|\n|-|-|\n|1|2|\n|3|4|\n";
+        let (rope, t) = table(src, 0).unwrap();
+        let mut grid = t.grid(&rope);
+        grid[2][0] = "9".into();
+        assert_eq!(apply(src, t.rewrite(&rope, &grid, &[false, false, true], "\n")), "|a|b|\n|-|-|\n|1|2|\n|9|4|\n");
+        grid[1].push("new".into());
+        assert_eq!(apply(src, t.rewrite(&rope, &grid, &[false, true, false], "\n")), "|a|b||\n|---|---|---|\n|1|2|new|\n|9|4||\n", "a new column reaches every row");
+
+        assert_eq!(parse_paste("a\tb\r\nc|d\te\n"), [vec!["a", "b"], vec!["c\\|d", "e"]]);
+        assert_eq!(parse_paste("| x | y |\n|---|---|\n| 1 | \\| |\n"), [vec!["x", "y"], vec!["1", "\\|"]]);
+        assert_eq!(parse_paste("one\ntwo"), [vec!["one"], vec!["two"]]);
+        assert_eq!(unescape("a\\|b"), "a|b");
     }
 
     #[test]

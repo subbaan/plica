@@ -164,6 +164,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             crate::table::RowKind::Body => None,
         }
     };
+    // Selected table cells: their spans are drawn as selected.
+    let mut cell_spans: Vec<(usize, usize)> = Vec::new();
+    if let Some((tb, cs)) = app.cell_sel_live() {
+        for row in &rows {
+            if let Some(r) = tb.row_of_line(row.line)
+                && row.row_in_line == 0
+            {
+                for (c, cell) in tb.rows[r].cells.iter().enumerate() {
+                    if cs.contains(r, c) {
+                        cell_spans.push((cell.span.start, cell.span.end));
+                    }
+                }
+            }
+        }
+    }
+    let in_cell_sel = |s: usize, e: usize| cell_spans.iter().any(|&(a, b)| s >= a && e <= b);
     let in_match = |s: usize, e: usize| {
         let i = matches.partition_point(|&(_, me)| me <= s);
         matches.get(i).is_some_and(|&(ms, me)| s >= ms && e <= me)
@@ -208,7 +224,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             if in_match(g.start, g.end) {
                 st = search_style;
             }
-            if g.start >= sel.start() && g.end <= sel.end() && !sel.is_empty() {
+            if (g.start >= sel.start() && g.end <= sel.end() && !sel.is_empty()) || in_cell_sel(g.start, g.end) {
                 st = sel_style;
             }
             if rel < 0 {
@@ -597,7 +613,11 @@ fn status_right(app: &App, compact: bool) -> String {
     if compact {
         return format!(" {} ", parts[0]);
     }
-    if !app.tab.buf.sel.is_empty() {
+    if let Some((_, cs)) = app.cell_sel_live() {
+        let (r0, c0, r1, c1) = cs.rect();
+        let rows = (r0..=r1).filter(|&r| r != 1).count();
+        parts.push(format!("{rows}×{} cells", c1 - c0 + 1));
+    } else if !app.tab.buf.sel.is_empty() {
         parts.push(format!("Sel {}", app.tab.buf.sel.end() - app.tab.buf.sel.start()));
     }
     if app.caret_table().is_some() {

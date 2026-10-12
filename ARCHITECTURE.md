@@ -57,6 +57,14 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-12 · 0.3.5
+
+- **A cell selection is its own state** (`App::cell_sel`: table, anchor and head cell, buffer version), not a text selection. A rectangle of cells can't be expressed as one char range. While it is active, the text caret sits in the head cell with no text selection, and the draw loop paints the selected cells' spans. It is dropped as soon as the buffer changes in another way (version check) or by any key that doesn't act on cells: copy, cut, paste, Shift+arrows, Delete, Backspace, typing and Esc keep it, everything else clears it first.
+- **How a cell selection starts:** dragging from one cell into another, Shift+↑/↓, or Shift+←/→ only when the caret is at that edge of the cell's text. Inside a cell, Shift+arrows still select text, so ordinary selection keeps working in tables.
+- **Copy is data, not source:** selected cells copy as TSV with `\|` unescaped; a paste escapes `|` again, so the round trip is exact. A plain copy of the source is still available with table keys off.
+- **Pastes go through one grid rewrite** (`Table::rewrite`). The table's contents become a grid (header + body), the pasted block is written at the top-left cell, and the grid grows as needed (rows appended, columns added to every row). A table that was lined up (`format()` has nothing to do) is re-padded as a whole to stay lined up. In one that wasn't, only rows that received data are rewritten, without padding, so a sloppy table isn't silently reformatted. New rows inserted at the same position are merged into one insert, so applying them can't reverse their order.
+- **Paste format detection:** Markdown rows if every non-empty line has an unescaped pipe (`---` rows dropped), otherwise tab-separated lines. A trailing line break doesn't make an empty row.
+
 ### 2026-10-12 · 0.3.4
 
 - **`table::Ops`** names the `(at, delete_len, insert)` replacement list that all table edits return (clippy's type-complexity lint). Process note: 0.3.3 was committed after a failing `make check`, because the commands were chained with `;`. The release step now chains `make check && make e2e && git commit`.

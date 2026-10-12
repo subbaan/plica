@@ -147,6 +147,9 @@ pub enum TableAction {
     MoveColLeft,
     MoveColRight,
     Align(crate::table::Align),
+    SelectRow,
+    SelectCol,
+    SelectAll,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +230,8 @@ pub struct App {
     pub table_context: Option<usize>,
     /// Where the last table edit left the caret, in which buffer version.
     pub table_typed_at: Option<((u64, u64), usize)>,
+    /// Selected table cells (a rectangle), when a selection spans cells.
+    pub cell_sel: Option<crate::table_edit::CellSel>,
     pub recovery: Option<Recovery>,
     pub recovery_enabled: bool,
     pub prefs: Option<PrefsState>,
@@ -286,6 +291,7 @@ impl App {
             table_keys_off: None,
             table_context: None,
             table_typed_at: None,
+            cell_sel: None,
             recovery: None,
             recovery_enabled: true,
             prefs: None,
@@ -874,6 +880,18 @@ impl App {
             return;
         }
 
+        if self.cell_sel.is_some() {
+            // Keys that act on selected cells keep them; anything else
+            // drops the cell selection first.
+            let cmd = self.keymap.lookup(&k);
+            let arrow = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right);
+            let keeps = matches!(cmd, Some(Command::Copy | Command::Cut | Command::Paste | Command::TableMenu))
+                || (shift && arrow && !ctrl && !alt)
+                || (cmd.is_none() && matches!(k.code, KeyCode::Delete | KeyCode::Backspace | KeyCode::Char(_) | KeyCode::Esc));
+            if !keeps {
+                self.cell_sel = None;
+            }
+        }
         if let Some(cmd) = self.keymap.lookup(&k) {
             self.run_command(cmd);
             return;
@@ -1180,6 +1198,11 @@ impl App {
     }
 
     fn copy(&mut self) {
+        if let Some((tsv, n)) = self.cell_sel_text() {
+            let dest = self.clipboard.copy(&tsv);
+            self.info(format!("Copied {n} cells to {dest} as tab-separated text"));
+            return;
+        }
         if self.tab.buf.sel.is_empty() {
             return;
         }
@@ -1189,6 +1212,12 @@ impl App {
     }
 
     fn cut(&mut self) {
+        if let Some((tsv, n)) = self.cell_sel_text() {
+            self.clipboard.copy(&tsv);
+            self.clear_cell_sel();
+            self.info(format!("Cut {n} cells (tab-separated)"));
+            return;
+        }
         if self.tab.buf.sel.is_empty() {
             return;
         }
@@ -1522,6 +1551,9 @@ impl App {
             item("Align column centre", None, TableAction::Align(Align::Center)),
             item("Align column right", None, TableAction::Align(Align::Right)),
             item("Align column: none", None, TableAction::Align(Align::None)),
+            item("Select row", None, TableAction::SelectRow),
+            item("Select column", None, TableAction::SelectCol),
+            item("Select table (Ctrl+C copies as tab-separated)", None, TableAction::SelectAll),
         ];
         self.picker = Some(Picker::new("Table", items));
     }
@@ -1710,6 +1742,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                self.cell_sel = None;
                 if self.show_help {
                     self.show_help = false;
                     return;
@@ -1853,6 +1886,18 @@ impl App {
         let Some(pos) = self.pos_at_screen(cx, cy) else { return };
         let (s, e) = match unit {
             DragUnit::Char => {
+                // Dragging from one table cell into another selects cells.
+                let line = self.tab.buf.line_of(origin.anchor);
+                if let Some(t) = self.tab.table_at(line)
+                    && self.tab.buf.line_of(pos) >= t.first_line()
+                    && self.tab.buf.line_of(pos) <= t.last_line()
+                    && let (Some(a), Some(h)) = (t.cell_at(self.tab.buf.rope(), origin.anchor), t.cell_at(self.tab.buf.rope(), pos))
+                    && a != h
+                {
+                    self.set_cell_sel(&t, a, h);
+                    return;
+                }
+                self.cell_sel = None;
                 self.tab.buf.sel = Selection { anchor: origin.anchor, head: pos };
                 return;
             }

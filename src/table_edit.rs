@@ -15,7 +15,212 @@ use crate::table::{RowKind, Table};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::rc::Rc;
 
+/// A rectangle of selected cells in one table, valid for one buffer
+/// version. Rows are table rows (the delimiter row is never data).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellSel {
+    pub key: (u64, u64),
+    /// The table's first line (identifies it).
+    pub table: usize,
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+}
+
+impl CellSel {
+    /// (first row, first col, last row, last col), inclusive.
+    pub fn rect(&self) -> (usize, usize, usize, usize) {
+        let (a, h) = (self.anchor, self.head);
+        (a.0.min(h.0), a.1.min(h.1), a.0.max(h.0), a.1.max(h.1))
+    }
+
+    pub fn contains(&self, r: usize, c: usize) -> bool {
+        let (r0, c0, r1, c1) = self.rect();
+        r != 1 && (r0..=r1).contains(&r) && (c0..=c1).contains(&c)
+    }
+}
+
 impl App {
+    /// The cell selection, if still valid, with its table.
+    pub fn cell_sel_live(&self) -> Option<(Rc<Table>, CellSel)> {
+        let cs = self.cell_sel?;
+        if cs.key != self.tab.buf.cache_key() {
+            return None;
+        }
+        let t = self.tab.table_at(cs.table)?;
+        (t.first_line() == cs.table).then_some((t, cs))
+    }
+
+    /// Select cells from `anchor` to `head`; the text caret goes to the
+    /// head cell (no text selection is shown meanwhile).
+    pub fn set_cell_sel(&mut self, t: &Table, anchor: (usize, usize), head: (usize, usize)) {
+        let clamp = |(r, c): (usize, usize)| {
+            let r = r.min(t.rows.len() - 1);
+            let r = if r == 1 { 2.min(t.rows.len() - 1) } else { r };
+            (r, c.min(t.cols().saturating_sub(1)))
+        };
+        let (anchor, head) = (clamp(anchor), clamp(head));
+        self.cell_sel = Some(CellSel { key: self.tab.buf.cache_key(), table: t.first_line(), anchor, head });
+        let row = &t.rows[head.0];
+        let pos = row.cells.get(head.1).map_or(row.end, |c| c.content.start);
+        self.tab.buf.sel = Selection::caret(pos);
+        self.tab.buf.break_undo_group();
+        self.table_typed_at = None;
+    }
+
+    /// Selected cells as tab-separated text (pipes unescaped).
+    pub fn cell_sel_text(&self) -> Option<(String, usize)> {
+        let (t, cs) = self.cell_sel_live()?;
+        let rope = self.tab.buf.rope();
+        let (r0, c0, r1, c1) = cs.rect();
+        let mut lines = Vec::new();
+        for r in (r0..=r1).filter(|&r| r != 1) {
+            let row = &t.rows[r];
+            let cells: Vec<String> = (c0..=c1)
+                .map(|c| row.cells.get(c).map_or_else(String::new, |cell| crate::table::unescape(&rope.slice(cell.content.clone()).to_string())))
+                .collect();
+            lines.push(cells.join("\t"));
+        }
+        let n = lines.len() * (c1 - c0 + 1);
+        Some((lines.join("\n") + "\n", n))
+    }
+
+    /// Empty the selected cells (Delete, Backspace, Cut), as one undo step.
+    pub fn clear_cell_sel(&mut self) -> bool {
+        let Some((t, cs)) = self.cell_sel_live() else { return false };
+        let rope = self.tab.buf.rope();
+        let mut grid = t.grid(rope);
+        let mut touched = vec![false; grid.len()];
+        let (r0, c0, r1, c1) = cs.rect();
+        for r in (r0..=r1).filter(|&r| r != 1) {
+            let g = if r == 0 { 0 } else { r - 1 };
+            for c in c0..=c1 {
+                if let Some(v) = grid[g].get_mut(c) {
+                    v.clear();
+                    touched[g] = true;
+                }
+            }
+        }
+        let ops = t.rewrite(rope, &grid, &touched, self.tab.doc.line_ending.as_str());
+        let caret = self.tab.buf.sel;
+        self.tab.buf.edit(ops, EditKind::Other, Some(caret), false);
+        if let Some(nt) = self.tab.table_at(cs.table) {
+            self.set_cell_sel(&nt, cs.anchor, cs.head);
+        }
+        true
+    }
+
+    /// Paste a grid of cells (tab-separated or Markdown rows) with its top
+    /// left corner at the selected cells or the caret's cell. Rows and
+    /// columns are added as needed; nothing pasted is dropped.
+    fn table_paste_grid(&mut self, t: &Table, text: &str) -> bool {
+        let data = crate::table::parse_paste(text);
+        if data.is_empty() {
+            return false;
+        }
+        let rope = self.tab.buf.rope();
+        let (r, c) = match self.cell_sel_live() {
+            Some((_, cs)) => {
+                let (r0, c0, _, _) = cs.rect();
+                (r0, c0)
+            }
+            None => match t.cell_at(rope, self.tab.buf.sel.head) {
+                Some(rc) => rc,
+                None => return false,
+            },
+        };
+        let g0 = match r {
+            0 => 0,
+            1 => 1,
+            r => r - 1,
+        };
+        let mut grid = t.grid(rope);
+        let mut touched = vec![false; grid.len()];
+        for (i, vals) in data.iter().enumerate() {
+            let g = g0 + i;
+            if g >= grid.len() {
+                grid.push(Vec::new());
+                touched.push(true);
+            }
+            if grid[g].len() < c + vals.len() {
+                grid[g].resize(c + vals.len(), String::new());
+            }
+            for (j, v) in vals.iter().enumerate() {
+                grid[g][c + j] = v.clone();
+            }
+            touched[g] = true;
+        }
+        let ops = t.rewrite(rope, &grid, &touched, self.tab.doc.line_ending.as_str());
+        self.tab.buf.edit(ops, EditKind::Other, None, false);
+        let rows = data.len();
+        let cols = data.iter().map(Vec::len).max().unwrap_or(1);
+        if let Some(nt) = self.tab.table_at(t.first_line()) {
+            let tr = |g: usize| if g == 0 { 0 } else { g + 1 };
+            self.set_cell_sel(&nt, (tr(g0), c), (tr(g0 + rows - 1), c + cols - 1));
+        }
+        self.info(format!("Pasted {rows} × {cols} cells (Ctrl+Z undoes)"));
+        true
+    }
+
+    /// Shift+arrows in a table: extend the cell selection, or start one
+    /// when the text selection would leave the cell. Returns false to let
+    /// ordinary text selection happen.
+    fn table_shift_arrow(&mut self, t: &Table, code: KeyCode) -> bool {
+        let step = |t: &Table, (r, c): (usize, usize)| -> Option<(usize, usize)> {
+            let last_row = t.rows.len() - 1;
+            let last_col = t.cols().saturating_sub(1);
+            match code {
+                KeyCode::Up => (r > 0).then(|| if r == 2 { 0 } else { r - 1 }).map(|r| (r, c)),
+                KeyCode::Down => (r < last_row).then(|| if r == 0 { 2.min(last_row) } else { r + 1 }).map(|r| (r, c)),
+                KeyCode::Left => (c > 0).then(|| (r, c - 1)),
+                KeyCode::Right => (c < last_col).then(|| (r, c + 1)),
+                _ => None,
+            }
+        };
+        if let Some((_, cs)) = self.cell_sel_live() {
+            if let Some(h) = step(t, cs.head) {
+                self.set_cell_sel(t, cs.anchor, h);
+            }
+            return true;
+        }
+        let rope = self.tab.buf.rope();
+        let sel = self.tab.buf.sel;
+        let Some((r, c)) = t.cell_at(rope, sel.head) else { return false };
+        if r == 1 {
+            return false;
+        }
+        let cell = &t.rows[r].cells[c];
+        let leaving = match code {
+            KeyCode::Up | KeyCode::Down => true,
+            KeyCode::Left => sel.head <= cell.content.start,
+            KeyCode::Right => sel.head >= cell.content.end,
+            _ => false,
+        };
+        match step(t, (r, c)) {
+            Some(h) if leaving => {
+                self.set_cell_sel(t, (r, c), h);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Select a whole row, column or table of cells (table menu).
+    pub fn select_cells(&mut self, what: TableAction) {
+        let Some(t) = self.caret_table() else { return };
+        let rope = self.tab.buf.rope();
+        let Some((r, c)) = t.cell_at(rope, self.tab.buf.sel.head) else { return };
+        let last_row = t.rows.len() - 1;
+        let last_col = t.cols().saturating_sub(1);
+        let r = if r == 1 { 0 } else { r };
+        let (a, h) = match what {
+            TableAction::SelectRow => ((r, 0), (r, last_col)),
+            TableAction::SelectCol => ((0, c), (last_row, c)),
+            _ => ((0, 0), (last_row, last_col)),
+        };
+        self.set_cell_sel(&t, a, h);
+        self.info("Cells selected: Ctrl+C copies them as tab-separated text, Delete empties them");
+    }
+
     /// The table under the caret.
     pub fn caret_table(&self) -> Option<Rc<Table>> {
         self.tab.table_at(self.tab.buf.line_of(self.tab.buf.sel.head))
@@ -59,7 +264,25 @@ impl App {
             }
             return false;
         }
+        if self.cell_sel_live().is_some() {
+            match k.code {
+                KeyCode::Esc => {
+                    self.cell_sel = None;
+                    return true;
+                }
+                KeyCode::Delete | KeyCode::Backspace => return self.clear_cell_sel(),
+                KeyCode::Char(_) if !ctrl && !alt => {
+                    // Typing goes into the head cell, replacing its text.
+                    if let Some((t2, cs)) = self.cell_sel_live() {
+                        self.cell_sel = None;
+                        self.select_cell_in(&t2, cs.head.0, cs.head.1);
+                    }
+                }
+                _ => {}
+            }
+        }
         let done = match k.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right if shift && !ctrl && !alt => self.table_shift_arrow(&t, k.code),
             KeyCode::Esc if sel_empty && !ctrl && !alt => {
                 self.table_keys_off = Some(t.first_line());
                 self.info("Table keys off: Tab, Enter and Backspace edit plain text here (Esc: on again)");
@@ -87,15 +310,14 @@ impl App {
         done
     }
 
-    /// Paste one line of text into the cell under the caret.
+    /// Paste into a table: one line goes into the cell; several lines or
+    /// tab-separated values fill cells from the caret's cell.
     pub fn table_paste(&mut self, text: &str) -> bool {
-        if text.contains(['\n', '\r']) {
-            return false;
+        let Some(t) = self.table_keys_live() else { return false };
+        if text.contains(['\n', '\r', '\t']) || self.cell_sel_live().is_some() {
+            return self.table_paste_grid(&t, text);
         }
-        match self.table_keys_live() {
-            Some(t) => self.table_type(&t, text),
-            None => false,
-        }
+        self.table_type(&t, text)
     }
 
     /// The cell holding the selection (not in the delimiter row). A caret
@@ -185,6 +407,10 @@ impl App {
     /// Select cell (r, c)'s content (or put the caret where it goes).
     fn select_cell(&mut self, r: usize, c: usize) {
         let Some(t) = self.caret_table() else { return };
+        self.select_cell_in(&t, r, c);
+    }
+
+    fn select_cell_in(&mut self, t: &Table, r: usize, c: usize) {
         let Some(cell) = t.rows.get(r).and_then(|row| row.cells.get(c.min(row.cells.len().saturating_sub(1)))) else { return };
         self.tab.buf.sel = Selection { anchor: cell.content.start, head: cell.content.end };
         self.tab.buf.break_undo_group();
@@ -246,8 +472,10 @@ impl App {
     /// Run a table-menu action on the table under the caret, as one undo
     /// step, then put the caret in the cell it concerns.
     pub fn table_action(&mut self, a: TableAction) {
-        if a == TableAction::Format {
-            return self.format_table();
+        match a {
+            TableAction::Format => return self.format_table(),
+            TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll => return self.select_cells(a),
+            _ => {}
         }
         let Some(t) = self.caret_table() else {
             self.warn("The caret isn't in a Markdown table");
@@ -259,7 +487,7 @@ impl App {
         let body_r = r.max(2);
         // (ops, target cell, message when refused)
         let (ops, target, refused): (Option<crate::table::Ops>, (usize, usize), &str) = match a {
-            TableAction::Format => unreachable!(),
+            TableAction::Format | TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll => unreachable!(),
             TableAction::RowAbove => (Some(t.insert_row(rope, body_r, le)), (body_r, c), ""),
             TableAction::RowBelow => (Some(t.insert_row(rope, r.max(1) + 1, le)), (r.max(1) + 1, c), ""),
             TableAction::DeleteRow => (t.delete_row(rope, r), (r.min(t.rows.len().saturating_sub(2)).max(2), c), "Only body rows can be deleted (not the header or the --- row)"),
@@ -456,6 +684,54 @@ mod tests {
         a.handle_event(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: x, row: y, modifiers: KeyModifiers::NONE }));
         assert!(a.picker.as_ref().is_some_and(|p| p.title == "Table"));
         assert_eq!(a.tab.buf.line_of(a.tab.buf.sel.head), 4);
+    }
+
+    #[test]
+    fn cell_selection_copy_cut_and_tsv_paste() {
+        let src = "| k | v |\n|---|---|\n| 1 | a |\n| 2 | b |\n";
+        let mut a = app_with(src, 60, 12);
+        a.clipboard = crate::clipboard::Clipboard::internal_only();
+        caret_at(&mut a, "1 | a");
+        a.tab.buf.sel = crate::buffer::Selection::caret(a.tab.buf.sel.head + 1); // end of "1"
+        key(&mut a, KeyCode::Right, KeyModifiers::SHIFT); // leaves the cell: cells
+        key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+        assert_eq!(a.cell_sel_live().unwrap().1.rect(), (2, 0, 3, 1));
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.clipboard.paste(), "1\ta\n2\tb\n");
+        key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
+        assert_eq!(text(&a), "| k | v |\n|---|---|\n|   |   |\n|   |   |\n");
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(text(&a), src, "one undo step");
+        // Paste a 2x3 block at "a": the table gains a column and a row.
+        a.cell_sel = None;
+        caret_at(&mut a, "a |");
+        a.handle_event(ratatui::crossterm::event::Event::Paste("x\ty|z\nw\tv\n9\t8\n".into()));
+        assert_eq!(text(&a), "| k | v |      |\n|---|---|------|\n| 1 | x | y\\|z |\n| 2 | w | v    |\n|   | 9 | 8    |\n", "{}", text(&a));
+        assert_eq!(a.cell_sel_live().unwrap().1.rect(), (2, 1, 4, 2), "pasted cells are selected");
+        // Copying them back gives the same data (pipes unescaped).
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.clipboard.paste(), "x\ty|z\nw\tv\n9\t8\n");
+        // Any other key drops the cell selection.
+        key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+        assert!(a.cell_sel_live().is_none());
+    }
+
+    #[test]
+    fn select_row_column_table_from_the_menu() {
+        use crate::app::TableAction as A;
+        let mut a = app_with(T, 60, 12);
+        a.clipboard = crate::clipboard::Clipboard::internal_only();
+        caret_at(&mut a, "Samp");
+        a.table_action(A::SelectCol);
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.clipboard.paste(), "Type\nSamp\n", "the --- row is not data");
+        a.table_action(A::SelectAll);
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.clipboard.paste(), "Device\tType\nMPC\tSamp\n");
+        // Typing with cells selected replaces the head cell's text.
+        a.table_action(A::SelectRow);
+        type_str(&mut a, "Q");
+        assert!(text(&a).contains("| MPC    | Q    |"), "{}", text(&a));
     }
 
     #[test]

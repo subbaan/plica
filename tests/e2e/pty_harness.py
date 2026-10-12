@@ -681,6 +681,21 @@ t.send("x", 0.2)
 t.send("\x1b[1;3B", 0.3)  # Alt+Down
 t.send("\x13", 0.4)
 check("table: menu column insert and Alt+Down row move", open(tdoc).read() == "| k |   | v |\n|---|---|---|\n| 2 |   | b |\n| 1 | x | a |\n", open(tdoc).read())
+# Drag across cells selects them; Ctrl+C copies tab-separated text; a
+# tab-separated paste into the table fills cells.
+open(tdoc, "w").write("| k | v |\n|---|---|\n| 1 | a |\n| 2 | b |\n\nafter\n"); t.pump(0.8)
+t.drag(t.col_of(3, "| 1") + 2, 3, t.col_of(4, "b"), 4)
+sel_bg = t.cell(t.col_of(4, "b"), 4).bg
+check("table: drag across cells selects cells", sel_bg == t.cell(t.col_of(3, "| 1") + 2, 3).bg and sel_bg != t.cell(t.col_of(1, "k"), 1).bg, sel_bg)
+t.send("\x03", 0.3)  # Ctrl+C
+t.click(t.col_of(6, "after") + 5, 6)
+t.send("\r\x16", 0.4)  # Enter, Ctrl+V outside the table: plain text
+t.send("\x13", 0.4)
+check("table: cells copy as tab-separated text", "after\n1\ta\n2\tb\n" in open(tdoc).read(), open(tdoc).read())
+t.click(t.col_of(3, "a |"), 3)
+t.send("\x1b[200~X\tY\nZ\tW\n\x1b[201~", 0.4)  # bracketed paste
+t.send("\x13", 0.4)
+check("table: tab-separated paste fills and extends the table", open(tdoc).read().startswith("| k | v |   |\n|---|---|---|\n| 1 | X | Y |\n| 2 | Z | W |\n"), open(tdoc).read())
 t.send("\x11", 0.4)
 if t.p.isalive(): t.send("n", 0.4)
 check("table: clean quit", not t.p.isalive())
