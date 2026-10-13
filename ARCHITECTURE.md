@@ -58,6 +58,10 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-13 · 0.5.2
+
+- **A text copy stays the source text; spreadsheet data is an explicit choice** (user report: pasting tables into Calc only worked for Markdown). Offering both on the clipboard at once (text/plain plus TSV or text/html) isn't possible through wl-copy/xclip/xsel, which serve one type per call. Silently copying TSV for whole-table selections would break pasting a table into another document. So: a one-step "Copy for a spreadsheet" menu action, and a status hint when a text copy contains a whole table.
+
 ### 2026-10-12 · 0.5.1
 
 - **The table's outer corners are outside it for Enter** (user report: with a table at line 1, column 1, there was no way to push it down). The 0.3.2 fix that maps an edge caret to the edge cell (so typed text can't land outside a row) made column 1 of the first line "in the first cell", so Enter added a row. Now Enter at the start of the first line, or at the end of the last line past its closing pipe or border, falls through to plain editing (`at_table_edge`). Typing at those spots still goes into the cell, and Enter anywhere else still adds a row: a plain line break mid-table would split it.

@@ -531,6 +531,14 @@ impl App {
     pub fn table_action(&mut self, a: TableAction) {
         match a {
             TableAction::Help => return self.table_help(),
+            TableAction::CopyTsv => {
+                self.select_cells(TableAction::SelectAll);
+                if let Some((tsv, n)) = self.cell_sel_text() {
+                    let dest = self.clipboard.copy(&tsv);
+                    self.info(format!("Copied {n} cells to {dest} as tab-separated text: paste into a spreadsheet"));
+                }
+                return;
+            }
             TableAction::New(style) => return self.insert_table(style),
             TableAction::Convert(style) => return self.convert_table(style),
             TableAction::Format => return self.format_table(),
@@ -547,7 +555,7 @@ impl App {
         let body_r = r.max(2);
         // (ops, target cell, message when refused)
         let (ops, target, refused): (Option<crate::table::Ops>, (usize, usize), &str) = match a {
-            TableAction::Format | TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll | TableAction::New(_) | TableAction::Convert(_) | TableAction::Help => unreachable!(),
+            TableAction::Format | TableAction::SelectRow | TableAction::SelectCol | TableAction::SelectAll | TableAction::New(_) | TableAction::Convert(_) | TableAction::Help | TableAction::CopyTsv => unreachable!(),
             TableAction::RowAbove => (Some(t.insert_row(rope, body_r, le)), (body_r, c), ""),
             TableAction::RowBelow => (Some(t.insert_row(rope, r.max(1) + 1, le)), (r.max(1) + 1, c), ""),
             TableAction::DeleteRow => (t.delete_row(rope, r), (r.min(t.rows.len().saturating_sub(2)).max(2), c), "Only body rows can be deleted (not the header or the --- row)"),
@@ -598,7 +606,8 @@ impl App {
             "Typing keeps the columns lined up.".into(),
             "Select cells: drag across them, Shift+arrows at".into(),
             "a cell's edge, or click the --- under a column.".into(),
-            "Ctrl+C copies cells for a spreadsheet; paste".into(),
+            "Ctrl+C copies cells for a spreadsheet (or use".into(),
+            "Copy for a spreadsheet in this menu); paste".into(),
             "spreadsheet cells into a table to fill it.".into(),
             "Enter at the very start or end of a table".into(),
             "moves it down / opens a line below it.".into(),
@@ -1020,6 +1029,22 @@ mod tests {
         a.tab.buf.sel = crate::buffer::Selection::caret(end);
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(text(&a), format!("\n{src}\n"));
+    }
+
+    #[test]
+    fn copy_for_a_spreadsheet_and_the_hint_for_text_copies() {
+        let src = "Intro\n┌───┬────┐\n│ A │ B  │\n├───┼────┤\n│ 1 │ 23 │\n└───┴────┘\nEnd\n";
+        let mut a = app_with(src, 60, 12);
+        a.clipboard = crate::clipboard::Clipboard::internal_only();
+        caret_at(&mut a, "23");
+        a.table_action(crate::app::TableAction::CopyTsv);
+        assert_eq!(a.clipboard.paste(), "A\tB\n1\t23\n");
+        // A plain text copy of the whole table copies the text, with a hint.
+        a.cell_sel = None;
+        a.tab.buf.sel = crate::buffer::Selection { anchor: 0, head: a.tab.buf.len_chars() };
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.clipboard.paste(), src);
+        assert!(a.status.as_ref().unwrap().0.contains("Copy for a spreadsheet"));
     }
 
     #[test]

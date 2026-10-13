@@ -154,6 +154,8 @@ pub enum TableAction {
     Convert(crate::table::Style),
     New(crate::table::Style),
     Help,
+    /// Select the whole table and copy it as tab-separated cells.
+    CopyTsv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1233,7 +1235,12 @@ impl App {
         }
         let text = self.tab.buf.selected_text();
         let dest = self.clipboard.copy(&text);
-        self.info(format!("Copied {} chars to {dest}", text.chars().count()));
+        if self.selection_holds_a_table() {
+            let menu = self.keymap.label(Command::TableMenu);
+            self.info(format!("Copied the table as text; for a spreadsheet use {menu} → Copy for a spreadsheet"));
+        } else {
+            self.info(format!("Copied {} chars to {dest}", text.chars().count()));
+        }
     }
 
     fn cut(&mut self) {
@@ -1249,6 +1256,27 @@ impl App {
         let text = self.tab.buf.selected_text();
         self.clipboard.copy(&text);
         self.tab.buf.delete((0, 0), EditKind::Other);
+    }
+
+    /// Does the (text) selection contain a whole table? Looks at no more
+    /// than a few thousand lines.
+    fn selection_holds_a_table(&self) -> bool {
+        let sel = self.tab.buf.sel;
+        let (first, last) = (self.tab.buf.line_of(sel.start()), self.tab.buf.line_of(sel.end()));
+        let mut line = first;
+        while line <= last.min(first + 5000) {
+            if let Some(t) = self.tab.table_at(line) {
+                let rope = self.tab.buf.rope();
+                let (s, e) = t.extent_chars(rope);
+                if sel.start() <= s && sel.end() >= e {
+                    return true;
+                }
+                line = t.last_line() + 1;
+            } else {
+                line += 1;
+            }
+        }
+        false
     }
 
     /// Insert pasted text literally as one undo step, adopting the document's
@@ -1589,6 +1617,7 @@ impl App {
             item("Align column: none", None, TableAction::Align(Align::None)),
             item("Select row", None, TableAction::SelectRow),
             item("Select column", None, TableAction::SelectCol),
+            item("Copy for a spreadsheet (tab-separated cells)", None, TableAction::CopyTsv),
             item("Select table (Ctrl+C copies as tab-separated)", None, TableAction::SelectAll),
         ];
         let mut items = items;

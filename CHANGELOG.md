@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2 (2026-10-13): copy a table for a spreadsheet
+
+- **Table menu → Copy for a spreadsheet** copies the whole table as tab-separated cells in one step. Pasting into LibreOffice Calc (or any spreadsheet) gives real cells for Markdown, ASCII and box tables alike.
+- Copying a whole table as ordinary text still copies it exactly as written (for pasting into another editor or document), and the status bar now points to Copy for a spreadsheet. Spreadsheets split plain text unreliably: Markdown happened to split on `|` (with a junk `---` row), while box tables landed in a single column.
+
 ## 0.5.1 (2026-10-12): getting around a table
 
 - **Enter at the very start of a table** (column 1 of its first line) now breaks the line like in plain text, so you can push a table down to write above it. Before, it added a table row.
