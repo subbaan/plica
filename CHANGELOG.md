@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.7 (2026-10-13): README wording
+
+- The README and man page explain that the default colours come from the theme picked with Kitty's theme selector (`kitty +kitten themes`), when there is one.
+
 ## 0.5.6 (2026-10-13): closing the terminal window
 
 - **Fixed:** closing the terminal window while Plica was running left Plica behind, using a full CPU core, until it was killed. It now exits within a fraction of a second and saves unsaved work as a recovery snapshot, offered the next time you start Plica (your file itself is never written).

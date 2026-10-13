@@ -49,7 +49,7 @@ TODO, FIXME, IMPORTANT, IDEA and DONE are highlighted out of the box. Add your o
 
 ### Colours
 
-With nothing configured, Plica follows `~/.config/kitty/current-theme.conf` if it exists, else uses its Dracula theme. Built-in themes: Dracula, Gruvbox, Nord, Solarized Dark and Light (`--theme NAME`). `--palette PATH` (or `PLICA_PALETTE`) follows any Kitty-format colour file, reloading live; a broken or missing file keeps the last good colours. Preferences → Appearance has a preview, a high-contrast mode, and `[appearance.colours]` in the config overrides individual colours. `NO_COLOR` is respected.
+With nothing configured, Plica uses the theme you picked with Kitty's theme selector (`kitty +kitten themes`, which writes `~/.config/kitty/current-theme.conf`) and follows it when you pick another. Without one it uses its Dracula theme. Built-in themes: Dracula, Gruvbox, Nord, Solarized Dark and Light (`--theme NAME`). `--palette PATH` (or `PLICA_PALETTE`) follows any Kitty-format colour file, reloading live; a broken or missing file keeps the last good colours. Preferences → Appearance has a preview, a high-contrast mode, and `[appearance.colours]` in the config overrides individual colours. `NO_COLOR` is respected.
 
 ### Files, encodings and safety
 
