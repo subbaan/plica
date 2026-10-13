@@ -14,11 +14,12 @@ Plica is a mouse-friendly terminal text editor (Mousepad/Gedit feel, not Vim/Ema
 - `make perf`: 35 MB large-file responsiveness test.
 - `make e2e`: pty end-to-end test (`tests/e2e/pty_harness.py`; needs python-pexpect + python-pyte). Sends real key and SGR mouse sequences, checks rendered cells and colours, saved bytes, live palette reload and terminal teardown. Uses a temp dir, never the user's real palette or state dir.
 - `./plica --check-palette PATH`: print the parsed palette, resolved roles and contrast ratios.
-- Version lives only in `Cargo.toml` (`ui::VERSION` reads it).
+- Version lives in `Cargo.toml` (`ui::VERSION` reads it); `docs/plica.1` repeats it.
+- User docs: `README.md`, `docs/plica.1` (man page; a test checks it covers every `--help` option), `docs/keys.md` (generated: `./plica --config /dev/null --print-keys > docs/keys.md`; a test fails when it's stale).
 
 ## Workflow for every update
 
-1. Bump the version in `Cargo.toml` (patch by default).
+1. Bump the version in `Cargo.toml` (patch by default) and in the `.TH` line of `docs/plica.1` (a test checks they match).
 2. Add a `CHANGELOG.md` entry (user-facing changes).
 3. Add an `ARCHITECTURE.md` log entry for any design decision, workaround, or bug whose cause isn't obvious from the code.
 4. Run `make check` and `make e2e`.

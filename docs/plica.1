@@ -1,0 +1,146 @@
+.\" Man page for Plica. Read in place with: man -l docs/plica.1
+.TH PLICA 1 "2026-10-13" "Plica 0.5.3" "User Commands"
+.SH NAME
+plica \- a mouse-friendly terminal text editor
+.SH SYNOPSIS
+.B plica
+[\fIOPTIONS\fR] [\fB+\fILINE\fR] [\fIFILE\fR...]
+.SH DESCRIPTION
+.B plica
+is a text editor for the terminal that works like a desktop editor:
+typing edits straight away, the usual shortcuts work (Ctrl+S, Ctrl+Z,
+Ctrl+F, ...), and the mouse clicks, drags, scrolls and presses buttons.
+.PP
+Each \fIFILE\fR opens in its own tab; a file that doesn't exist yet is
+created when first saved.
+Markdown tables and bordered plain-text tables are edited cell by cell,
+words and phrases can be highlighted without changing the file, and the
+colours can follow a Kitty-format colour file live.
+.PP
+Press \fBF1\fR inside Plica for the keys and \fBF9\fR for Preferences.
+.SH OPTIONS
+.TP
+.BI + LINE
+Start with the caret on \fILINE\fR of the first file.
+.TP
+.BI \-\-palette " PATH"
+Follow a Kitty-format colour file, reloading it whenever it changes.
+.TP
+.BI \-\-theme " NAME"
+Use a built-in theme: \fBdracula\fR, \fBgruvbox\fR, \fBnord\fR,
+\fBsolarized-dark\fR, \fBsolarized-light\fR, or \fBterminal\fR (the
+terminal's own colours).
+.TP
+.B \-\-builtin\-theme
+Same as \fB\-\-theme dracula\fR.
+.TP
+.BI \-\-encoding " NAME"
+Read the files as \fINAME\fR (for example \fBwindows-1252\fR,
+\fBshift_jis\fR, \fButf-16le\fR) instead of detecting their encoding.
+.TP
+.BI \-\-config " PATH"
+Use this config file instead of the default.
+.TP
+.B \-\-print\-config
+Print a commented default config and exit.
+.TP
+.B \-\-print\-keys
+Print every key, with the bindings from your config, as a Markdown table,
+and exit.
+.TP
+.B \-\-check\-config
+Check the config file, list any problems and exit (status 1 if there are any).
+.TP
+.BI \-\-check\-palette " PATH"
+Parse a colour file, print the resolved colours and contrast ratios, and exit.
+.TP
+.BR \-h ", " \-\-help
+Print help and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.TP
+.B \-\-
+Treat every following argument as a file name.
+.SH KEYS
+The usual desktop keys: \fBCtrl+S\fR save, \fBCtrl+Shift+S\fR or \fBF12\fR
+save as, \fBCtrl+O\fR open, \fBCtrl+N\fR new tab, \fBCtrl+W\fR close tab,
+\fBCtrl+Q\fR quit, \fBCtrl+Z\fR / \fBCtrl+Y\fR undo / redo,
+\fBCtrl+C\fR / \fBCtrl+X\fR / \fBCtrl+V\fR copy / cut / paste,
+\fBCtrl+A\fR select all, \fBCtrl+F\fR find, \fBCtrl+H\fR replace,
+\fBF3\fR / \fBShift+F3\fR next / previous match, \fBCtrl+G\fR go to line,
+\fBCtrl+PageUp\fR / \fBCtrl+PageDown\fR previous / next tab,
+\fBAlt+1\fR ... \fBAlt+9\fR go to a tab.
+.PP
+\fBAlt+Z\fR soft wrap, \fBAlt+L\fR line numbers, \fBAlt+W\fR show
+whitespace, \fBAlt+M\fR give the mouse to the terminal,
+\fBAlt+H\fR or \fBF8\fR highlight the word in this document,
+\fBAlt+E\fR or \fBF7\fR encoding menu,
+\fBAlt+T\fR or \fBF6\fR table menu, \fBF9\fR Preferences, \fBF1\fR help.
+.PP
+Every command can be rebound in the \fB[keys]\fR section of the config.
+.B plica \-\-print\-keys
+lists them all, including the fixed keys for tables, the find bar and the mouse.
+.SH TABLES
+A table is a Markdown table (a header row followed by a row such as
+\fB|---|---|\fR) or a fully bordered plain-text table drawn with
+\fB+---+\fR and \fB|\fR or with Unicode box-drawing characters.
+Text merely laid out in columns with spaces is never treated as a table.
+.PP
+In a table, \fBTab\fR / \fBShift+Tab\fR move between cells (Tab in the last
+cell adds a row), \fBEnter\fR adds a row, \fBAlt+Up\fR / \fBAlt+Down\fR move
+the row, and typing keeps the column lined up.
+\fBEsc\fR gives plain keys in that table until pressed again.
+The table menu (\fBAlt+T\fR, \fBF6\fR, or a right-click) inserts tables,
+adds, deletes and moves rows and columns, aligns columns, converts between
+Markdown, ASCII and box tables, and copies a table as tab-separated cells
+for a spreadsheet.
+Dragging across cells selects them; \fBCtrl+C\fR then copies them as
+tab-separated text, and pasting tab-separated text into a table fills it.
+.SH ENCODINGS
+UTF-8, UTF-16 and about 35 older encodings are detected and written back
+unchanged.
+Bytes that are not valid in the file's encoding are shown as \fB\exNN\fR
+and saved as they were.
+If a character can't be stored in the file's encoding, saving stops and
+offers UTF-8 instead.
+Binary files and UTF-32 are refused.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/plica/config.toml
+Settings, highlight groups and key bindings
+(default \fI~/.config/plica/config.toml\fR).
+Preferences (F9) edits it, keeping comments.
+.TP
+.I $XDG_CONFIG_HOME/plica/documents.toml
+Highlights for individual documents, by full path.
+.TP
+.I $XDG_STATE_HOME/plica/recovery/
+Snapshots of unsaved work, offered back after a crash
+(default \fI~/.local/state/plica/recovery/\fR).
+.TP
+.I $XDG_CONFIG_HOME/kitty/current-theme.conf
+Followed for colours when no theme or palette is configured, if it exists.
+.SH ENVIRONMENT
+.TP
+.B PLICA_PALETTE
+A colour file to follow, like \fB\-\-palette\fR.
+.TP
+.B NO_COLOR
+Use the terminal's default colours (when the theme is \fBauto\fR and no
+palette is configured).
+.TP
+.BR XDG_CONFIG_HOME ", " XDG_STATE_HOME
+Where the config and the recovery snapshots live.
+.SH EXIT STATUS
+0 on success; 1 if a file can't be opened, an option is wrong, or
+\fB\-\-check\-config\fR found problems.
+.SH NOTES
+Many terminals keep Ctrl+Shift+letter, Ctrl+Tab and Shift+click for
+themselves; every such action has a fallback (F12 for Save As, Ctrl+Y for
+redo, Alt+click to extend a selection).
+With XFCE Terminal's menu bar shown, use F6, F7 and F8 instead of Alt+T,
+Alt+E and Alt+H.
+In tmux, enable \fBset -g mouse on\fR.
+.SH SEE ALSO
+The README, \fIdocs/keys.md\fR and \fICHANGELOG.md\fR in the source tree.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.3 (2026-10-13): README, man page, key cheat sheet
+
+The start of Phase 6 (v1.0 readiness).
+
+- **README.md:** what Plica is, building and installing it yourself, everyday use, tables, highlights, colours, files and encodings, configuration, terminal notes, limits (file sizes and formats), and development.
+- **Man page** `docs/plica.1` (`man -l docs/plica.1`).
+- **`plica --print-keys`** prints every key as a Markdown table, including the bindings from your own config. `docs/keys.md` is the default version.
+- A name check found no other editor or package called Plica (web search, crates.io).
+
 ## 0.5.2 (2026-10-13): copy a table for a spreadsheet
 
 - **Table menu → Copy for a spreadsheet** copies the whole table as tab-separated cells in one step. Pasting into LibreOffice Calc (or any spreadsheet) gives real cells for Markdown, ASCII and box tables alike.

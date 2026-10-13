@@ -58,6 +58,11 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-13 · 0.5.3
+
+- **Docs that can't drift silently:** `docs/keys.md` is generated from the `Command` table plus a list of fixed keys (`keymap::cheat_sheet`, also `--print-keys`), and a unit test fails when the file differs from the generator. Another test fails when the man page misses an option listed in `--help` or names a different version. The README is hand-written; its claims were checked against the code when written (key handling, paths, limits).
+- **Licence not chosen** (the user's call before any public release). All dependencies are permissive (mostly MIT/Apache-2.0; also ISC, Zlib, BSD-3-Clause and Unicode data licences), and the built-in themes adapt MIT-licensed palettes.
+
 ### 2026-10-13 · 0.5.2
 
 - **A text copy stays the source text; spreadsheet data is an explicit choice** (user report: pasting tables into Calc only worked for Markdown). Offering both on the clipboard at once (text/plain plus TSV or text/html) isn't possible through wl-copy/xclip/xsel, which serve one type per call. Silently copying TSV for whole-table selections would break pasting a table into another document. So: a one-step "Copy for a spreadsheet" menu action, and a status hint when a text copy contains a whole table.

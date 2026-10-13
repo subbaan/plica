@@ -59,6 +59,7 @@ Options:
                        utf-16le) instead of detecting their encoding
   --config PATH        Use this config file instead of the default
   --print-config       Print a commented default config and exit
+  --print-keys         Print all keys (with your config's bindings) as Markdown
   --check-config       Check the config file, list any problems and exit
   --check-palette PATH Parse a palette file, print the resolved colours and exit
   -h, --help           Print help
@@ -83,11 +84,12 @@ struct Args {
     check_palette: Option<PathBuf>,
     config: Option<PathBuf>,
     check_config: bool,
+    print_keys: bool,
     encoding: Option<encoding::Encoding>,
 }
 
 fn parse_args() -> Result<Option<Args>> {
-    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: None, check_palette: None, config: None, check_config: false, encoding: None };
+    let mut a = Args { files: Vec::new(), line: None, palette: None, builtin: None, check_palette: None, config: None, check_config: false, print_keys: false, encoding: None };
     let mut it = std::env::args_os().skip(1);
     let mut only_files = false;
     while let Some(arg) = it.next() {
@@ -138,6 +140,10 @@ fn parse_args() -> Result<Option<Args>> {
                 }
                 "--check-config" => {
                     a.check_config = true;
+                    continue;
+                }
+                "--print-keys" => {
+                    a.print_keys = true;
                     continue;
                 }
                 "--" => {
@@ -219,6 +225,10 @@ fn run() -> Result<()> {
     };
     if let Some(p) = &args.check_palette {
         return check_palette(p, &cfg.highlights, &theme::Adjust { high_contrast: cfg.high_contrast, overrides: cfg.colour_overrides.clone() });
+    }
+    if args.print_keys {
+        print!("{}", keymap::cheat_sheet(&cfg.keymap()));
+        return Ok(());
     }
     if args.check_config {
         let shown = config_path.as_ref().map_or_else(|| "(no config path)".into(), |p| p.display().to_string());
@@ -438,4 +448,20 @@ fn run() -> Result<()> {
 
 fn recovery_unavailable(app: &App) -> bool {
     app.recovery.is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    /// The man page documents every option in --help and names this version.
+    #[test]
+    fn man_page_is_current() {
+        let man = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/plica.1")).expect("docs/plica.1");
+        let man_flat = man.replace("\\-", "-");
+        for line in super::HELP.lines() {
+            let Some(opt) = line.split_whitespace().next().filter(|w| w.starts_with("--")) else { continue };
+            let opt = opt.trim_end_matches(',');
+            assert!(man_flat.contains(opt), "docs/plica.1 doesn't mention {opt}");
+        }
+        assert!(man.contains(&format!("\"Plica {}\"", super::ui::VERSION)), "docs/plica.1 .TH should name Plica {}", super::ui::VERSION);
+    }
 }
