@@ -19,7 +19,7 @@ make build        # release build; ./plica links to target/release/plica
 
 There is deliberately no `make install`. To install, copy the binary somewhere on your `PATH`, for example `cp target/release/plica ~/.local/bin/`. The man page is `docs/plica.1` (`man -l docs/plica.1` to read it in place).
 
-Runtime requirements: Linux and a terminal with mouse support. Optional: `wl-copy` / `xclip` / `xsel` for the system clipboard (otherwise Plica uses the terminal's OSC 52 clipboard).
+Runtime requirements: Linux and a terminal with mouse support. Release packages (`make dist`) are built against glibc 2.39, so they need a 2024-or-newer distribution; anywhere else, build from source. See `docs/release.md`. Optional: `wl-copy` / `xclip` / `xsel` for the system clipboard (otherwise Plica uses the terminal's OSC 52 clipboard).
 
 ## Using it
 

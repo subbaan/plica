@@ -1,3 +1,5 @@
 /target
 # build symlink, recreated by `make build`
 /plica
+# release packages, made by `make dist`
+/dist

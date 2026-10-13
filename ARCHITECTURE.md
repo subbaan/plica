@@ -58,6 +58,12 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-13 · 0.5.4
+
+- **Release packaging without publishing:** `make dist` only builds files. Tagging and `gh release create` are documented in `docs/release.md` and stay manual, because publishing is the user's decision. The target never deletes anything (the user's rule): it copies over a versioned staging folder.
+- **Third-party notices** come from `cargo tree -e normal --target x86_64-unknown-linux-gnu` (only crates actually compiled in, not dev or other-platform dependencies) plus each crate's LICENSE/NOTICE/COPYING files from the registry. Identical texts are printed once (Apache-2.0 repeated ~100 times took the file from 900 KB to 260 KB).
+- **Portability:** the binary needs glibc ≥ 2.39 (built on Manjaro). A static musl build would fix that but needs the musl target installed (`rust-musl` package or rustup), which is left to the user.
+
 ### 2026-10-13 · 0.5.3
 
 - **Docs that can't drift silently:** `docs/keys.md` is generated from the `Command` table plus a list of fixed keys (`keymap::cheat_sheet`, also `--print-keys`), and a unit test fails when the file differs from the generator. Another test fails when the man page misses an option listed in `--help` or names a different version. The README is hand-written; its claims were checked against the code when written (key handling, paths, limits).

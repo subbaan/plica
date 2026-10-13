@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4 (2026-10-13): release packaging
+
+- **`make dist`** builds a release package, `dist/plica-VERSION-x86_64-linux.tar.gz`, with a SHA-256 checksum. It contains the binary, README, changelog, man page, key cheat sheet, the licence once chosen, and `THIRD_PARTY_LICENSES.md`.
+- **`make notices`** regenerates `THIRD_PARTY_LICENSES.md`: every crate compiled into Plica, with its licence and licence files (identical texts given once).
+- `docs/release.md`: the steps for a public release (licence, donations button, tagging, publishing) and a note on binary portability (glibc 2.39; musl for a binary that runs everywhere).
+
 ## 0.5.3 (2026-10-13): README, man page, key cheat sheet
 
 The start of Phase 6 (v1.0 readiness).
