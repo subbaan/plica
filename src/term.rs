@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 static MOUSE_ON: AtomicBool = AtomicBool::new(false);
+/// stdin was the terminal at startup (a hung-up tty no longer passes isatty).
+static STDIN_TTY: AtomicBool = AtomicBool::new(false);
 
 pub struct TermGuard {
     pub quit_signal: Arc<AtomicBool>,
@@ -49,6 +51,7 @@ impl TermGuard {
             prev(info);
         }));
 
+        STDIN_TTY.store(rustix::termios::isatty(rustix::stdio::stdin()), Ordering::SeqCst);
         enable_raw_mode()?;
         ACTIVE.store(true, Ordering::SeqCst);
         let mut out = io::stdout();
@@ -111,4 +114,21 @@ pub fn restore() {
     );
     let _ = disable_raw_mode();
     let _ = out.flush();
+}
+
+/// True once the terminal has gone away (its window was closed): the tty
+/// reports a hangup. Checked every loop pass, because SIGHUP may not arrive
+/// (nohup, or Plica not in the foreground process group).
+pub fn hung_up() -> bool {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    if !STDIN_TTY.load(Ordering::SeqCst) {
+        return false;
+    }
+    let stdin = rustix::stdio::stdin();
+    let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
+    let zero = Timespec { tv_sec: 0, tv_nsec: 0 };
+    match poll(&mut fds, Some(&zero)) {
+        Ok(_) => fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL),
+        Err(_) => false,
+    }
 }

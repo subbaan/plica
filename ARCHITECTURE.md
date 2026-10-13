@@ -58,6 +58,15 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-13 · 0.5.6
+
+- **Closing the terminal window spun Plica at 100% CPU** (user report). A hung-up tty polls readable and `read()` returns 0 (or EIO). crossterm 0.29's default mio event source loops on `read()` until it gets an event or WouldBlock, so it never returned and the SIGHUP flag was never checked. Fixed in three layers:
+  - crossterm's **`use-dev-tty`** event source (enabled through a direct `crossterm` dependency; Cargo unifies it with ratatui's) breaks out on a 0-byte read and returns an EIO, so `event::poll` comes back within its timeout.
+  - **`term::hung_up()`** polls stdin for POLLHUP every loop pass, because SIGHUP doesn't always arrive (Plica in another session or process group). It uses an isatty result recorded at startup: on a hung-up tty, isatty itself fails with EIO.
+  - Terminal I/O errors in the main loop now end it like a signal, so unsaved tabs are snapshotted, instead of `?` returning straight out.
+
+  Exit messages use `writeln!` to stderr, because `eprintln!` panics when stderr is the dead terminal. e2e session 17 covers both cases (`setsid -w` gives the no-SIGHUP one). Harness note: a pty test must drain the master, answer the cursor-position and DA queries (or startup stalls for about 2 s per query), and not hold the master open in a blocked `read()`.
+
 ### 2026-10-13 · 0.5.5
 
 - **Licence: MIT** (the user's choice; copyright "subbaan", their public GitHub name).

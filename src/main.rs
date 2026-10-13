@@ -211,7 +211,8 @@ fn check_palette(path: &Path, highlights: &highlight::Highlights, adjust: &theme
 fn main() {
     if let Err(e) = run() {
         term::restore();
-        eprintln!("plica: {e:#}");
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "plica: {e:#}");
         std::process::exit(1);
     }
 }
@@ -362,13 +363,20 @@ fn run() -> Result<()> {
     let mut palette_due: Option<Instant> = None;
     let mut redraw = true;
     let mut killed = false;
+    // A terminal error ends the loop like a signal does, so unsaved work is
+    // still snapshotted; it is reported after teardown.
+    let mut io_error: Option<std::io::Error> = None;
     while !app.quit {
-        if guard.quit_signal.load(Ordering::SeqCst) {
+        // The window was closed (SIGHUP, or the tty hung up without one).
+        if guard.quit_signal.load(Ordering::SeqCst) || term::hung_up() {
             killed = true;
             break;
         }
         if redraw {
-            terminal.draw(|f| ui::draw(f, &mut app))?;
+            if let Err(e) = terminal.draw(|f| ui::draw(f, &mut app)) {
+                io_error = Some(e);
+                break;
+            }
             redraw = false;
         }
         app.tick_recovery(false);
@@ -399,13 +407,26 @@ fn run() -> Result<()> {
             continue;
         }
         let timeout = if palette_due.is_some() || !doc_due.is_empty() || app.status.is_some() { Duration::from_millis(50) } else { Duration::from_millis(250) };
-        if event::poll(timeout)? {
+        let ready = match event::poll(timeout) {
+            Ok(r) => r,
+            Err(e) => {
+                io_error = Some(e);
+                break;
+            }
+        };
+        if ready {
             // Drain everything queued before redrawing (fast typing, paste, drags).
-            loop {
-                app.handle_event(event::read()?);
-                if !event::poll(Duration::ZERO)? {
-                    break;
+            let drained = (|| -> std::io::Result<()> {
+                loop {
+                    app.handle_event(event::read()?);
+                    if !event::poll(Duration::ZERO)? {
+                        return Ok(());
+                    }
                 }
+            })();
+            if let Err(e) = drained {
+                io_error = Some(e);
+                break;
             }
             redraw = true;
         } else {
@@ -422,7 +443,7 @@ fn run() -> Result<()> {
         }
     }
 
-    if killed {
+    if killed || io_error.is_some() {
         // Snapshot every unsaved tab now; the next start offers them.
         app.tick_recovery(true);
     } else {
@@ -435,13 +456,20 @@ fn run() -> Result<()> {
     }
     drop(terminal);
     drop(guard);
+    // stderr may be the closed terminal: write, don't eprintln! (which panics).
+    use std::io::Write;
+    let mut err = std::io::stderr();
     let dirty = app.all_tabs().filter(|t| t.buf.is_dirty()).count();
-    if killed && dirty > 0 {
-        if app.recovery.is_some() {
-            eprintln!("plica: terminated with {dirty} unsaved document(s); start plica again to recover them");
+    if (killed || io_error.is_some()) && dirty > 0 {
+        let _ = if app.recovery.is_some() {
+            writeln!(err, "plica: terminated with {dirty} unsaved document(s); start plica again to recover them")
         } else {
-            eprintln!("plica: terminated with {dirty} unsaved document(s) and no recovery directory; changes lost");
-        }
+            writeln!(err, "plica: terminated with {dirty} unsaved document(s) and no recovery directory; changes lost")
+        };
+    }
+    if let Some(e) = io_error {
+        let _ = writeln!(err, "plica: terminal error: {e}");
+        std::process::exit(1);
     }
     Ok(())
 }

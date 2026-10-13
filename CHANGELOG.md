@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.6 (2026-10-13): closing the terminal window
+
+- **Fixed:** closing the terminal window while Plica was running left Plica behind, using a full CPU core, until it was killed. It now exits within a fraction of a second and saves unsaved work as a recovery snapshot, offered the next time you start Plica (your file itself is never written).
+
 ## 0.5.5 (2026-10-13): MIT licence, static release binary
 
 - Plica is **MIT licensed** (`LICENSE`).

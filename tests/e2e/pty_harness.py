@@ -31,7 +31,7 @@ def check(name, cond, extra=""):
         fails.append(name)
 
 class Term:
-    def __init__(self, args, env_extra=None):
+    def __init__(self, args, env_extra=None, wrap=()):
         env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor",
                    XDG_STATE_HOME=os.path.join(WORK, "state"), XDG_CONFIG_HOME=os.path.join(WORK, "config"), DISPLAY="", WAYLAND_DISPLAY="")
         env.pop("NO_COLOR", None)
@@ -40,7 +40,8 @@ class Term:
         self.screen = pyte.Screen(COLS, ROWS)
         self.stream = pyte.ByteStream(self.screen)
         self.raw = b""
-        self.p = pexpect.spawn(BIN, args, env=env, dimensions=(ROWS, COLS))
+        cmd = [*wrap, BIN, *args]
+        self.p = pexpect.spawn(cmd[0], cmd[1:], env=env, dimensions=(ROWS, COLS))
         # Answer device-attribute queries like a real terminal would.
         self.screen.write_process_input = lambda d: self.p.send(d)
         self.pump(1.0)
@@ -731,6 +732,36 @@ t.send("\x13", 0.4)
 check("bordered: converted to a Unicode box table", "│ MPC    │ Sampler │       │\n└────────┴─────────┴───────┘" in open(bdoc).read(), open(bdoc).read())
 t.send("\x11", 0.4)
 if t.p.isalive(): t.send("n", 0.4)
+
+# ---------------------------------------------------------------- session 17: terminal window closed
+# Closing the window hangs up the tty. Plica must exit (not spin on the dead
+# terminal) and snapshot unsaved work, whether or not SIGHUP reaches it: in
+# its own session (setsid) the kernel's SIGHUP goes elsewhere.
+def proc_gone(pid):
+    try:
+        return open(f"/proc/{pid}/stat").read().split()[2] == "Z"
+    except FileNotFoundError:
+        return True
+hdoc = os.path.join(WORK, "hangup.txt")
+for label, wrap in (("SIGHUP", ()), ("no SIGHUP", ("setsid", "-w"))):
+    for f in snaps():
+        os.remove(os.path.join(rec_dir, f))
+    t = Term([hdoc], wrap=wrap)
+    t.send(f"left open {label}", 0.5)
+    pid = t.p.pid if not wrap else int(open(f"/proc/{t.p.pid}/task/{t.p.pid}/children").read().split()[0])
+    t.p.ptyproc.fileobj.close()  # the terminal window goes away
+    t.p.ptyproc.closed = t.p.closed = True
+    end = time.time() + 2
+    while time.time() < end and not proc_gone(pid):
+        time.sleep(0.05)
+    gone = proc_gone(pid)
+    if not gone:
+        os.kill(pid, signal.SIGKILL)
+    check(f"window closed ({label}): plica exits", gone)
+    check(f"window closed ({label}): unsaved work snapshotted", any(f"left open {label}" in x for x in snap_texts()), str(snap_texts()))
+    if not wrap:
+        os.waitpid(pid, 0)
+check("window closed: the file itself is untouched", not os.path.exists(hdoc))
 
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
