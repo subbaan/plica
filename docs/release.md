@@ -4,7 +4,7 @@ Steps for a public release. Nothing here runs automatically, and publishing is a
 
 ## Once, before the first public release
 
-1. **Licence:** add a `LICENSE` file (for example MIT, `MIT OR Apache-2.0`, or GPL-3.0-or-later) and set `license = "…"` in `Cargo.toml`. `make dist` includes `LICENSE` automatically once it exists.
+1. **Licence:** MIT (`LICENSE`, `license = "MIT"` in `Cargo.toml`). Done in 0.5.5.
 2. **Donations (optional):** add `.github/FUNDING.yml`, for example `github: subbaan` or `ko_fi: name`, so GitHub shows a Sponsor button, and mention it in the README.
 3. **Repository visibility:** make `github.com/subbaan/plica` public.
 
@@ -24,11 +24,4 @@ Steps for a public release. Nothing here runs automatically, and publishing is a
 
 ## Portability of the binary
 
-The binary is built against the build machine's glibc: currently glibc **2.39**, so it runs on Arch/Manjaro, Fedora 40+, Ubuntu 24.04+ and Debian 13. It does not run on Debian 12 or Ubuntu 22.04. For a binary that runs on any x86-64 Linux, build statically with musl:
-
-```sh
-# Arch/Manjaro: sudo pacman -S rust-musl     (or: rustup target add x86_64-unknown-linux-musl)
-cargo build --release --target x86_64-unknown-linux-musl
-```
-
-Building on an older distribution, for example in a container, also works. Users can always build from source with `make build`.
+`make dist` packages a **static musl build** (`target/x86_64-unknown-linux-musl/release/plica`), which runs on any x86-64 Linux whatever its glibc. It needs the musl target (`sudo pacman -S rust-musl` on Arch/Manjaro, or `rustup target add x86_64-unknown-linux-musl`). Measured against the glibc build: the same on the 35 MB perf test, about 30% slower only for typing that widens a column of a 50 000-row table (musl's allocator). The everyday `./plica` stays the glibc build.

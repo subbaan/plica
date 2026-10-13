@@ -7,7 +7,7 @@ import json, os, subprocess, sys
 
 def main(out):
     tree = subprocess.run(
-        ["cargo", "tree", "-e", "normal", "--target", "x86_64-unknown-linux-gnu", "--prefix", "none", "--format", "{p}"],
+        ["cargo", "tree", "-e", "normal", "--target", "x86_64-unknown-linux-musl", "--prefix", "none", "--format", "{p}"],
         capture_output=True, text=True, check=True).stdout
     shipped = set()
     for line in tree.splitlines():

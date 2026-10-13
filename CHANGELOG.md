@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.5 (2026-10-13): MIT licence, static release binary
+
+- Plica is **MIT licensed** (`LICENSE`).
+- Release packages (`make dist`) now contain a **static binary** that runs on any x86-64 Linux, including older distributions such as Debian 12 and Ubuntu 22.04. It's as fast as the normal build for everyday editing.
+
 ## 0.5.4 (2026-10-13): release packaging
 
 - **`make dist`** builds a release package, `dist/plica-VERSION-x86_64-linux.tar.gz`, with a SHA-256 checksum. It contains the binary, README, changelog, man page, key cheat sheet, the licence once chosen, and `THIRD_PARTY_LICENSES.md`.

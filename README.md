@@ -19,7 +19,7 @@ make build        # release build; ./plica links to target/release/plica
 
 There is deliberately no `make install`. To install, copy the binary somewhere on your `PATH`, for example `cp target/release/plica ~/.local/bin/`. The man page is `docs/plica.1` (`man -l docs/plica.1` to read it in place).
 
-Runtime requirements: Linux and a terminal with mouse support. Release packages (`make dist`) are built against glibc 2.39, so they need a 2024-or-newer distribution; anywhere else, build from source. See `docs/release.md`. Optional: `wl-copy` / `xclip` / `xsel` for the system clipboard (otherwise Plica uses the terminal's OSC 52 clipboard).
+Runtime requirements: Linux and a terminal with mouse support. Release packages (`make dist`) contain a static binary that runs on any x86-64 Linux. Optional: `wl-copy` / `xclip` / `xsel` for the system clipboard (otherwise Plica uses the terminal's OSC 52 clipboard).
 
 ## Using it
 
@@ -91,4 +91,4 @@ make perf    # 35 MB responsiveness test
 
 ## Licence
 
-Not chosen yet. The built-in Dracula, Gruvbox, Nord and Solarized colours are adapted from MIT-licensed themes, and the Rust libraries Plica uses are all permissively licensed (mostly MIT / Apache-2.0, plus ISC, Zlib, BSD-3-Clause and the Unicode data licence). A public release will need a licence file and those notices.
+MIT, see [`LICENSE`](LICENSE). The built-in Dracula, Gruvbox, Nord and Solarized colours are adapted from MIT-licensed themes. The Rust libraries Plica is built from are all permissively licensed; their licences are collected in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) (`make notices` regenerates it).

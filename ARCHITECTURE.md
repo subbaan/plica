@@ -58,6 +58,11 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-13 · 0.5.5
+
+- **Licence: MIT** (the user's choice; copyright "subbaan", their public GitHub name).
+- **Release binary: static musl.** It is statically linked (`ldd`: not dynamic), so the glibc 2.39 requirement is gone. Measured: the 35 MB perf test is identical. Typing that widens a column of a 50 000-row table is about 30% slower (Markdown 190 → 250 ms, ASCII 130 → 180 ms), because musl's malloc is slower than glibc's. That's acceptable for that extreme case; a faster allocator (mimalloc) would add a C build dependency, so it isn't used. Third-party notices list the musl target's dependency tree.
+
 ### 2026-10-13 · 0.5.4
 
 - **Release packaging without publishing:** `make dist` only builds files. Tagging and `gh release create` are documented in `docs/release.md` and stay manual, because publishing is the user's decision. The target never deletes anything (the user's rule): it copies over a versioned staging folder.
