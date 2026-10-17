@@ -763,6 +763,29 @@ for label, wrap in (("SIGHUP", ()), ("no SIGHUP", ("setsid", "-w"))):
         os.waitpid(pid, 0)
 check("window closed: the file itself is untouched", not os.path.exists(hdoc))
 
+# ---------------------------------------------------------------- session 18: overwrite mode
+mdoc = os.path.join(WORK, "map.txt")
+open(mdoc, "w").write("#....#\n#....#\n")
+t = Term([mdoc])
+t.send("d", 0.4)  # Discard the snapshots session 17 left
+check("overwrite: starts in insert mode", "OVR" not in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x1b[B\x1b[C")  # Down, Right
+mark = len(t.raw)
+t.send("\x1b[2~")  # Insert
+check("overwrite: Insert shows OVR", " OVR " in t.line(ROWS - 1), t.line(ROWS - 1))
+check("overwrite: block cursor", b"\x1b[2 q" in t.raw[mark:], repr(t.raw[mark:][-200:]))
+t.send("@~~~~~")
+check("overwrite: typing replaces, line end extends", "#@~~~~~" in t.line(2) and "#....#" in t.line(1), t.line(2))
+t.send("\x13")
+check("overwrite: saved bytes", open(mdoc, "rb").read() == b"#....#\n#@~~~~~\n", repr(open(mdoc, "rb").read()))
+mark = len(t.raw)
+t.click(t.col_of(ROWS - 1, "OVR"), ROWS - 1)
+check("overwrite: clicking OVR switches back", "Insert: typing inserts" in t.line(ROWS - 1) and "OVR" not in t.line(ROWS - 1), t.line(ROWS - 1))
+check("overwrite: bar cursor again", b"\x1b[6 q" in t.raw[mark:], repr(t.raw[mark:][-200:]))
+t.send("x\x1a")
+t.send("\x11", 0.6)
+check("overwrite: quits", not t.p.isalive())
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

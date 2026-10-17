@@ -58,6 +58,14 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-17 · 0.5.8
+
+- **Overwrite mode follows Gedit/Mousepad:** Insert toggles it (the remappable `toggle_overwrite` command), and a click on the status bar's INS/OVR field toggles it too. Only typed characters overtype (`Buffer::overtype`, one grapheme at a time). Paste, Tab, Enter, Backspace and Delete behave as in insert mode, and a selection is replaced as usual. The line ending is never overwritten, so overtyping at the end of a line extends it instead of joining lines. The overtype is a Delete + Insert pair in one `Typing` transaction, so it coalesces and undoes exactly like normal typing.
+- **Tables:** in a cell, overtype replaces only the cell's text (up to `content.end`), never padding or a pipe; past the text it inserts and the column re-pads as usual. A paste into a cell always inserts.
+- **Block cursor:** `ui::draw` sets `App::caret_block` only when the terminal cursor is the document caret (not a prompt, find bar or picker field, which always insert), and the main loop sends `SetCursorStyle` only when that changes. `term::restore` already resets the user's cursor shape on exit.
+- The compact status bar (shown while a message is too long) still shows `OVR`, because the mode changes what typing does; `INS` is dropped there.
+- e2e harness: session 17 leaves a recovery snapshot behind, so later sessions start with the recovery dialog (session 18 discards it).
+
 ### 2026-10-13 · 0.5.6
 
 - **Closing the terminal window spun Plica at 100% CPU** (user report). A hung-up tty polls readable and `read()` returns 0 (or EIO). crossterm 0.29's default mio event source loops on `read()` until it gets an event or WouldBlock, so it never returned and the SIGHUP flag was never checked. Fixed in three layers:

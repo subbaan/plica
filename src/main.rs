@@ -362,6 +362,7 @@ fn run() -> Result<()> {
 
     let mut palette_due: Option<Instant> = None;
     let mut redraw = true;
+    let mut block_cursor = false;
     let mut killed = false;
     // A terminal error ends the loop like a signal does, so unsaved work is
     // still snapshotted; it is reported after teardown.
@@ -376,6 +377,10 @@ fn run() -> Result<()> {
             if let Err(e) = terminal.draw(|f| ui::draw(f, &mut app)) {
                 io_error = Some(e);
                 break;
+            }
+            if app.caret_block != block_cursor {
+                block_cursor = app.caret_block;
+                let _ = term::set_block_cursor(block_cursor);
             }
             redraw = false;
         }

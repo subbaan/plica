@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.8 (2026-10-17): overwrite mode
+
+- **Overwrite (overtype) mode:** press **Insert**, or click `INS` in the status bar, to switch. In overwrite mode the status bar shows `OVR`, the cursor is a block, and each typed character replaces the one after the caret (a whole character, accents included). At the end of a line typing extends the line, so lines never join. Paste, Backspace, Delete, Tab and Enter work as before, and typing over a selection replaces it. A run of overtyping undoes like normal typing.
+- In a table cell, overwriting replaces the cell's text only, never its padding or a border; past the cell's text it inserts and the column grows.
+- The command is `toggle_overwrite` in `[keys]`, for keyboards without an Insert key.
+
 ## 0.5.7 (2026-10-13): README wording
 
 - The README and man page explain that the default colours come from the theme picked with Kitty's theme selector (`kitty +kitten themes`), when there is one.

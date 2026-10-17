@@ -74,6 +74,11 @@ impl TermGuard {
     }
 }
 
+/// Block cursor for overwrite mode, the usual bar otherwise.
+pub fn set_block_cursor(on: bool) -> io::Result<()> {
+    execute!(io::stdout(), if on { SetCursorStyle::SteadyBlock } else { SetCursorStyle::SteadyBar })
+}
+
 /// Toggle mouse reporting. With it off, the terminal's own selection works
 /// (the "mouse bypass" from the plan, §3.2).
 pub fn set_mouse(on: bool) -> io::Result<()> {

@@ -1,5 +1,5 @@
 .\" Man page for Plica. Read in place with: man -l docs/plica.1
-.TH PLICA 1 "2026-10-13" "Plica 0.5.7" "User Commands"
+.TH PLICA 1 "2026-10-17" "Plica 0.5.8" "User Commands"
 .SH NAME
 plica \- a mouse-friendly terminal text editor
 .SH SYNOPSIS
@@ -77,6 +77,11 @@ whitespace, \fBAlt+M\fR give the mouse to the terminal,
 \fBAlt+H\fR or \fBF8\fR highlight the word in this document,
 \fBAlt+E\fR or \fBF7\fR encoding menu,
 \fBAlt+T\fR or \fBF6\fR table menu, \fBF9\fR Preferences, \fBF1\fR help.
+.PP
+\fBInsert\fR, or a click on \fBINS\fR/\fBOVR\fR in the status bar, switches
+overwrite mode: typed characters replace the ones after the caret (block
+cursor, \fBOVR\fR in the status bar). The line ending is never replaced, and
+paste, Backspace, Delete, Tab and Enter work as in insert mode.
 .PP
 Every command can be rebound in the \fB[keys]\fR section of the config.
 .B plica \-\-print\-keys

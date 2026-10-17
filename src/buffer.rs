@@ -260,6 +260,22 @@ impl Buffer {
         self.commit(edits, before, kind);
     }
 
+    /// Overwrite mode: `text` replaces the grapheme after the caret, never
+    /// the line ending (so at the end of a line it inserts). A selection is
+    /// replaced like in insert mode.
+    pub fn overtype(&mut self, text: &str, kind: EditKind) {
+        let pos = self.sel.head;
+        if !self.sel.is_empty() || pos >= self.line_end(self.line_of(pos)) {
+            self.insert(text, kind);
+            return;
+        }
+        let before = self.sel;
+        let edits = vec![self.raw_delete(pos, self.next_grapheme(pos)), self.raw_insert(pos, text)];
+        self.sel = Selection::caret(pos + text.chars().count());
+        self.preferred_col = None;
+        self.commit(edits, before, kind);
+    }
+
     /// Delete the selection, or the range given by `range_if_empty`.
     pub fn delete(&mut self, range_if_empty: (usize, usize), kind: EditKind) {
         let before = self.sel;
@@ -573,6 +589,25 @@ mod tests {
         assert!(b.redo());
         assert_eq!(b.rope().to_string(), "hello w");
         assert_eq!(b.sel, Selection::caret(7));
+    }
+
+    #[test]
+    fn overtype_replaces_graphemes_but_not_line_endings() {
+        let mut b = Buffer::from_str("#.é\u{301}.\r\nxy");
+        b.sel = Selection::caret(1);
+        for c in ["@", "~", "~", "~", "~"] {
+            b.overtype(c, EditKind::Typing);
+        }
+        // e + combining accent is one grapheme; past the line's end it inserts.
+        assert_eq!(b.rope().to_string(), "#@~~~~\r\nxy");
+        assert_eq!(b.sel, Selection::caret(6));
+        assert!(b.undo());
+        assert_eq!(b.rope().to_string(), "#.é\u{301}.\r\nxy");
+        assert_eq!(b.sel, Selection::caret(1));
+        // A selection is replaced as in insert mode.
+        b.sel = Selection { anchor: 0, head: 2 };
+        b.overtype("Z", EditKind::Typing);
+        assert_eq!(b.rope().to_string(), "Zé\u{301}.\r\nxy");
     }
 
     #[test]

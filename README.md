@@ -33,6 +33,8 @@ Press **F1** inside Plica for the keys, **F9** for Preferences. The full key lis
 
 The title bar has clickable Prefs, Save, Table, Wrap, Mouse and Help buttons (when the window is wide enough). Alt+M hands the mouse to the terminal, for its own text selection.
 
+**Overwrite mode:** Insert (or clicking `INS` in the status bar) switches between inserting and overwriting. While the status bar shows `OVR` and the cursor is a block, typed characters replace the ones after the caret, handy for ASCII art and maps. The line's end is never overwritten; there, typing extends the line. Paste, Backspace, Delete, Tab and Enter work as usual. On a keyboard without an Insert key, bind `toggle_overwrite` to another key in the config.
+
 ### Tables
 
 - **Make one:** Alt+T (or F6, or the Table button) outside a table: a new Markdown, Unicode box or ASCII table. Or type a Markdown header row followed by `|---|---|`.

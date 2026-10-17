@@ -290,6 +290,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             caret_pos = Some(Position { x: (text.x + col as u16).min(text.right().saturating_sub(1)), y: text.y + i as u16 });
         }
     }
+    let doc_caret = caret_pos;
 
     draw_scrollbar(buf, app, scrollbar, rows.len(), &p);
     app.rendered_rows = rows;
@@ -361,6 +362,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Some(i) => Rect { x: rx + right[..i].chars().count() as u16, y: status.y, width: enc.chars().count() as u16, height: 1 },
         None => Rect::default(),
     };
+    let ovr = format!(" {} ", if app.overwrite { "OVR" } else { "INS" });
+    app.regions.status_overwrite = match right.find(&ovr) {
+        Some(i) => Rect { x: rx + right[..i].chars().count() as u16, y: status.y, width: 5, height: 1 },
+        None => Rect::default(),
+    };
 
     if app.show_help {
         draw_help(buf, app, area, &p);
@@ -396,6 +402,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(pos) = caret_pos {
         f.set_cursor_position(pos);
     }
+    app.caret_block = app.overwrite && caret_pos.is_some() && caret_pos == doc_caret;
 }
 
 fn draw_tab_bar(buf: &mut TermBuf, app: &mut App, title: Rect, surface: Style, accent: Style, p: &Painter) {
@@ -631,8 +638,10 @@ fn status_right(app: &App, compact: bool) -> String {
     }
     let mut parts = vec![format!("Ln {}, Col {}", line + 1, col)];
     if compact {
-        return format!(" {} ", parts[0]);
+        // Overwrite mode stays visible: it changes what typing does.
+        return if app.overwrite { format!(" {} │ OVR ", parts[0]) } else { format!(" {} ", parts[0]) };
     }
+    parts.push(if app.overwrite { "OVR" } else { "INS" }.into());
     if let Some((_, cs)) = app.cell_sel_live() {
         let (r0, c0, r1, c1) = cs.rect();
         let rows = (r0..=r1).filter(|&r| r != 1).count();
@@ -707,6 +716,7 @@ fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
         (C::ScrollUp, C::ScrollDown),
         (C::Preferences, C::HighlightWord),
         (C::Encoding, C::TableMenu),
+        (C::ToggleOverwrite, C::FormatTable),
     ] {
         lines.push(pair(a, b));
     }

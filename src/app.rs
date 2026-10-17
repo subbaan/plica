@@ -119,6 +119,8 @@ pub struct Regions {
     pub prompt_field: Rect,
     /// The encoding name in the status bar (click: encoding menu).
     pub status_encoding: Rect,
+    /// INS/OVR in the status bar (click: toggle overwrite mode).
+    pub status_overwrite: Rect,
     /// The picker popup, its filter field and its list rows.
     pub picker_box: Rect,
     pub picker_field: Rect,
@@ -201,6 +203,11 @@ pub struct App {
     pub keymap: Keymap,
     pub show_whitespace: bool,
     pub mouse_enabled: bool,
+    /// Overwrite (overtype) mode: typing replaces the character after the caret.
+    pub overwrite: bool,
+    /// The terminal cursor is the document caret in overwrite mode (drawn as
+    /// a block); set by `ui::draw`.
+    pub caret_block: bool,
     /// X11/Wayland primary selection: select to copy, middle-click to paste.
     pub primary_selection: bool,
     pub highlights: crate::highlight::Highlights,
@@ -274,6 +281,8 @@ impl App {
             keymap: Keymap::defaults(),
             show_whitespace: false,
             mouse_enabled: true,
+            overwrite: false,
+            caret_block: false,
             primary_selection: true,
             highlights: crate::highlight::Highlights::default(),
             adjust: theme::Adjust::default(),
@@ -952,7 +961,11 @@ impl App {
             }
             (KeyCode::Char(c), _) if !ctrl && !alt => {
                 let mut s = [0u8; 4];
-                self.tab.buf.insert(c.encode_utf8(&mut s), EditKind::Typing);
+                if self.overwrite {
+                    self.tab.buf.overtype(c.encode_utf8(&mut s), EditKind::Typing);
+                } else {
+                    self.tab.buf.insert(c.encode_utf8(&mut s), EditKind::Typing);
+                }
             }
 
             // -- motion --
@@ -1017,6 +1030,7 @@ impl App {
                 self.info(if self.show_whitespace { "Whitespace shown" } else { "Whitespace hidden" });
             }
             Command::ToggleMouse => self.toggle_mouse(),
+            Command::ToggleOverwrite => self.toggle_overwrite(),
             // Scrolling leaves the caret where it is (and off-screen if need be).
             Command::ScrollUp => return self.scroll_rows(-1),
             Command::ScrollDown => return self.scroll_rows(1),
@@ -1301,6 +1315,16 @@ impl App {
         self.tab.scroll_x = 0;
         self.tab.table_scroll_x = 0;
         self.info(if self.wrap { "Soft wrap on" } else { "Soft wrap off" });
+    }
+
+    fn toggle_overwrite(&mut self) {
+        self.overwrite = !self.overwrite;
+        let key = self.keymap.label(Command::ToggleOverwrite);
+        if self.overwrite {
+            self.info(format!("Overwrite: typing replaces characters ({key} or click OVR: insert)"));
+        } else {
+            self.info("Insert: typing inserts characters");
+        }
     }
 
     fn toggle_mouse(&mut self) {
@@ -1838,6 +1862,10 @@ impl App {
                 }
                 if contains(self.regions.status_encoding, m.column, m.row) {
                     self.encoding_menu();
+                    return;
+                }
+                if contains(self.regions.status_overwrite, m.column, m.row) {
+                    self.toggle_overwrite();
                     return;
                 }
                 if contains(self.regions.scrollbar, m.column, m.row) {
@@ -2549,6 +2577,28 @@ pub(crate) mod tests {
         a.handle_event(ev(MouseEventKind::Down(MouseButton::Left)));
         a.handle_event(ev(MouseEventKind::Up(MouseButton::Left)));
         assert_eq!(a.tab.buf.selected_text(), "beta\n");
+    }
+
+    #[test]
+    fn insert_key_and_status_click_toggle_overwrite() {
+        let mut a = app_with("#....#\n#....#\n", 40, 10);
+        a.tab.buf.sel = Selection::caret(1);
+        key(&mut a, KeyCode::Insert, KeyModifiers::NONE);
+        assert!(a.overwrite);
+        type_str(&mut a, "@ ~~~~~");
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(text(&a), "#@...#\n#....#\n", "a space starts a new undo step, as in insert mode");
+        key(&mut a, KeyCode::Char('y'), KeyModifiers::CONTROL);
+        assert_eq!(text(&a), "#@ ~~~~~\n#....#\n", "the line end is never overwritten");
+        // Paste inserts, as in insert mode.
+        a.tab.buf.sel = Selection::caret(10);
+        a.handle_event(Event::Paste("ab".into()));
+        assert_eq!(text(&a), "#@ ~~~~~\n#ab....#\n");
+        a.regions.status_overwrite = Rect { x: 30, y: 11, width: 5, height: 1 };
+        a.handle_event(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: 31, row: 11, modifiers: KeyModifiers::NONE }));
+        assert!(!a.overwrite);
+        type_str(&mut a, "c");
+        assert_eq!(text(&a), "#@ ~~~~~\n#abc....#\n");
     }
 
     #[test]

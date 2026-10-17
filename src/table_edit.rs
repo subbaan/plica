@@ -335,7 +335,7 @@ impl App {
                 self.table_action(TableAction::RowDown);
                 true
             }
-            KeyCode::Char(c) if !ctrl && !alt => self.table_type(&t, &c.to_string()),
+            KeyCode::Char(c) if !ctrl && !alt => self.table_type(&t, &c.to_string(), self.overwrite),
             KeyCode::Backspace if !shift => self.table_erase(&t, false, ctrl || alt),
             KeyCode::Delete if !shift => self.table_erase(&t, true, ctrl || alt),
             _ => false,
@@ -372,7 +372,7 @@ impl App {
         if text.contains(['\n', '\r', '\t']) || self.cell_sel_live().is_some() {
             return self.table_paste_grid(&t, text);
         }
-        self.table_type(&t, text)
+        self.table_type(&t, text, false)
     }
 
     /// The cell holding the selection (not in the delimiter row). A caret
@@ -425,12 +425,15 @@ impl App {
         true
     }
 
-    fn table_type(&mut self, t: &Table, text: &str) -> bool {
+    /// Type `text` into the caret's cell; `overtype` replaces the grapheme
+    /// after the caret, within the cell's text only (never padding or a pipe).
+    fn table_type(&mut self, t: &Table, text: &str, overtype: bool) -> bool {
         let Some((r, c)) = self.sel_cell(t) else { return false };
         let sel = self.tab.buf.sel;
         let (a, b) = if sel.is_empty() {
             let p = self.edit_point(t, r, c);
-            (p, p)
+            let end = t.rows[r].cells[c].content.end;
+            (p, if overtype && p < end { self.tab.buf.next_grapheme(p).min(end) } else { p })
         } else {
             (sel.start(), sel.end())
         };
@@ -740,6 +743,19 @@ mod tests {
         key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
         key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
         assert_eq!(text(&a), T, "undo steps restore the structure");
+    }
+
+    #[test]
+    fn overwrite_stays_inside_the_cells_text() {
+        let mut a = app_with(T, 60, 12);
+        a.overwrite = true;
+        caret_at(&mut a, "Samp");
+        type_str(&mut a, "Drum");
+        assert!(text(&a).contains("| MPC    | Drum |\n"), "{}", text(&a));
+        type_str(&mut a, "s");
+        assert!(text(&a).contains("| MPC    | Drums |\n"), "past the text it inserts: {}", text(&a));
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(text(&a), T);
     }
 
     #[test]

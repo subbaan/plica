@@ -60,6 +60,7 @@ commands! {
     ToggleLineNumbers => "toggle_line_numbers", "Line numbers on/off", ["alt+l"];
     ToggleWhitespace => "toggle_whitespace", "Show whitespace on/off", ["alt+w"];
     ToggleMouse => "toggle_mouse", "Give the mouse to the terminal", ["alt+m"];
+    ToggleOverwrite => "toggle_overwrite", "Overwrite (overtype) mode on/off", ["insert"];
     ScrollUp => "scroll_up", "Scroll up a line", ["ctrl+up"];
     ScrollDown => "scroll_down", "Scroll down a line", ["ctrl+down"];
     Help => "help", "Help", ["f1"];
