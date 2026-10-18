@@ -934,7 +934,11 @@ fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
     let section = Section::ALL[state.section];
     match section {
         Section::Keys => {
-            buf.set_stringn(rx, inner.y, "Rebind in config.toml [keys]; see plica --print-config", rw as usize, dim);
+            let label = " Edit config.toml ";
+            let bw = label.len() as u16;
+            buf.set_stringn(rx, inner.y, label, rw as usize, st.add_modifier(Modifier::BOLD | Modifier::REVERSED));
+            hits.push((Rect { x: rx, y: inner.y, width: bw.min(rw), height: 1 }, PrefsHit::EditConfig));
+            buf.set_stringn(rx + bw + 1, inner.y, "(Enter) to rebind keys under [keys]", rw.saturating_sub(bw + 1) as usize, dim);
             let visible = (inner.height.saturating_sub(4)) as usize;
             for (i, cmd) in crate::keymap::Command::ALL.iter().skip(state.keys_scroll).take(visible).enumerate() {
                 let line = format!("{:<22}{}", cmd.describe(), app.keymap.label(*cmd));

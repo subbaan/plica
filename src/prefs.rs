@@ -27,6 +27,7 @@ pub struct Settings {
     pub high_contrast: bool,
     pub recovery: bool,
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    pub tables: bool,
     pub table_realign: bool,
     pub highlights: crate::highlight::Highlights,
 }
@@ -46,9 +47,25 @@ impl Settings {
             high_contrast: c.high_contrast,
             recovery: c.recovery,
             fallback_encoding: c.fallback_encoding,
+            tables: c.tables,
             table_realign: c.table_realign,
             highlights: c.highlights.clone(),
         }
+    }
+}
+
+impl Settings {
+    /// `self` with every setting that differs between `old` and `new` taken
+    /// from `new`: what the user changed by editing config.toml. Settings
+    /// the file didn't change keep their session value (e.g. a palette
+    /// given with --palette).
+    pub fn merge_changed(&self, old: &Settings, new: &Settings) -> Settings {
+        let mut s = self.clone();
+        macro_rules! take {
+            ($($f:ident),*) => { $(if old.$f != new.$f { s.$f = new.$f.clone(); })* };
+        }
+        take!(tab_width, wrap, line_numbers, show_whitespace, indent, mouse, primary_selection, theme, palette, high_contrast, recovery, fallback_encoding, tables, table_realign, highlights);
+        s
     }
 }
 
@@ -66,6 +83,7 @@ pub enum Row {
     HighContrast,
     Recovery,
     FallbackEncoding,
+    Tables,
     TableRealign,
 }
 
@@ -109,7 +127,7 @@ impl Section {
             Section::Interaction => &[Row::Mouse, Row::Primary],
             Section::Appearance => &[Row::Theme, Row::Palette, Row::HighContrast],
             Section::Files => &[Row::Recovery, Row::FallbackEncoding],
-            Section::Tables => &[Row::TableRealign],
+            Section::Tables => &[Row::Tables, Row::TableRealign],
             _ => &[],
         }
     }
@@ -130,6 +148,7 @@ impl Row {
             Row::HighContrast => "High contrast",
             Row::Recovery => "Crash recovery",
             Row::FallbackEncoding => "Other encodings",
+            Row::Tables => "Tables",
             Row::TableRealign => "Realign as you type",
         }
     }
@@ -148,6 +167,7 @@ impl Row {
             Row::HighContrast => "Text contrast 7:1 instead of 4.5:1",
             Row::Recovery => "Snapshot unsaved work for crash recovery",
             Row::FallbackEncoding => "Files that aren't UTF-8: auto guesses",
+            Row::Tables => "Off: tables are plain text (ASCII art, maps)",
             Row::TableRealign => "Re-pad a column as its cells grow or shrink",
         }
     }
@@ -174,6 +194,7 @@ impl Row {
             Row::Palette => s.palette.as_ref().map_or_else(|| "(none)".into(), |p| tilde(p)),
             Row::Recovery => b(s.recovery),
             Row::FallbackEncoding => format!("‹ {} ›", s.fallback_encoding.map_or("auto", |e| e.name())),
+            Row::Tables => b(s.tables),
             Row::TableRealign => b(s.table_realign),
         }
     }
@@ -196,6 +217,7 @@ impl Row {
             Row::HighContrast => s.high_contrast = !s.high_contrast,
             Row::Recovery => s.recovery = !s.recovery,
             Row::FallbackEncoding => s.fallback_encoding = cycle(&crate::encoding::fallback_choices(), s.fallback_encoding, dir),
+            Row::Tables => s.tables = !s.tables,
             Row::TableRealign => s.table_realign = !s.table_realign,
             // Edited through a text prompt instead.
             Row::Palette => {}
@@ -222,6 +244,8 @@ pub enum PrefsHit {
     Save,
     Apply,
     Cancel,
+    /// Keybindings page: open config.toml in a tab.
+    EditConfig,
     Hl(crate::prefs_hl::HlHit),
 }
 
@@ -254,6 +278,7 @@ impl App {
             high_contrast: self.adjust.high_contrast,
             recovery: self.recovery_enabled,
             fallback_encoding: self.fallback_encoding,
+            tables: self.tables,
             table_realign: self.table_realign,
             highlights: self.highlights.clone(),
         }
@@ -268,6 +293,13 @@ impl App {
         self.primary_selection = s.primary_selection;
         self.highlights = s.highlights.clone();
         self.table_realign = s.table_realign;
+        if s.tables != old.tables {
+            self.tables = s.tables;
+            self.cell_sel = None;
+            for i in 0..self.tab_count() {
+                self.tab_at_mut(i).tables_enabled = s.tables;
+            }
+        }
         if s.tab_width != old.tab_width || s.indent != old.indent {
             self.tab_width = s.tab_width;
             self.indent_mode = s.indent;
@@ -392,6 +424,7 @@ impl App {
                     self.prefs_change(r, 1);
                 }
             }
+            KeyCode::Enter if section == Section::Keys => self.edit_config(),
             KeyCode::Enter | KeyCode::Char(' ') => {
                 if let Some(r) = row {
                     self.prefs_change(r, if r == Row::Palette { 0 } else { 1 });
@@ -422,6 +455,7 @@ impl App {
                 }
             }
             PrefsHit::Save | PrefsHit::Apply | PrefsHit::Cancel => self.prefs_finish(hit),
+            PrefsHit::EditConfig => self.edit_config(),
             PrefsHit::Hl(h) => self.on_prefs_hl_click(h),
         }
     }
@@ -442,6 +476,74 @@ impl App {
                     self.warn(format!("Could not save preferences: {e:#}"));
                 }
             },
+        }
+    }
+
+    /// Open config.toml in a tab, at its [keys] section. Unsaved changes in
+    /// the dialog are saved first, so the file shows what's in effect (if
+    /// the file is broken they stay applied, and the tab is how to fix it).
+    /// A missing file opens as an unsaved tab holding the commented template.
+    pub fn edit_config(&mut self) {
+        let Some(path) = self.config_path.clone() else {
+            self.warn("No config location (HOME unset)");
+            return;
+        };
+        if path.exists() && !path.is_file() {
+            self.warn(format!("The config, {}, isn't a file", path.display()));
+            return;
+        }
+        let Some(p) = self.prefs.take() else { return };
+        let mut note = None;
+        if self.current_settings() != p.original {
+            note = Some(match self.save_settings_to_config() {
+                Ok(_) => "Preferences saved".to_string(),
+                Err(e) => format!("Preferences applied but not saved ({e:#})"),
+            });
+        }
+        let existed = path.exists();
+        if !self.open_file(&path) {
+            return;
+        }
+        if !existed && self.tab.buf.len_chars() == 0 {
+            self.tab.buf.insert(&config::default_text(), crate::buffer::EditKind::Other);
+        }
+        let rope = self.tab.buf.rope();
+        let keys_line = (0..rope.len_lines()).find(|&l| rope.line(l).to_string().trim_end() == "[keys]");
+        if let Some(l) = keys_line {
+            self.tab.buf.sel = crate::buffer::Selection::caret(self.tab.buf.line_start(l));
+            self.tab.top_line = l;
+            self.tab.top_row = 0;
+        }
+        let what = format!("Editing {}: saving it applies your changes", tilde(&path));
+        match note {
+            Some(n) if n.contains("not saved") => self.warn(format!("{n}. {what}")),
+            Some(n) => self.info(format!("{n}. {what}")),
+            None => self.info(what),
+        }
+    }
+
+    /// After config.toml was saved from a tab: apply what changed in it.
+    /// `before` is the file's config before this save.
+    pub fn config_saved(&mut self, before: &config::Config) {
+        let Some(path) = self.config_path.clone() else { return };
+        let (cfg, warnings) = config::load(&path);
+        self.keymap = cfg.keymap();
+        let s = self.current_settings().merge_changed(&Settings::from_config(before), &Settings::from_config(&cfg));
+        let overrides_changed = before.colour_overrides != cfg.colour_overrides;
+        if overrides_changed {
+            self.adjust.overrides = cfg.colour_overrides.clone();
+        }
+        self.apply_settings(&s);
+        if overrides_changed {
+            let (c, note) = colours::decide(self.theme_choice, self.palette_setting.as_deref());
+            let (theme, source, _) = colours::load(c, note, &self.adjust);
+            self.theme = theme;
+            self.theme_source = source;
+            self.palette_watch_dirty = true;
+        }
+        match warnings.first() {
+            Some(w) => self.warn(format!("Saved; config applied with {} problem(s): {w}", warnings.len())),
+            None => self.info(format!("Saved {}; settings and keys applied", tilde(&path))),
         }
     }
 
@@ -527,6 +629,7 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
     set("files", "recovery", s.recovery.into(), s.recovery == d.recovery);
     let fallback = s.fallback_encoding.map_or("auto", |e| e.name());
     set("files", "fallback_encoding", fallback.into(), s.fallback_encoding == d.fallback_encoding);
+    set("tables", "enabled", s.tables.into(), s.tables == d.tables);
     set("tables", "realign", s.table_realign.into(), s.table_realign == d.table_realign);
     if hl_changed {
         set("highlights", "enabled", s.highlights.enabled.into(), s.highlights.enabled == d.highlights.enabled);

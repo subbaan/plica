@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.9 (2026-10-18): tables switch, edit config from Preferences
+
+- **Tables can be switched off:** Preferences → Tables → Tables, or `enabled = false` under `[tables]`. Every table is then plain text: no cell keys, re-padding or table menu. Handy for ASCII art and game maps drawn with `+---+` borders. It takes effect straight away in every tab.
+- **Edit config.toml** button on Preferences → Keybindings (or Enter on that page). It opens your config in a tab, at the `[keys]` section; if you don't have a config yet, it opens the commented template, unsaved. Unsaved changes in the dialog are saved first, so the file matches what's in effect.
+- **Saving config.toml in Plica applies it:** changed keys, settings and colour overrides take effect at once, and problems in the file show in the status bar. Settings you didn't change in the file keep their current values (for example a palette given with `--palette`).
+
 ## 0.5.8 (2026-10-17): overwrite mode
 
 - **Overwrite (overtype) mode:** press **Insert**, or click `INS` in the status bar, to switch. In overwrite mode the status bar shows `OVR`, the cursor is a block, and each typed character replaces the one after the caret (a whole character, accents included). At the end of a line typing extends the line, so lines never join. Paste, Backspace, Delete, Tab and Enter work as before, and typing over a selection replaces it. A run of overtyping undoes like normal typing.

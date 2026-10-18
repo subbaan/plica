@@ -690,6 +690,10 @@ impl App {
     /// Format table: line up every row of the table under the caret, as one
     /// undo step, keeping the caret in its cell.
     pub fn format_table(&mut self) {
+        if !self.tables {
+            self.info("Tables are off: turn them on in Preferences → Tables");
+            return;
+        }
         let Some(t) = self.caret_table() else {
             self.warn("The caret isn't in a Markdown table");
             return;

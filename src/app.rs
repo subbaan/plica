@@ -237,6 +237,8 @@ pub struct App {
     pub picker: Option<Picker<PickChoice>>,
     /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Recognise tables (off: tables are plain text everywhere).
+    pub tables: bool,
     /// Re-pad a table column as its cells grow or shrink.
     pub table_realign: bool,
     /// Table keys switched off (Esc) in the table starting at this line.
@@ -305,6 +307,7 @@ impl App {
             dialog: None,
             picker: None,
             fallback_encoding: None,
+            tables: true,
             table_realign: true,
             table_keys_off: None,
             table_context: None,
@@ -326,7 +329,7 @@ impl App {
     // ---- tabs ----------------------------------------------------------------------
 
     pub fn tab_opts(&self) -> TabOpts {
-        TabOpts { tab_width: self.tab_width, indent: self.indent_mode, fallback_encoding: self.fallback_encoding }
+        TabOpts { tab_width: self.tab_width, indent: self.indent_mode, fallback_encoding: self.fallback_encoding, tables: self.tables }
     }
 
     pub fn tab_count(&self) -> usize {
@@ -1388,11 +1391,15 @@ impl App {
             return SaveOutcome::Waiting;
         }
         let text = self.tab.buf.rope().to_string();
+        let config_before = self.config_path.as_ref().filter(|p| self.tab.shows(p)).map(|p| crate::config::load(p).0);
         match self.tab.doc.save(&text) {
             Ok(()) => {
                 self.tab.buf.mark_saved();
                 self.tab.disk_conflict = false;
                 self.info(format!("Saved {}", self.tab.doc.display_name()));
+                if let Some(before) = config_before {
+                    self.config_saved(&before);
+                }
                 SaveOutcome::Saved
             }
             Err(e) => {
@@ -1603,6 +1610,10 @@ impl App {
     /// The table menu (its actions also have their own commands).
     pub fn table_menu(&mut self) {
         use crate::table::Style;
+        if !self.tables {
+            self.info("Tables are off: turn them on in Preferences → Tables");
+            return;
+        }
         let Some(cur) = self.caret_table() else {
             // Not in a table: offer to insert one.
             let item = |label: &str, detail: &str, style| picker::Item { label: label.to_string(), detail: detail.to_string(), current: false, value: PickChoice::Table(TableAction::New(style)) };
@@ -1705,7 +1716,7 @@ impl App {
 
     /// Open a file in a tab (switching to it if it is already open).
     /// Returns true on success.
-    fn open_file(&mut self, path: &Path) -> bool {
+    pub(crate) fn open_file(&mut self, path: &Path) -> bool {
         if let Some(i) = (0..self.tab_count()).find(|&i| self.tab_at(i).shows(path)) {
             self.switch_to(i);
             self.info(format!("{} is already open", self.tab.doc.display_name()));
@@ -2275,7 +2286,7 @@ pub(crate) mod tests {
     pub(crate) fn app_with(text: &str, w: u16, h: u16) -> App {
         let caps = Capabilities { keyboard_enhanced: true, truecolor: true };
         let theme = theme::resolve(&theme::dracula());
-        let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto, fallback_encoding: None });
+        let tab = Tab::new(Buffer::from_str(text), crate::document::Document::untitled(), TabOpts { tab_width: 4, indent: IndentMode::Auto, fallback_encoding: None, tables: true });
         let mut a = App::new(tab, theme, ThemeSource::Builtin(theme::Builtin::Dracula), caps);
         a.clipboard = Clipboard::internal_only();
         a.regions.text = Rect { x: 5, y: 1, width: w, height: h };
@@ -2918,6 +2929,50 @@ pub(crate) mod tests {
         let saved = std::fs::read_to_string(&cfg).unwrap();
         assert!(saved.contains("tab_width = 5") && saved.contains("# Plica configuration"), "{saved}");
         assert!(!cfg.with_extension("toml.bak").exists(), "no backup of a file that didn't exist");
+    }
+
+    #[test]
+    fn tables_can_be_switched_off() {
+        let mut a = app_with("| a | b |\n|---|---|\n| 1 | 2 |\n", 40, 10);
+        a.tab.buf.sel = Selection::caret(2);
+        assert!(a.caret_table().is_some());
+        let mut s = a.current_settings();
+        s.tables = false;
+        a.apply_settings(&s);
+        assert!(a.caret_table().is_none());
+        key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(text(&a).starts_with("| \ta | b |"), "Tab is plain text: {}", text(&a));
+        key(&mut a, KeyCode::Char('t'), KeyModifiers::ALT);
+        assert!(a.picker.is_none() && a.status.as_ref().unwrap().0.contains("Tables are off"));
+        // New tabs follow the setting.
+        assert!(!a.tab_opts().tables);
+    }
+
+    #[test]
+    fn edit_config_opens_the_template_and_saving_applies_it() {
+        let d = tempfile::tempdir().unwrap();
+        let cfg = d.path().join("config.toml");
+        let mut a = app_with("", 40, 10);
+        a.config_path = Some(cfg.clone());
+        a.line_numbers = false; // a session-only change the file doesn't touch
+        key(&mut a, KeyCode::F(9), KeyModifiers::NONE);
+        a.prefs.as_mut().unwrap().section = crate::prefs::Section::ALL.iter().position(|s| *s == crate::prefs::Section::Keys).unwrap();
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.prefs.is_none());
+        assert!(a.tab.shows(&cfg) && a.tab.buf.is_dirty() && !cfg.exists(), "template opens unsaved");
+        let head = a.tab.buf.sel.head;
+        assert_eq!(a.tab.buf.rope().slice(head..head + 6).to_string(), "[keys]");
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        a.handle_event(Event::Paste("\nquit = \"f2\"".into()));
+        let t = text(&a).replace("wrap = true", "wrap = false");
+        let len = a.tab.buf.len_chars();
+        a.tab.buf.transact(vec![(0, len, t)]);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(cfg.exists());
+        assert_eq!(a.keymap.lookup(&KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)), Some(Command::Quit));
+        assert!(!a.wrap, "changed in the file: applied");
+        assert!(!a.line_numbers, "not changed in the file: session value kept");
+        assert!(a.status.as_ref().unwrap().0.contains("applied"), "{:?}", a.status);
     }
 
     #[test]

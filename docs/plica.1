@@ -1,5 +1,5 @@
 .\" Man page for Plica. Read in place with: man -l docs/plica.1
-.TH PLICA 1 "2026-10-17" "Plica 0.5.8" "User Commands"
+.TH PLICA 1 "2026-10-18" "Plica 0.5.9" "User Commands"
 .SH NAME
 plica \- a mouse-friendly terminal text editor
 .SH SYNOPSIS
@@ -83,7 +83,9 @@ overwrite mode: typed characters replace the ones after the caret (block
 cursor, \fBOVR\fR in the status bar). The line ending is never replaced, and
 paste, Backspace, Delete, Tab and Enter work as in insert mode.
 .PP
-Every command can be rebound in the \fB[keys]\fR section of the config.
+Every command can be rebound in the \fB[keys]\fR section of the config;
+Preferences \(-> Keybindings \(-> \fBEdit config.toml\fR opens it in a tab, and
+saving it there applies the changes at once.
 .B plica \-\-print\-keys
 lists them all, including the fixed keys for tables, the find bar and the mouse.
 .SH TABLES
@@ -91,6 +93,8 @@ A table is a Markdown table (a header row followed by a row such as
 \fB|---|---|\fR) or a fully bordered plain-text table drawn with
 \fB+---+\fR and \fB|\fR or with Unicode box-drawing characters.
 Text merely laid out in columns with spaces is never treated as a table.
+Preferences \(-> Tables (\fB[tables] enabled = false\fR) turns table
+recognition off, so that every table is plain text (for ASCII art).
 .PP
 In a table, \fBTab\fR / \fBShift+Tab\fR move between cells (Tab in the last
 cell adds a row), \fBEnter\fR adds a row, \fBAlt+Up\fR / \fBAlt+Down\fR move

@@ -244,7 +244,7 @@ fn run() -> Result<()> {
     }
 
     // Load documents before touching the terminal so errors print cleanly.
-    let tab_opts = TabOpts { tab_width: cfg.tab_width, indent: cfg.indent, fallback_encoding: cfg.fallback_encoding };
+    let tab_opts = TabOpts { tab_width: cfg.tab_width, indent: cfg.indent, fallback_encoding: cfg.fallback_encoding, tables: cfg.tables };
     let mut tabs: Vec<Tab> = Vec::new();
     for path in &args.files {
         if tabs.iter().any(|t| t.shows(path)) {
@@ -291,6 +291,7 @@ fn run() -> Result<()> {
     app.keymap = cfg.keymap();
     app.primary_selection = cfg.primary_selection;
     app.table_realign = cfg.table_realign;
+    app.tables = cfg.tables;
     app.fallback_encoding = cfg.fallback_encoding;
     app.highlights = cfg.highlights.clone();
     app.adjust = adjust;

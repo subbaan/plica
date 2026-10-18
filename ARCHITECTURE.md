@@ -58,6 +58,12 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-18 · 0.5.9
+
+- **Tables switch:** `Tab::table_at` returns None when `Tab::tables_enabled` is off. Every table feature goes through it, so one check turns them all off (cell keys, re-padding, sideways scrolling, the column click, the status field). The flag is per tab, copied from `TabOpts` and updated in every tab by `apply_settings`, because `Tab` can't see `App`. The table menu and Format table say tables are off instead of offering to insert a table that wouldn't be recognised.
+- **Edit config.toml from Preferences** opens the file as an ordinary tab instead of a special editor. A missing file opens as an unsaved tab holding `config::default_text()`, so nothing is written until the user saves. If the dialog has unsaved changes they are saved to the file first, otherwise saving the tab would silently drop them. If that save fails (a broken file), the tab still opens, because that's how to fix it.
+- **Saving config.toml applies only what changed in the file:** `save_active` loads the file's config before writing, and `config_saved` merges the settings that differ between before and after into the session's settings (`Settings::merge_changed`). Reapplying the whole file would undo session-only state that has no place in the file: a `--palette`/`--builtin-theme` override, or the Apply button. The keymap is always taken from the file, because nothing changes keys for a session only.
+
 ### 2026-10-17 · 0.5.8
 
 - **Overwrite mode follows Gedit/Mousepad:** Insert toggles it (the remappable `toggle_overwrite` command), and a click on the status bar's INS/OVR field toggles it too. Only typed characters overtype (`Buffer::overtype`, one grapheme at a time). Paste, Tab, Enter, Backspace and Delete behave as in insert mode, and a selection is replaced as usual. The line ending is never overwritten, so overtyping at the end of a line extends it instead of joining lines. The overtype is a Delete + Insert pair in one `Typing` transaction, so it coalesces and undoes exactly like normal typing.

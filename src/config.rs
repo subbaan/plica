@@ -71,6 +71,7 @@ pub struct Config {
     /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     /// Re-pad a table column as its cells change.
+    pub tables: bool,
     pub table_realign: bool,
     pub keymap_overrides: Vec<(Command, Vec<Chord>)>,
     pub highlights: Highlights,
@@ -92,6 +93,7 @@ impl Default for Config {
             colour_overrides: Vec::new(),
             recovery: true,
             fallback_encoding: None,
+            tables: true,
             table_realign: true,
             keymap_overrides: Vec::new(),
             highlights: Highlights::default(),
@@ -227,6 +229,7 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                 _ => false,
             }),
             "tables" => section(val, "tables", &mut w, |k, v, w| match k {
+                "enabled" => known(boolean(v, "tables.enabled", w).map(|b| cfg.tables = b)),
                 "realign" => known(boolean(v, "tables.realign", w).map(|b| cfg.table_realign = b)),
                 _ => false,
             }),
@@ -462,6 +465,7 @@ fallback_encoding = "auto"
 [tables]
 # Markdown pipe tables: Tab / Shift+Tab move between cells, Enter adds a row,
 # Esc gives plain keys in that table; Alt+T (or F6) opens the table menu.
+enabled = true           # false: tables are plain text (e.g. for ASCII art)
 realign = true           # re-pad a column as its cells grow or shrink
 
 [highlights]

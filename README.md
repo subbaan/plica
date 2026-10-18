@@ -43,6 +43,7 @@ The title bar has clickable Prefs, Save, Table, Wrap, Mouse and Help buttons (wh
 - **Cells:** drag across cells (or Shift+arrows at a cell's edge, or click the `---` under a column) to select them. Ctrl+C copies them as tab-separated text, ready for a spreadsheet. Pasting spreadsheet cells (or Markdown rows) into a table fills it, adding rows and columns as needed.
 - **Plain keys:** Esc in a table makes Tab, Enter and Backspace work as in ordinary text there. Esc again switches table keys back on. Enter at the very start or end of a table breaks the line normally.
 - Wide tables don't wrap; the caret's table scrolls sideways on its own.
+- **Tables off:** Preferences → Tables → Tables (`[tables] enabled = false`) treats every table as plain text, for example for ASCII art or game maps drawn with `+---+` borders.
 - Only complete tables count: a Markdown header with its `---` row, or a fully bordered block. Text laid out in columns with spaces is never treated as a table. Markdown tables inside code blocks are left alone; bordered tables count anywhere.
 
 ### Highlights
@@ -62,7 +63,7 @@ With nothing configured, Plica uses the theme you picked with Kitty's theme sele
 
 ### Configuration
 
-`~/.config/plica/config.toml` (or `$XDG_CONFIG_HOME/plica/config.toml`). Preferences (F9) edits it for you, keeping your comments. `plica --print-config` prints a fully commented default, and `plica --check-config` lists any problems. Every command can be rebound in `[keys]`.
+`~/.config/plica/config.toml` (or `$XDG_CONFIG_HOME/plica/config.toml`). Preferences (F9) edits it for you, keeping your comments. `plica --print-config` prints a fully commented default, and `plica --check-config` lists any problems. Every command can be rebound in `[keys]`. Preferences → Keybindings → **Edit config.toml** opens the file in a Plica tab (the commented template if you don't have one yet); saving it applies your changes at once.
 
 ## Terminals
 

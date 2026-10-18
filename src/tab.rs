@@ -16,6 +16,8 @@ pub struct TabOpts {
     pub indent: IndentMode,
     /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Recognise tables (off: every line is plain text).
+    pub tables: bool,
 }
 
 pub struct Tab {
@@ -39,6 +41,8 @@ pub struct Tab {
     pub uid: u64,
     /// The configured fallback encoding, for reloads.
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
+    /// Recognise tables at all (Preferences → Tables).
+    pub tables_enabled: bool,
     /// Tables recognised in the current buffer version.
     tables: RefCell<TableCache>,
     /// Recovery bookkeeping: buffer key last seen / snapshotted, and when.
@@ -71,6 +75,7 @@ impl Tab {
             disk_conflict: false,
             uid: NEXT_TAB_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             fallback_encoding: opts.fallback_encoding,
+            tables_enabled: opts.tables,
             tables: RefCell::default(),
             seen_key,
             changed_at: now,
@@ -118,6 +123,9 @@ impl Tab {
     /// The Markdown table containing `line`, if any. Recognised tables
     /// (and lines known not to be in one) are cached until the text changes.
     pub fn table_at(&self, line: usize) -> Option<Rc<Table>> {
+        if !self.tables_enabled {
+            return None;
+        }
         let mut c = self.tables.borrow_mut();
         let key = self.buf.cache_key();
         if c.key != key {

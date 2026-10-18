@@ -786,6 +786,33 @@ t.send("x\x1a")
 t.send("\x11", 0.6)
 check("overwrite: quits", not t.p.isalive())
 
+# ---------------------------------------------------------------- session 19: tables off, edit config from Preferences
+tdoc = os.path.join(WORK, "plain-table.md")
+open(tdoc, "w").write("| a | b |\n|---|---|\n| 1 | 2 |\n")
+cfg_file = os.path.join(WORK, "config", "plica", "config.toml")
+t = Term([tdoc])
+t.send("\x1b[B\x1b[B\x1b[C\x1b[C")  # into the cell "1"
+check("tables off: table recognised first", "Table" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x1b[20~")  # F9
+for _ in range(5):
+    t.send("\t", 0.1)  # to the Tables section
+t.send("\r")
+check("tables off: Preferences shows it off", "[ ] off" in t.text(), t.text())
+t.send("\x1b[Z")  # back to Keybindings
+check("tables off: Keybindings page has the button", "Edit config.toml" in t.text(), t.text())
+row = next(y for y in range(ROWS) if "Edit config.toml" in t.line(y))
+t.click(t.col_of(row, "Edit config.toml"), row)
+t.pump(0.3)
+check("edit config: config.toml opens in a tab", "config.toml" in t.line(0) and "Editing" in t.line(ROWS - 1), t.line(0) + " / " + t.line(ROWS - 1))
+check("edit config: unsaved preference saved first", "enabled = false" in open(cfg_file).read())
+check("edit config: shows the [keys] section", "[keys]" in t.line(1), t.line(1))
+t.send("\x17")  # Ctrl+W: close the (clean) config tab
+t.send("\t")
+check("tables off: Tab inserts a tab in the old table", "Table" not in t.line(ROWS - 1) and "|---|---|" in t.text(), t.line(ROWS - 1))
+t.send("\x11", 0.3)
+t.send("n", 0.6)
+check("tables off: quits", not t.p.isalive())
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)
