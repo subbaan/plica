@@ -169,7 +169,8 @@ fn env_palette() -> Option<PathBuf> {
     std::env::var_os("PLICA_PALETTE").filter(|p| !p.is_empty()).map(|p| app::expand_tilde(&p.to_string_lossy()))
 }
 
-fn check_palette(path: &Path, highlights: &highlight::Highlights, adjust: &theme::Adjust) -> Result<()> {
+fn check_palette(path: &Path, cfg: &config::Config, adjust: &theme::Adjust) -> Result<()> {
+    let highlights = &cfg.highlights;
     let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
     let report = theme::parse_kitty(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     for w in &report.warnings {
@@ -207,6 +208,12 @@ fn check_palette(path: &Path, highlights: &highlight::Highlights, adjust: &theme
         };
         println!("highlight {:<12} fg {} bg {}: drawn {fg} on {bg}{lifted}, contrast {:.2}", g.name, spec(g.fg), spec(g.bg), theme::contrast(fg, bg));
     }
+    // Syntax colours (`[syntax.colours]` or the defaults) as they would be drawn.
+    for k in syntax::Kind::ALL {
+        let (Some(c), Some(fg)) = (k.colour(&cfg.syntax_colours), k.resolve(&cfg.syntax_colours, &t, adjust.high_contrast)) else { continue };
+        let lifted = if c.resolve(&t) != fg { " (adjusted for contrast)" } else { "" };
+        println!("syntax {:<10} {} = {}: drawn {fg}{lifted}, contrast {:.2}", k.name(), c.name(), c.resolve(&t), theme::contrast(fg, t.editor_bg));
+    }
     Ok(())
 }
 
@@ -227,7 +234,7 @@ fn run() -> Result<()> {
         None => (config::Config::default(), Vec::new()),
     };
     if let Some(p) = &args.check_palette {
-        return check_palette(p, &cfg.highlights, &theme::Adjust { high_contrast: cfg.high_contrast, overrides: cfg.colour_overrides.clone() });
+        return check_palette(p, &cfg, &theme::Adjust { high_contrast: cfg.high_contrast, overrides: cfg.colour_overrides.clone() });
     }
     if args.print_keys {
         print!("{}", keymap::cheat_sheet(&cfg.keymap()));

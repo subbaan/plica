@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.11 (2026-10-23): syntax colours in --check-palette
+
+- `plica --check-palette PATH` also lists the syntax colours: each kind of token, its colour (from `[syntax.colours]` or the default), the colour actually drawn and its contrast. Handy for spotting two kinds that look the same in your palette, or a colour that had to be lightened.
+
 ## 0.5.10 (2026-10-23): syntax colours
 
 - **Syntax colours:** code and markup are coloured by language, about 200 of them (the grammars `bat` uses): Bash, Python, Rust, C, JavaScript, Markdown, TOML, YAML, JSON, HTML, Makefiles, diffs and more. The language comes from the file name or extension, or from a `#!` first line, so scripts without an extension are recognised too.

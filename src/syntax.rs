@@ -140,6 +140,19 @@ impl Kind {
         self == Kind::Heading
     }
 
+    /// The colour this kind is given (an override from `[syntax.colours]`
+    /// if any, else the default), as specified.
+    pub fn colour(self, overrides: &[(Kind, Colour)]) -> Option<Colour> {
+        overrides.iter().rev().find(|(o, _)| *o == self).map(|(_, c)| *c).or(self.default_colour())
+    }
+
+    /// The colour as drawn: resolved against the theme and lifted to
+    /// the kind's minimum contrast with the editor background.
+    pub fn resolve(self, overrides: &[(Kind, Colour)], t: &crate::theme::Theme, high_contrast: bool) -> Option<crate::theme::Rgb> {
+        let c = self.colour(overrides)?;
+        Some(crate::theme::ensure_contrast(c.resolve(t), t.editor_bg, self.min_contrast(high_contrast)))
+    }
+
     /// Comments are meant to recede: they need less contrast than code.
     pub fn min_contrast(self, high_contrast: bool) -> f64 {
         match (self.italic(), high_contrast) {

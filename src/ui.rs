@@ -556,9 +556,8 @@ fn syntax_styles(p: &Painter, t: &crate::theme::Theme, overrides: &[(crate::synt
                 _ => st,
             };
         } else {
-            let colour = overrides.iter().rev().find(|(o, _)| *o == k).map(|(_, c)| *c).or(k.default_colour());
-            if let Some(c) = colour {
-                st = st.fg(p.c(crate::theme::ensure_contrast(c.resolve(t), t.editor_bg, k.min_contrast(high_contrast))));
+            if let Some(fg) = k.resolve(overrides, t, high_contrast) {
+                st = st.fg(p.c(fg));
             }
             if k.italic() {
                 st = st.add_modifier(Modifier::ITALIC);
