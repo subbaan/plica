@@ -66,6 +66,35 @@ check("memory", rss < 400, f"{rss} MB RSS (limit 400)")
 p.send("\x11"); pump_until(lambda: "Unsaved" in screen() or not p.isalive(), 2); p.send("n")
 pump_until(lambda: not p.isalive(), 3)
 os.remove(big)
+
+# ---- a large source file: syntax colouring stays incremental ----
+code = os.path.join(WORK, "big.py")
+with open(code, "w") as f:
+    for i in range(30_000):
+        f.write(f'def f{i:05d}(x, y=3):\n    """Doc {i}."""\n    return x + y * {i}  # note\n\n')
+print(f"\n{os.path.getsize(code) / 1e6:.1f} MB of Python")
+scr = pyte.Screen(100, 30); st = pyte.ByteStream(scr)
+t0 = time.time()
+p = pexpect.spawn(BIN, [code], env=dict(env, COLORTERM="truecolor"), dimensions=(30, 100))
+scr.write_process_input = lambda d: p.send(d)
+pump_until(lambda: "def f00000" in screen())
+check("code: startup to first render", time.time() - t0 < 1.5, f"{time.time() - t0:.2f}s (limit 1.5s)")
+pump_until(lambda: False, 0.5)
+kw = scr.buffer[1][scr.display[1].index("def")].fg
+check("code: keyword coloured", kw not in ("default", scr.buffer[1][scr.display[1].index("f00000")].fg), kw)
+timed("code: Ctrl+End", "\x1b[1;5F", lambda: "f29999" in screen(), 500)
+timed("code: type at end", "Z", lambda: "Z" in scr.display[scr.cursor.y], 300)
+timed("code: Ctrl+Home", "\x1b[1;5H", lambda: "f00000" in screen(), 500)
+# Opening a string at the top changes the colour of everything below it.
+timed("code: type a quote at the top", '"""', lambda: '"""def' in screen(), 300)
+pump_until(lambda: False, 3.0)
+c0 = cpu(); time.sleep(3); c1 = cpu()
+check("code: idle CPU over 3s", c1 - c0 <= 5, f"{c1 - c0} ticks (limit 5)")
+rss = int([l for l in open(f"/proc/{p.pid}/status") if l.startswith("VmRSS")][0].split()[1]) // 1024
+check("code: memory", rss < 400, f"{rss} MB RSS (limit 400)")
+p.send("\x11"); pump_until(lambda: "Unsaved" in screen() or not p.isalive(), 2); p.send("n")
+pump_until(lambda: not p.isalive(), 3)
+os.remove(code)
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)")
 sys.exit(1 if fails else 0)

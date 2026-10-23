@@ -45,6 +45,13 @@ pub struct Tab {
     pub tables_enabled: bool,
     /// Tables recognised in the current buffer version.
     tables: RefCell<TableCache>,
+    /// Syntax colouring grammar (None = plain text). Unless the user chose
+    /// it (`syntax_manual`), it follows the file name and first line.
+    pub syntax: Option<usize>,
+    pub syntax_manual: bool,
+    /// The file name and first line the grammar was detected from.
+    syntax_seen: Option<(Option<std::path::PathBuf>, String)>,
+    colouring: Option<crate::syntax::Colouring>,
     /// Recovery bookkeeping: buffer key last seen / snapshotted, and when.
     pub seen_key: (u64, u64),
     pub changed_at: std::time::Instant,
@@ -77,6 +84,10 @@ impl Tab {
             fallback_encoding: opts.fallback_encoding,
             tables_enabled: opts.tables,
             tables: RefCell::default(),
+            syntax: None,
+            syntax_manual: false,
+            syntax_seen: None,
+            colouring: None,
             seen_key,
             changed_at: now,
             snap_key: None,
@@ -152,6 +163,71 @@ impl Tab {
                 None
             }
         }
+    }
+
+    /// Detect the grammar again if the file name or first line changed
+    /// (a Save As, or typing `#!/bin/bash` into a new file).
+    pub fn update_syntax(&mut self) {
+        if self.syntax_manual {
+            return;
+        }
+        let first: String = self.buf.rope().line(0).chars().take(256).collect();
+        if self.syntax_seen.as_ref().is_some_and(|(p, f)| *p == self.doc.path && *f == first) {
+            return;
+        }
+        self.syntax = crate::syntax::detect(self.doc.path.as_deref(), first.trim_end());
+        self.syntax_seen = Some((self.doc.path.clone(), first));
+    }
+
+    /// Choose the grammar by hand (`Some(None)` = plain text), or go back
+    /// to detecting it (`None`).
+    pub fn set_syntax(&mut self, choice: Option<Option<usize>>) {
+        self.syntax_seen = None;
+        match choice {
+            Some(s) => {
+                self.syntax = s;
+                self.syntax_manual = true;
+            }
+            None => {
+                self.syntax_manual = false;
+                self.update_syntax();
+            }
+        }
+    }
+
+    /// The grammar's name for the status bar.
+    pub fn syntax_label(&self) -> String {
+        match self.syntax {
+            None => "Plain text".into(),
+            Some(_) if self.buf.rope().len_bytes() > crate::syntax::MAX_DOC => format!("{} (too large)", self.syntax_name()),
+            Some(_) => self.syntax_name().into(),
+        }
+    }
+
+    fn syntax_name(&self) -> &'static str {
+        self.syntax.map_or("Plain text", crate::syntax::name)
+    }
+
+    /// Syntax runs for lines `first..=last` (None: no colouring).
+    pub fn syntax_view(&mut self, first: usize, last: usize, budget: std::time::Duration) -> Option<Vec<Option<crate::syntax::Runs>>> {
+        let syn = self.syntax?;
+        if self.buf.rope().len_bytes() > crate::syntax::MAX_DOC {
+            return None;
+        }
+        if self.colouring.as_ref().map(|c| c.syntax()) != Some(syn) {
+            self.colouring = Some(crate::syntax::Colouring::new(syn, &self.buf));
+        }
+        self.colouring.as_mut().map(|c| c.view(&self.buf, first, last, budget))
+    }
+
+    /// Lines in view are still guessed (see `syntax_idle`).
+    pub fn syntax_pending(&mut self) -> bool {
+        self.syntax.is_some() && self.colouring.as_mut().is_some_and(|c| c.pending(&self.buf))
+    }
+
+    /// Continue parsing towards the view. True when the view is done.
+    pub fn syntax_idle(&mut self, budget: std::time::Duration) -> bool {
+        self.syntax.is_some() && self.colouring.as_mut().is_some_and(|c| c.idle(&self.buf, budget))
     }
 
     /// An untouched "Untitled" tab that a newly opened file may replace.

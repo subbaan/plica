@@ -138,6 +138,38 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             hl_lines.insert(row.line, (ws, crate::highlight::paint(&groups, &text)));
         }
     }
+    // Syntax colours for the visible lines (parsed incrementally; lines
+    // that don't fit in the budget are guessed and finished while idle).
+    let mut syn_lines: std::collections::HashMap<usize, (usize, crate::syntax::Runs)> = std::collections::HashMap::new();
+    if app.syntax {
+        app.tab.update_syntax();
+        if let (Some(first), Some(last)) = (rows.first(), rows.last())
+            && let Some(v) = app.tab.syntax_view(first.line, last.line, SYNTAX_BUDGET)
+        {
+            for (i, runs) in v.into_iter().enumerate() {
+                if let Some(runs) = runs.filter(|r| !r.is_empty()) {
+                    let line = first.line + i;
+                    syn_lines.insert(line, (app.tab.buf.line_start(line), runs));
+                }
+            }
+        }
+    }
+    let syn_styles = syntax_styles(&p, &t, &app.syntax_colours, app.adjust.high_contrast);
+    let syn_at = |line: usize, pos: usize| -> Option<Style> {
+        let (ls, runs) = syn_lines.get(&line)?;
+        let r = crate::syntax::run_at(runs, pos.checked_sub(*ls)?)?;
+        let mut st = syn_styles[r.kind as usize];
+        if r.font & crate::syntax::FONT_BOLD != 0 {
+            st = st.add_modifier(Modifier::BOLD);
+        }
+        if r.font & crate::syntax::FONT_ITALIC != 0 {
+            st = st.add_modifier(Modifier::ITALIC);
+        }
+        if r.font & crate::syntax::FONT_UNDERLINE != 0 {
+            st = st.add_modifier(Modifier::UNDERLINED);
+        }
+        Some(st)
+    };
     let hl_at = |line: usize, pos: usize| -> Option<Style> {
         let (ws, marks) = hl_lines.get(&line)?;
         let gi = *marks.get(pos.checked_sub(*ws)?)?;
@@ -220,6 +252,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 break;
             }
             let mut st = if is_caret_line { current_line } else { base };
+            if let Some(ss) = syn_at(row.line, g.start) {
+                st = st.patch(ss);
+            }
             if let Some(ts) = table_style(row.line, g.start) {
                 st = st.patch(ts);
             }
@@ -362,6 +397,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Some(i) => Rect { x: rx + right[..i].chars().count() as u16, y: status.y, width: enc.chars().count() as u16, height: 1 },
         None => Rect::default(),
     };
+    let lang = format!(" {} ", app.tab.syntax_label());
+    app.regions.status_syntax = match right.find(&lang) {
+        Some(i) if app.syntax && (app.tab.syntax.is_some() || app.tab.syntax_manual) => Rect { x: rx + right[..i].chars().count() as u16, y: status.y, width: lang.chars().count() as u16, height: 1 },
+        _ => Rect::default(),
+    };
     let ovr = format!(" {} ", if app.overwrite { "OVR" } else { "INS" });
     app.regions.status_overwrite = match right.find(&ovr) {
         Some(i) => Rect { x: rx + right[..i].chars().count() as u16, y: status.y, width: 5, height: 1 },
@@ -495,6 +535,41 @@ fn draw_tab_bar(buf: &mut TermBuf, app: &mut App, title: Rect, surface: Style, a
             x += w + 1;
         }
     }
+}
+
+/// Syntax parsing per frame; the rest of the view is guessed, then
+/// finished between events.
+const SYNTAX_BUDGET: Duration = Duration::from_millis(12);
+
+/// The style of each syntax token kind (indexed by `Kind as usize`).
+/// Colours are contrast-repaired against the editor background; without
+/// colours, comments are dim and keywords and headings bold.
+fn syntax_styles(p: &Painter, t: &crate::theme::Theme, overrides: &[(crate::syntax::Kind, crate::highlight::Colour)], high_contrast: bool) -> Vec<Style> {
+    use crate::syntax::Kind;
+    let mut v = vec![Style::default(); Kind::ALL.len() + 1];
+    for k in Kind::ALL {
+        let mut st = Style::default();
+        if p.plain {
+            st = match k {
+                Kind::Comment | Kind::Quote => st.add_modifier(Modifier::DIM),
+                Kind::Keyword | Kind::Heading => st.add_modifier(Modifier::BOLD),
+                _ => st,
+            };
+        } else {
+            let colour = overrides.iter().rev().find(|(o, _)| *o == k).map(|(_, c)| *c).or(k.default_colour());
+            if let Some(c) = colour {
+                st = st.fg(p.c(crate::theme::ensure_contrast(c.resolve(t), t.editor_bg, k.min_contrast(high_contrast))));
+            }
+            if k.italic() {
+                st = st.add_modifier(Modifier::ITALIC);
+            }
+            if k.bold() {
+                st = st.add_modifier(Modifier::BOLD);
+            }
+        }
+        v[k as usize] = st;
+    }
+    v
 }
 
 /// Lines longer than this are highlighted only near the visible part.
@@ -656,6 +731,11 @@ fn status_right(app: &App, compact: bool) -> String {
             crate::table::Style::Unicode => "Box table",
         };
         parts.push(if app.table_keys_live().is_some() { kind.into() } else { format!("{kind} (keys off)") });
+    }
+    // The language, when there is one (plain text needs no label; the
+    // language menu is on a key too).
+    if app.syntax && (app.tab.syntax.is_some() || app.tab.syntax_manual) {
+        parts.push(app.tab.syntax_label());
     }
     parts.push(encoding_label(&app.tab.doc));
     let le = app.tab.doc.line_ending.label();

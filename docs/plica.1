@@ -1,5 +1,5 @@
 .\" Man page for Plica. Read in place with: man -l docs/plica.1
-.TH PLICA 1 "2026-10-18" "Plica 0.5.9" "User Commands"
+.TH PLICA 1 "2026-10-23" "Plica 0.5.10" "User Commands"
 .SH NAME
 plica \- a mouse-friendly terminal text editor
 .SH SYNOPSIS
@@ -75,7 +75,7 @@ save as, \fBCtrl+O\fR open, \fBCtrl+N\fR new tab, \fBCtrl+W\fR close tab,
 \fBAlt+Z\fR soft wrap, \fBAlt+L\fR line numbers, \fBAlt+W\fR show
 whitespace, \fBAlt+M\fR give the mouse to the terminal,
 \fBAlt+H\fR or \fBF8\fR highlight the word in this document,
-\fBAlt+E\fR or \fBF7\fR encoding menu,
+\fBAlt+E\fR or \fBF7\fR encoding menu, \fBF4\fR language for syntax colours,
 \fBAlt+T\fR or \fBF6\fR table menu, \fBF9\fR Preferences, \fBF1\fR help.
 .PP
 \fBInsert\fR, or a click on \fBINS\fR/\fBOVR\fR in the status bar, switches
@@ -88,6 +88,16 @@ Preferences \(-> Keybindings \(-> \fBEdit config.toml\fR opens it in a tab, and
 saving it there applies the changes at once.
 .B plica \-\-print\-keys
 lists them all, including the fixed keys for tables, the find bar and the mouse.
+.SH SYNTAX COLOURS
+Code and markup are coloured by language (about 200 grammars, the set
+.B bat
+uses). The language comes from the file name or extension, or from a
+\fB#!\fR first line; the status bar shows it, and a click on it (or
+\fBF4\fR) chooses another, plain text, or automatic again.
+Token colours are the palette's ANSI colours and roles, so they follow the
+theme; \fB[syntax.colours]\fR in the config changes them, and
+Preferences \(-> Appearance (\fB[syntax] enabled = false\fR) turns them off.
+Files over 10 MB are not coloured, nor lines over 8 KB.
 .SH TABLES
 A table is a Markdown table (a header row followed by a row such as
 \fB|---|---|\fR) or a fully bordered plain-text table drawn with
@@ -154,6 +164,7 @@ Alt+E and Alt+H.
 In tmux, enable \fBset -g mouse on\fR.
 .SH LICENSE
 MIT. Built-in themes are adapted from MIT-licensed palettes; the licences
-of the libraries Plica is built from are in THIRD_PARTY_LICENSES.md.
+of the libraries and syntax grammars Plica is built from are in
+THIRD_PARTY_LICENSES.md.
 .SH SEE ALSO
 The README, \fIdocs/keys.md\fR and \fICHANGELOG.md\fR in the source tree.

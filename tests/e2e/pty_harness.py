@@ -813,6 +813,35 @@ t.send("\x11", 0.3)
 t.send("n", 0.6)
 check("tables off: quits", not t.p.isalive())
 
+# ---------------------------------------------------------------- session 20: syntax colours
+pdoc = os.path.join(WORK, "sample.py")
+open(pdoc, "w").write("def f(x):\n    return 'hi'  # note\n")
+t = Term([pdoc])
+check("syntax: status shows the language", "Python" in t.line(ROWS - 1), t.line(ROWS - 1))
+fg_at = lambda y, needle: t.cell(t.col_of(y, needle), y).fg
+plain_fg = fg_at(1, "(x)")
+check("syntax: keyword coloured", fg_at(1, "def") != plain_fg, (fg_at(1, "def"), plain_fg))
+check("syntax: string coloured", fg_at(2, "'hi'") not in (plain_fg, fg_at(1, "def")), fg_at(2, "'hi'"))
+check("syntax: comment italic", t.cell(t.col_of(2, "note"), 2).italics)
+string_fg = fg_at(2, "'hi'")
+t.send('s = """')  # at the start of line 1: everything after it is a string
+check("syntax: an open string recolours the lines below", fg_at(1, "def") == string_fg and fg_at(2, "return") == string_fg, (fg_at(1, "def"), fg_at(2, "return"), string_fg))
+t.send("\x7f" * 7)
+check("syntax: and deleting it restores them", fg_at(1, "def") != string_fg and fg_at(2, "return") != string_fg)
+t.click(t.col_of(ROWS - 1, "Python"), ROWS - 1)
+check("syntax: clicking the language opens the menu", "Language" in t.text() and "Automatic" in t.text(), t.text())
+t.send("plain text")
+t.send("\r")
+check("syntax: plain text chosen", "Plain text" in t.line(ROWS - 1) and fg_at(1, "def") == plain_fg, t.line(ROWS - 1))
+t.send("\x1bOS")  # F4
+check("syntax: F4 opens the menu", "Automatic" in t.text(), t.text())
+t.send("\x1b[A")  # from the current choice (Plain text) up to Automatic
+t.send("\r")
+check("syntax: back to automatic", "Python" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x11", 0.3)
+t.send("n", 0.6)  # the typing above left the buffer modified
+check("syntax: quits", not t.p.isalive())
+
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))
 sys.exit(1 if fails else 0)

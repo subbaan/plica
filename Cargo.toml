@@ -1,6 +1,6 @@
 [package]
 name = "plica"
-version = "0.5.9"
+version = "0.5.10"
 edition = "2024"
 description = "A mouse-friendly terminal text editor"
 license = "MIT"
@@ -20,9 +20,13 @@ ratatui = "0.30"
 ropey = "1"
 rustix = { version = "1", features = ["event", "stdio", "termios"] }
 signal-hook = "0.3"
+# Syntax colouring: pure-Rust regexes (fancy-regex), so the static musl
+# build needs no C toolchain; grammars from two-face (bat's set).
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
 tempfile = "3"
 toml = "1"
 toml_edit = "0"
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 unicode-segmentation = "1"
 
 [profile.release]

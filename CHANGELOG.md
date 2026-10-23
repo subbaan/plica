@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.10 (2026-10-23): syntax colours
+
+- **Syntax colours:** code and markup are coloured by language, about 200 of them (the grammars `bat` uses): Bash, Python, Rust, C, JavaScript, Markdown, TOML, YAML, JSON, HTML, Makefiles, diffs and more. The language comes from the file name or extension, or from a `#!` first line, so scripts without an extension are recognised too.
+- The status bar shows the language. Click it, or press **F4** (the `syntax` command), to choose another language or plain text, or to go back to automatic.
+- The colours come from your palette (its ANSI colours and roles), so they change with your theme, and stay readable against the background. Set your own per kind of token in `[syntax.colours]` (comment, string, constant, keyword, type, function, variable, heading and more; see `plica --print-config`). Preferences → Appearance → Syntax colours (`[syntax] enabled`) turns them off.
+- Colouring stays fast in big files: only what's on screen is worked out, and an edit only redoes the lines it affects. Files over 10 MB aren't coloured.
+- **Fixed:** `plica --theme NAME FILE` also opened an empty tab called `--theme`.
+
 ## 0.5.9 (2026-10-18): tables switch, edit config from Preferences
 
 - **Tables can be switched off:** Preferences → Tables → Tables, or `enabled = false` under `[tables]`. Every table is then plain text: no cell keys, re-padding or table menu. Handy for ASCII art and game maps drawn with `+---+` borders. It takes effect straight away in every tab.

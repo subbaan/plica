@@ -17,6 +17,7 @@ mod lineedit;
 mod picker;
 mod layout;
 mod recovery;
+mod syntax;
 mod tab;
 mod table;
 mod table_border;
@@ -115,6 +116,7 @@ fn parse_args() -> Result<Option<Args>> {
                         Some(c @ (config::ThemeChoice::Builtin(_) | config::ThemeChoice::Terminal)) => a.builtin = Some(c),
                         _ => bail!("unknown theme `{name}` (dracula, gruvbox, nord, solarized-dark, solarized-light, terminal)"),
                     }
+                    continue;
                 }
                 "--encoding" => {
                     let name = it.next().context("--encoding needs a name")?;
@@ -292,6 +294,8 @@ fn run() -> Result<()> {
     app.primary_selection = cfg.primary_selection;
     app.table_realign = cfg.table_realign;
     app.tables = cfg.tables;
+    app.syntax = cfg.syntax;
+    app.syntax_colours = cfg.syntax_colours.clone();
     app.fallback_encoding = cfg.fallback_encoding;
     app.highlights = cfg.highlights.clone();
     app.adjust = adjust;
@@ -412,7 +416,14 @@ fn run() -> Result<()> {
             redraw = true;
             continue;
         }
-        let timeout = if palette_due.is_some() || !doc_due.is_empty() || app.status.is_some() { Duration::from_millis(50) } else { Duration::from_millis(250) };
+        let timeout = if app.syntax_busy() {
+            // Colouring the view continues between events (`App::tick`).
+            Duration::from_millis(1)
+        } else if palette_due.is_some() || !doc_due.is_empty() || app.status.is_some() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(250)
+        };
         let ready = match event::poll(timeout) {
             Ok(r) => r,
             Err(e) => {

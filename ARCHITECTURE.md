@@ -24,6 +24,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ find.rs ──── search engine, match cache, find/replace bar commands
         ├─ dochl.rs ─── per-document highlight rules (documents.toml)
         ├─ highlight.rs ─ word/phrase groups, colour specs, per-line matching
+        ├─ syntax.rs ── syntect grammars → token kinds; incremental per-line parse cache (per tab)
         ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
         ├─ picker.rs ── filterable list popup (encoding and table menus)
         ├─ table.rs ─── Markdown table recognition, TableModel with source spans, format/edit ops
@@ -45,7 +46,7 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 - **Three offset spaces, never mixed:** char index into the rope (all internal positions, snapped to grapheme boundaries) · bytes (only in `document.rs` and search) · display cells (only in `layout.rs`/`ui.rs`).
 - **One width function:** layout uses ratatui's `CellWidth`, the same function the renderer uses.
 - **Hit-testing uses what was drawn:** `App::rendered_rows` holds the rows from the last frame.
-- **Nothing walks the whole document per keystroke** except find when the query or document changes (O(n), cached otherwise).
+- **Nothing walks the whole document per keystroke** except find when the query or document changes (O(n), cached otherwise). Syntax parsing is bounded by a time budget per frame and resumes between events.
 - **Every UI region asks the Theme for a semantic role**, so a palette swap recolours everything.
 
 ### Event loop
@@ -57,6 +58,16 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-23 · 0.5.10
+
+- **Syntax colours use syntect with two-face's grammars and the pure-Rust `fancy-regex` engine.** Measured before choosing: Oniguruma parses about 3.5× faster and makes a smaller binary, but it is C, and the static musl release build would then need a musl C compiler (`musl-gcc`), which isn't installed. That's the same trade-off as mimalloc (0.5.5). The cost of fancy-regex is about 0.1 ms per line of Rust, 0.2 ms for Python and 0.75 ms for Markdown, so the design below never parses more than it must. The binary grows from 2.8 to 6.1 MB (grammars and regex engine). two-face (bat's set, 213 grammars) costs only about 0.6 MB more than syntect's 75 and adds TOML, INI, TypeScript, Dockerfile, Git files and more. Grammar licences go into THIRD_PARTY_LICENSES.md through `examples/grammar_licences.rs`.
+- **Tokens map to kinds, not colours.** A syntect `Theme` is built whose "colours" are kind numbers (comment, string, keyword…), so syntect's own selector scoring decides each token's kind (e.g. `storage.type.function` (`fn`, `def`) is a keyword, `storage.type` (`i32`) a type). Kinds resolve to palette slots and roles at draw time, contrast-repaired against the background (4.5:1, comments 3:1; 7:1 / 4.5:1 in high contrast), so live palette changes recolour code. The defaults follow the usual terminal conventions (strings `color2`, keywords `color5`…). In plain-terminal mode comments are dim and keywords and headings bold. Draw precedence: base < syntax < table borders < word highlights < control chars < find match < selection.
+- **Incremental parse (`syntax::Colouring`):** the parser state at the start of every 32nd line is kept, and `exact` is the line up to which start states are known exactly. `Buffer` now keeps a log of what each version replaced (`changes_since`, composing several edits into one covering change), so an edit moves `exact` back to its first line, drops kept data inside the changed lines and shifts what follows. Re-parsing stops as soon as it reaches a kept state that comes out equal: the rest is still right. A kept state past `exact` is trusted only up to the next *boundary* (a changed line, or where an earlier exact parse stopped). *Bug found by the randomized test:* without the second kind of boundary, an edit far above made a later convergence trust runs from an older parse. `incremental_matches_fresh_parse` compares against a fresh parse after random edits, budgets and unfinished idle work.
+- **Lazy, budgeted parsing:** a frame parses towards the bottom of the view for at most 12 ms. Lines it can't reach are guessed, from a kept state at most 64 lines up, or from scratch 64 lines up. The main loop then polls every 1 ms and `App::tick` continues in 8 ms slices until the view is exact, then redraws. After a jump more than 1 MB of text past `exact`, the view keeps its guesses (like Vim's syntax sync) instead of parsing everything above it: about 4 s of CPU per MB. Files over 10 MB, and lines over 8 KB, are not parsed. Runs are kept for at most 4000 lines near the view.
+- **Detection** (`syntax::detect`): file name, then extension (also lowercased), then the first line (`#!…`). It reads the buffer's first line, never the file (syntect's `find_syntax_for_file` would). It re-runs whenever the path or first line changes (Save As, typing a shebang into a new file), unless the user chose a language from the menu (`Tab::syntax_manual`). Plain text shows no label in the status bar (it stays short at 60 columns); the language menu is also on F4.
+- `[profile.dev.package.*] opt-level = 3` for syntect and the regex crates: unoptimised, the grammar tests took minutes.
+- **Fixed:** `--theme NAME` was missing its `continue`, so `--theme` was also opened as a file (found while testing syntax colours with the e2e harness).
 
 ### 2026-10-18 · 0.5.9
 

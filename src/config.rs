@@ -75,6 +75,9 @@ pub struct Config {
     pub table_realign: bool,
     pub keymap_overrides: Vec<(Command, Vec<Chord>)>,
     pub highlights: Highlights,
+    /// Syntax colouring, and colours for token kinds (`[syntax.colours]`).
+    pub syntax: bool,
+    pub syntax_colours: Vec<(crate::syntax::Kind, Colour)>,
 }
 
 impl Default for Config {
@@ -97,6 +100,8 @@ impl Default for Config {
             table_realign: true,
             keymap_overrides: Vec::new(),
             highlights: Highlights::default(),
+            syntax: true,
+            syntax_colours: Vec::new(),
         }
     }
 }
@@ -231,6 +236,33 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
             "tables" => section(val, "tables", &mut w, |k, v, w| match k {
                 "enabled" => known(boolean(v, "tables.enabled", w).map(|b| cfg.tables = b)),
                 "realign" => known(boolean(v, "tables.realign", w).map(|b| cfg.table_realign = b)),
+                _ => false,
+            }),
+            "syntax" => section(val, "syntax", &mut w, |k, v, w| match k {
+                "enabled" => known(boolean(v, "syntax.enabled", w).map(|b| cfg.syntax = b)),
+                "colours" | "colors" => {
+                    use crate::syntax::Kind;
+                    match v.as_table() {
+                        Some(t) => {
+                            for (kind, c) in t {
+                                let Some(k) = Kind::from_name(kind) else {
+                                    w.push(format!(
+                                        "unknown token kind `syntax.colours.{kind}` (kinds: {})",
+                                        Kind::ALL.map(|k| k.name()).join(", ")
+                                    ));
+                                    continue;
+                                };
+                                match c.as_str().map(Colour::parse) {
+                                    Some(Ok(c)) => cfg.syntax_colours.push((k, c)),
+                                    Some(Err(e)) => w.push(format!("`syntax.colours.{kind}`: {e}")),
+                                    None => w.push(format!("`syntax.colours.{kind}` should be a colour string")),
+                                }
+                            }
+                        }
+                        None => w.push("`syntax.colours` should be a table".into()),
+                    }
+                    true
+                }
                 _ => false,
             }),
             "highlights" => section(val, "highlights", &mut w, |k, v, w| match k {
@@ -467,6 +499,24 @@ fallback_encoding = "auto"
 # Esc gives plain keys in that table; Alt+T (or F6) opens the table menu.
 enabled = true           # false: tables are plain text (e.g. for ASCII art)
 realign = true           # re-pad a column as its cells grow or shrink
+
+[syntax]
+# Colour code by language: detected from the file name or a #! line; click
+# the language in the status bar to choose another.
+enabled = true
+
+# Colours per kind of token: "#rrggbb", a palette slot "color0".."color15",
+# or a role (foreground, accent, muted, warning, ...). The defaults are
+# palette slots, so they follow the live palette. Kinds and defaults:
+# [syntax.colours]
+# comment = "muted"      # also: quote (both italic)
+# string = "color2"      # also: code, inserted
+# constant = "color3"    # numbers, true/false; also: attribute, changed
+# keyword = "color5"
+# type = "color6"
+# function = "color4"    # also: link
+# variable = "color1"    # also: tag, deleted
+# heading = "accent"     # bold
 
 [highlights]
 enabled = true           # word and phrase highlighting

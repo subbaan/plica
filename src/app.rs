@@ -29,6 +29,8 @@ const SNAPSHOT_IDLE: Duration = Duration::from_secs(2);
 /// …or at least this often while editing continues.
 const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(30);
 const SCROLL_STEP: usize = 3;
+/// Idle syntax parsing works in slices this long, so keys stay responsive.
+const SYNTAX_SLICE: Duration = Duration::from_millis(8);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThemeSource {
@@ -121,6 +123,8 @@ pub struct Regions {
     pub status_encoding: Rect,
     /// INS/OVR in the status bar (click: toggle overwrite mode).
     pub status_overwrite: Rect,
+    /// The language name in the status bar (click: language menu).
+    pub status_syntax: Rect,
     /// The picker popup, its filter field and its list rows.
     pub picker_box: Rect,
     pub picker_field: Rect,
@@ -133,6 +137,8 @@ pub enum PickChoice {
     Reopen(Encoding),
     SaveWith(Encoding),
     Table(TableAction),
+    /// A grammar (`Some(None)` = plain text), or `None` = detect it.
+    Syntax(Option<Option<usize>>),
 }
 
 /// Entries of the table menu.
@@ -211,6 +217,9 @@ pub struct App {
     /// X11/Wayland primary selection: select to copy, middle-click to paste.
     pub primary_selection: bool,
     pub highlights: crate::highlight::Highlights,
+    /// Syntax colouring on, and colours chosen for token kinds.
+    pub syntax: bool,
+    pub syntax_colours: Vec<(crate::syntax::Kind, crate::highlight::Colour)>,
     /// High contrast and colour-role overrides, applied to every theme.
     pub adjust: theme::Adjust,
     pub doc_rules: crate::dochl::DocRules,
@@ -287,6 +296,8 @@ impl App {
             caret_block: false,
             primary_selection: true,
             highlights: crate::highlight::Highlights::default(),
+            syntax: true,
+            syntax_colours: Vec::new(),
             adjust: theme::Adjust::default(),
             doc_rules: crate::dochl::DocRules::default(),
             primary_due: None,
@@ -867,7 +878,14 @@ impl App {
     }
 
     /// Called regularly from the main loop (drag autoscroll).
+    /// Syntax colouring still has lines in view to parse (poll, don't wait).
+    pub fn syntax_busy(&mut self) -> bool {
+        self.syntax && self.tab.syntax_pending()
+    }
+
     pub fn tick(&mut self) -> bool {
+        // Finish colouring the view a slice at a time, between events.
+        let coloured = self.syntax && self.tab.syntax_idle(SYNTAX_SLICE);
         if self.primary_due.is_some_and(|t| Instant::now() >= t) {
             self.primary_due = None;
             self.publish_primary();
@@ -880,7 +898,7 @@ impl App {
                 return true;
             }
         }
-        false
+        coloured
     }
 
     fn on_key(&mut self, k: KeyEvent) {
@@ -1042,6 +1060,7 @@ impl App {
             Command::HighlightWord => self.highlight_word(),
             Command::Encoding => self.encoding_menu(),
             Command::TableMenu => self.table_menu(),
+            Command::Syntax => self.syntax_menu(),
             Command::FormatTable => self.format_table(),
         }
         self.tab.follow_caret = true;
@@ -1603,8 +1622,38 @@ impl App {
             PickChoice::Reopen(e) => self.reopen_as(e),
             PickChoice::SaveWith(e) => self.save_with(e),
             PickChoice::Table(a) => self.table_action(a),
+            PickChoice::Syntax(choice) => {
+                self.tab.set_syntax(choice);
+                if !self.syntax {
+                    self.info("Syntax colours are off: turn them on in Preferences → Appearance");
+                }
+            }
         }
         self.tab.follow_caret = true;
+    }
+
+    /// The language menu: how this document is coloured.
+    pub fn syntax_menu(&mut self) {
+        self.tab.update_syntax();
+        let auto = crate::syntax::detect(self.tab.doc.path.as_deref(), &self.tab.buf.rope().line(0).chars().take(256).collect::<String>());
+        let manual = self.tab.syntax_manual;
+        let cur = self.tab.syntax;
+        let mut items = vec![
+            picker::Item {
+                label: "Automatic".into(),
+                detail: format!("from the file name: {}", auto.map_or("plain text", crate::syntax::name)),
+                current: !manual,
+                value: PickChoice::Syntax(None),
+            },
+            picker::Item { label: "Plain text".into(), detail: "no colours".into(), current: manual && cur.is_none(), value: PickChoice::Syntax(Some(None)) },
+        ];
+        items.extend(crate::syntax::menu().into_iter().map(|(i, name, exts)| picker::Item {
+            label: name.to_string(),
+            detail: exts,
+            current: manual && cur == Some(i),
+            value: PickChoice::Syntax(Some(Some(i))),
+        }));
+        self.picker = Some(Picker::new("Language (syntax colours)", items));
     }
 
     /// The table menu (its actions also have their own commands).
@@ -1873,6 +1922,10 @@ impl App {
                 }
                 if contains(self.regions.status_encoding, m.column, m.row) {
                     self.encoding_menu();
+                    return;
+                }
+                if contains(self.regions.status_syntax, m.column, m.row) {
+                    self.syntax_menu();
                     return;
                 }
                 if contains(self.regions.status_overwrite, m.column, m.row) {

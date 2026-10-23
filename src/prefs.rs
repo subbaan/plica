@@ -30,6 +30,7 @@ pub struct Settings {
     pub tables: bool,
     pub table_realign: bool,
     pub highlights: crate::highlight::Highlights,
+    pub syntax: bool,
 }
 
 impl Settings {
@@ -50,6 +51,7 @@ impl Settings {
             tables: c.tables,
             table_realign: c.table_realign,
             highlights: c.highlights.clone(),
+            syntax: c.syntax,
         }
     }
 }
@@ -64,7 +66,7 @@ impl Settings {
         macro_rules! take {
             ($($f:ident),*) => { $(if old.$f != new.$f { s.$f = new.$f.clone(); })* };
         }
-        take!(tab_width, wrap, line_numbers, show_whitespace, indent, mouse, primary_selection, theme, palette, high_contrast, recovery, fallback_encoding, tables, table_realign, highlights);
+        take!(tab_width, wrap, line_numbers, show_whitespace, indent, mouse, primary_selection, theme, palette, high_contrast, recovery, fallback_encoding, tables, table_realign, highlights, syntax);
         s
     }
 }
@@ -81,6 +83,7 @@ pub enum Row {
     Theme,
     Palette,
     HighContrast,
+    Syntax,
     Recovery,
     FallbackEncoding,
     Tables,
@@ -125,7 +128,7 @@ impl Section {
         match self {
             Section::Editor => &[Row::TabWidth, Row::Wrap, Row::LineNumbers, Row::Whitespace, Row::Indent],
             Section::Interaction => &[Row::Mouse, Row::Primary],
-            Section::Appearance => &[Row::Theme, Row::Palette, Row::HighContrast],
+            Section::Appearance => &[Row::Theme, Row::Palette, Row::HighContrast, Row::Syntax],
             Section::Files => &[Row::Recovery, Row::FallbackEncoding],
             Section::Tables => &[Row::Tables, Row::TableRealign],
             _ => &[],
@@ -146,6 +149,7 @@ impl Row {
             Row::Theme => "Colours",
             Row::Palette => "Palette file",
             Row::HighContrast => "High contrast",
+            Row::Syntax => "Syntax colours",
             Row::Recovery => "Crash recovery",
             Row::FallbackEncoding => "Other encodings",
             Row::Tables => "Tables",
@@ -165,6 +169,7 @@ impl Row {
             Row::Theme => "auto: palette file if found, else Dracula",
             Row::Palette => "Enter to edit, Delete to clear (Kitty format)",
             Row::HighContrast => "Text contrast 7:1 instead of 4.5:1",
+            Row::Syntax => "Colour code by language (click it in the status bar)",
             Row::Recovery => "Snapshot unsaved work for crash recovery",
             Row::FallbackEncoding => "Files that aren't UTF-8: auto guesses",
             Row::Tables => "Off: tables are plain text (ASCII art, maps)",
@@ -191,6 +196,7 @@ impl Row {
             Row::Primary => b(s.primary_selection),
             Row::Theme => format!("‹ {} ›", s.theme.name()),
             Row::HighContrast => b(s.high_contrast),
+            Row::Syntax => b(s.syntax),
             Row::Palette => s.palette.as_ref().map_or_else(|| "(none)".into(), |p| tilde(p)),
             Row::Recovery => b(s.recovery),
             Row::FallbackEncoding => format!("‹ {} ›", s.fallback_encoding.map_or("auto", |e| e.name())),
@@ -215,6 +221,7 @@ impl Row {
             Row::Primary => s.primary_selection = !s.primary_selection,
             Row::Theme => s.theme = cycle(&ThemeChoice::all(), s.theme, dir),
             Row::HighContrast => s.high_contrast = !s.high_contrast,
+            Row::Syntax => s.syntax = !s.syntax,
             Row::Recovery => s.recovery = !s.recovery,
             Row::FallbackEncoding => s.fallback_encoding = cycle(&crate::encoding::fallback_choices(), s.fallback_encoding, dir),
             Row::Tables => s.tables = !s.tables,
@@ -281,6 +288,7 @@ impl App {
             tables: self.tables,
             table_realign: self.table_realign,
             highlights: self.highlights.clone(),
+            syntax: self.syntax,
         }
     }
 
@@ -293,6 +301,7 @@ impl App {
         self.primary_selection = s.primary_selection;
         self.highlights = s.highlights.clone();
         self.table_realign = s.table_realign;
+        self.syntax = s.syntax;
         if s.tables != old.tables {
             self.tables = s.tables;
             self.cell_sel = None;
@@ -534,6 +543,7 @@ impl App {
             self.adjust.overrides = cfg.colour_overrides.clone();
         }
         self.apply_settings(&s);
+        self.syntax_colours = cfg.syntax_colours.clone();
         if overrides_changed {
             let (c, note) = colours::decide(self.theme_choice, self.palette_setting.as_deref());
             let (theme, source, _) = colours::load(c, note, &self.adjust);
@@ -631,6 +641,7 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
     set("files", "fallback_encoding", fallback.into(), s.fallback_encoding == d.fallback_encoding);
     set("tables", "enabled", s.tables.into(), s.tables == d.tables);
     set("tables", "realign", s.table_realign.into(), s.table_realign == d.table_realign);
+    set("syntax", "enabled", s.syntax.into(), s.syntax == d.syntax);
     if hl_changed {
         set("highlights", "enabled", s.highlights.enabled.into(), s.highlights.enabled == d.highlights.enabled);
         set("highlights", "samples", s.highlights.samples.into(), s.highlights.samples == d.highlights.samples);

@@ -11,7 +11,7 @@ Plica is a mouse-friendly terminal text editor (Mousepad/Gedit feel, not Vim/Ema
 - `make build`: release build; recreates the `./plica` → `target/release/plica` symlink. No install target, by design.
 - `make check`: clippy with `-D warnings`, unit tests, release build. Run after every change.
 - `cargo test <name>` runs a single unit test (e.g. `cargo test layout::tests::word_wrap`).
-- `make perf`: 35 MB large-file responsiveness test.
+- `make perf`: large-file responsiveness test (35 MB text file, 2 MB Python file with syntax colours).
 - `make dist`: release package in `dist/` (runs `make check` and `make notices`); `make notices` regenerates `THIRD_PARTY_LICENSES.md`. Publishing steps: `docs/release.md` (manual, user's decision).
 - `make e2e`: pty end-to-end test (`tests/e2e/pty_harness.py`; needs python-pexpect + python-pyte). Sends real key and SGR mouse sequences, checks rendered cells and colours, saved bytes, live palette reload and terminal teardown. Uses a temp dir, never the user's real palette or state dir.
 - `./plica --check-palette PATH`: print the parsed palette, resolved roles and contrast ratios.

@@ -60,9 +60,30 @@ def main(out):
         if not files:
             lines.append("(No licence file in the crate; see its licence above.)")
             lines.append("")
+    # The syntax grammars inside two-face carry their own licences.
+    grammars = subprocess.run(["cargo", "run", "-q", "--release", "--example", "grammar_licences"],
+                              capture_output=True, text=True, check=True).stdout
+    entries = [e.split("\n", 1) for e in grammars.split("@@@ ")[1:]]
+    lines += [
+        "# Syntax grammars",
+        "",
+        "The syntax colouring grammars come with two-face (the set `bat` ships).",
+        "Those whose licences ask for acknowledgement:",
+        "",
+    ]
+    for path, text in entries:
+        text = text.strip()
+        lines.append(f"## {path.strip()}")
+        lines.append("")
+        if text in seen:
+            lines.append(f"The same text as {seen[text]}.")
+            lines.append("")
+            continue
+        seen[text] = f"the licence of {path.strip()}"
+        lines += ["<details><summary>Licence</summary>", "", "```text", text.replace("```", "'''"), "```", "", "</details>", ""]
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
-    print(f"{out}: {len(shipped)} crates")
+    print(f"{out}: {len(shipped)} crates, {len(entries)} grammar licences")
 
 if __name__ == "__main__":
     main(sys.argv[1] if len(sys.argv) > 1 else "THIRD_PARTY_LICENSES.md")

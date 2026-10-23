@@ -46,6 +46,12 @@ The title bar has clickable Prefs, Save, Table, Wrap, Mouse and Help buttons (wh
 - **Tables off:** Preferences → Tables → Tables (`[tables] enabled = false`) treats every table as plain text, for example for ASCII art or game maps drawn with `+---+` borders.
 - Only complete tables count: a Markdown header with its `---` row, or a fully bordered block. Text laid out in columns with spaces is never treated as a table. Markdown tables inside code blocks are left alone; bordered tables count anywhere.
 
+### Syntax colours
+
+Code and markup are coloured by language: around 200 of them, from Bash, Python, Rust, C and JavaScript to Markdown, TOML, YAML, JSON, HTML, Makefiles, diffs and Git commit messages (the grammars `bat` uses). The language comes from the file name or extension, or from a `#!` first line, so a script without an extension is recognised too. The status bar shows it; click it (or press **F4**) to choose another language, plain text, or go back to automatic.
+
+The colours are your palette's: keywords, strings, comments and so on use its ANSI colours (`color1`…`color6`) and roles, so they change with your theme. `[syntax.colours]` in the config sets any of them (`comment = "color8"`, `keyword = "#ff79c6"`), and Preferences → Appearance → Syntax colours switches them off. Highlights, search matches and the selection are drawn on top.
+
 ### Highlights
 
 TODO, FIXME, IMPORTANT, IDEA and DONE are highlighted out of the box. Add your own groups (words, phrases, colours, bold/italic/underline, whole word, case, file types) in Preferences → Highlights or in `[[highlights.group]]` in the config. **Alt+H** (or F8) highlights the word under the caret in the current document only; those rules live in `~/.config/plica/documents.toml`, never in your file.
@@ -76,7 +82,8 @@ Developed in **Kitty**, also checked in **XFCE Terminal** and an xterm-compatibl
 ## Limits
 
 - Files up to tens of megabytes stay responsive (a 35 MB, 400 000-line file is part of the test suite). The whole file is held in memory.
-- A single line of several megabytes is laid out whole and gets slow. Tables and highlighting ignore lines longer than 20 000 characters.
+- A single line of several megabytes is laid out whole and gets slow. Tables and highlighting ignore lines longer than 20 000 characters; syntax colours skip lines over 8 KB.
+- Syntax colours are off for files over 10 MB. After a jump far into a large file (more than 1 MB past the part already coloured), colours start fresh a little above the view, so a long multi-line string or comment that began far above may be coloured wrongly there.
 - Very large tables work, but each keystroke that widens a column re-pads every row (about 0.2 s for 50 000 rows).
 - Binary files and UTF-32 are refused, and EBCDIC and DOS code pages such as CP437 aren't supported.
 - File ACLs and extended attributes aren't preserved on save.
@@ -87,11 +94,11 @@ Developed in **Kitty**, also checked in **XFCE Terminal** and an xterm-compatibl
 ```sh
 make check   # clippy (warnings are errors), unit tests, release build
 make e2e     # drives ./plica in a pseudo-terminal (needs python-pexpect and python-pyte)
-make perf    # 35 MB responsiveness test
+make perf    # large-file responsiveness test (35 MB text, 2 MB code)
 ```
 
 `ARCHITECTURE.md` describes the design and keeps a log of decisions and workarounds; `CHANGELOG.md` lists user-facing changes; `PLICA_IMPLEMENTATION_PLAN_v0.1.0.md` is the original plan.
 
 ## Licence
 
-MIT, see [`LICENSE`](LICENSE). The built-in Dracula, Gruvbox, Nord and Solarized colours are adapted from MIT-licensed themes. The Rust libraries Plica is built from are all permissively licensed; their licences are collected in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) (`make notices` regenerates it).
+MIT, see [`LICENSE`](LICENSE). The built-in Dracula, Gruvbox, Nord and Solarized colours are adapted from MIT-licensed themes. The Rust libraries Plica is built from are all permissively licensed, as are the syntax grammars (from [two-face](https://codeberg.org/CosmicHarper/two-face), the set `bat` ships); their licences are collected in [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) (`make notices` regenerates it).

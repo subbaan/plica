@@ -17,6 +17,21 @@ enum Edit {
     Delete { at: usize, text: String },
 }
 
+impl Edit {
+    fn change(&self) -> Change {
+        match self {
+            Edit::Insert { at, text } => Change { at: *at, removed: 0, inserted: text.chars().count() },
+            Edit::Delete { at, text } => Change { at: *at, removed: text.chars().count(), inserted: 0 },
+        }
+    }
+
+    /// The change made by undoing this edit.
+    fn inverse_change(&self) -> Change {
+        let c = self.change();
+        Change { at: c.at, removed: c.inserted, inserted: c.removed }
+    }
+}
+
 /// One user-visible undo step: a group of edits plus cursor state around it.
 #[derive(Debug, Clone)]
 struct Transaction {
@@ -77,6 +92,42 @@ pub struct Buffer {
     /// cache key for derived data (search matches).
     id: u64,
     version: u64,
+    /// The text each recent version replaced, oldest first, so derived
+    /// views can update incrementally (`changes_since`).
+    log: std::collections::VecDeque<(u64, Change)>,
+}
+
+/// One replacement in char positions: `removed` chars at `at` in the old
+/// text became `inserted` chars. Several combine into one that covers them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Change {
+    pub at: usize,
+    pub removed: usize,
+    pub inserted: usize,
+}
+
+impl Change {
+    /// The single replacement covering `self` followed by `next`.
+    fn then(self, next: Change) -> Change {
+        let at = self.at.min(next.at);
+        let end = (self.at + self.inserted).max(next.at + next.removed);
+        Change { at, removed: end - self.inserted + self.removed - at, inserted: end - next.removed + next.inserted - at }
+    }
+}
+
+/// What changed in a buffer since a cache key was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Since {
+    Same,
+    Changed(Change),
+    /// Another buffer, or too long ago to tell.
+    Unknown,
+}
+
+const LOG_LEN: usize = 256;
+
+fn compose(edits: impl Iterator<Item = Change>) -> Option<Change> {
+    edits.reduce(Change::then)
 }
 
 static NEXT_BUFFER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -98,12 +149,45 @@ impl Buffer {
             break_coalescing: false,
             id: NEXT_BUFFER_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             version: 0,
+            log: std::collections::VecDeque::new(),
         }
     }
 
     /// (buffer id, content version): changes whenever the text changes.
     pub fn cache_key(&self) -> (u64, u64) {
         (self.id, self.version)
+    }
+
+    /// What changed since `key` was taken from `cache_key`.
+    pub fn changes_since(&self, key: (u64, u64)) -> Since {
+        if key.0 != self.id || key.1 > self.version {
+            return Since::Unknown;
+        }
+        if key.1 == self.version {
+            return Since::Same;
+        }
+        // Versions key.1+1 ..= self.version must all be in the log.
+        match self.log.front() {
+            Some(&(v, _)) if v <= key.1 + 1 => {}
+            _ => return Since::Unknown,
+        }
+        match compose(self.log.iter().filter(|(v, _)| *v > key.1).map(|(_, c)| *c)) {
+            Some(c) => Since::Changed(c),
+            None => Since::Unknown,
+        }
+    }
+
+    fn log_change(&mut self, edits: impl Iterator<Item = Change>) {
+        self.version += 1;
+        if let Some(c) = compose(edits) {
+            self.log.push_back((self.version, c));
+            if self.log.len() > LOG_LEN {
+                self.log.pop_front();
+            }
+        } else {
+            // A version without a recorded change: older keys can't be followed.
+            self.log.clear();
+        }
     }
 
     pub fn rope(&self) -> &Rope {
@@ -358,7 +442,7 @@ impl Buffer {
         if edits.is_empty() {
             return;
         }
-        self.version += 1;
+        self.log_change(edits.iter().map(Edit::change));
         self.redo.clear();
         let now = Instant::now();
         if !self.break_coalescing
@@ -392,7 +476,7 @@ impl Buffer {
             }
         }
         self.sel = tx.sel_before;
-        self.version += 1;
+        self.log_change(tx.edits.iter().rev().map(|e| e.inverse_change()));
         self.break_coalescing = true;
         self.preferred_col = None;
         self.redo.push(tx);
@@ -411,7 +495,7 @@ impl Buffer {
             }
         }
         self.sel = tx.sel_after;
-        self.version += 1;
+        self.log_change(tx.edits.iter().map(Edit::change));
         self.break_coalescing = true;
         self.preferred_col = None;
         self.undo.push(tx);
@@ -661,5 +745,62 @@ mod tests {
         assert_eq!(b.word_right(3), 12);
         assert_eq!(b.word_left(12), 5);
         assert_eq!(b.word_at(7), (5, 12));
+    }
+
+    /// Text outside a reported change is the same before and after it.
+    #[test]
+    fn changes_since_covers_every_edit() {
+        let check = |b: &Buffer, old: &str, key| {
+            let new = b.rope().to_string();
+            let o: Vec<char> = old.chars().collect();
+            let n: Vec<char> = new.chars().collect();
+            match b.changes_since(key) {
+                Since::Same => assert_eq!(old, new),
+                Since::Changed(c) => {
+                    assert_eq!(o.len() - c.removed + c.inserted, n.len(), "{c:?}");
+                    assert_eq!(o[..c.at], n[..c.at], "{c:?}");
+                    assert_eq!(o[c.at + c.removed..], n[c.at + c.inserted..], "{c:?}");
+                }
+                Since::Unknown => panic!("lost track"),
+            }
+        };
+        let mut seed = 7u64;
+        let mut rnd = |m: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % m.max(1)
+        };
+        let mut b = Buffer::from_str("hello\nworld\nthird line\n");
+        for _ in 0..300 {
+            let old = b.rope().to_string();
+            let key = b.cache_key();
+            for _ in 0..1 + rnd(3) {
+                let len = b.len_chars();
+                match rnd(5) {
+                    0 => {
+                        b.undo();
+                    }
+                    1 => {
+                        b.redo();
+                    }
+                    2 => {
+                        let (a, z) = (rnd(len + 1), rnd(len + 1));
+                        b.sel = Selection { anchor: a, head: z };
+                        b.delete((a.min(z), a.max(z)), EditKind::Deleting);
+                    }
+                    3 => {
+                        let at = rnd(len + 1);
+                        let ops = vec![(at, rnd(len - at + 1), "x\ny".to_string()), (0, 0, "Z".to_string())];
+                        let ops = if at == 0 { ops[..1].to_vec() } else { ops };
+                        b.transact(ops);
+                    }
+                    _ => {
+                        b.sel = Selection::caret(rnd(len + 1));
+                        b.insert(["a", "\n", "bc"][rnd(3)], EditKind::Typing);
+                    }
+                }
+            }
+            check(&b, &old, key);
+        }
+        assert_eq!(Buffer::new().changes_since(b.cache_key()), Since::Unknown);
     }
 }

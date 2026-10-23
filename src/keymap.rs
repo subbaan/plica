@@ -69,6 +69,7 @@ commands! {
     Encoding => "encoding", "Reopen or save in another encoding", ["alt+e", "f7"];
     TableMenu => "table_menu", "Table menu (format, rows, columns)", ["alt+t", "f6"];
     FormatTable => "format_table", "Format the table under the caret", [];
+    Syntax => "syntax", "Language for syntax colours", ["f4"];
 }
 
 /// A key plus modifiers, normalised so equivalent events compare equal.
