@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.12 (2026-10-23): sturdier crash recovery, drag selection fix
+
+- **A damaged recovery snapshot is still offered.** If a snapshot of unsaved work got corrupted (for example a bad disk sector), Plica used to skip it silently. Now it offers what can be read, marked "damaged" in the recovery dialog, with unreadable characters shown as �.
+- Half-written snapshot files left by a crash are cleaned up at the next start.
+- **Fixed:** dragging a selection past the top or bottom of the window scrolled, but the selection stopped one line short of the edge.
+
 ## 0.5.11 (2026-10-23): syntax colours in --check-palette
 
 - `plica --check-palette PATH` also lists the syntax colours: each kind of token, its colour (from `[syntax.colours]` or the default), the colour actually drawn and its contrast. Handy for spotting two kinds that look the same in your palette, or a colour that had to be lightened.

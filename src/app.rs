@@ -556,7 +556,8 @@ impl App {
             if snaps.len() == 1 { "" } else { "s" }
         )];
         for s in snaps.iter().take(6) {
-            lines.push(format!("  • {}", s.doc_path.as_ref().map_or_else(|| s.name.clone(), |p| p.display().to_string())));
+            let damaged = if s.damaged { " (damaged: unreadable characters shown as �)" } else { "" };
+            lines.push(format!("  • {}{damaged}", s.doc_path.as_ref().map_or_else(|| s.name.clone(), |p| p.display().to_string())));
         }
         if snaps.len() > 6 {
             lines.push(format!("  … and {} more", snaps.len() - 6));
@@ -2052,6 +2053,7 @@ impl App {
         let Some((unit, origin)) = self.drag else { return };
         let t = self.regions.text;
         // Autoscroll when dragging above/below the text area.
+        let before = (self.tab.top_line, self.tab.top_row, self.tab.scroll_x);
         if y < t.y {
             self.scroll_rows(-1);
         } else if y >= t.y + t.height {
@@ -2063,6 +2065,12 @@ impl App {
             } else if x >= t.x + t.width {
                 self.tab.scroll_x += 1;
             }
+        }
+        // Hit-test against the rows as they will be drawn after this
+        // scroll, or the selection's end trails a row behind the edge.
+        if (self.tab.top_line, self.tab.top_row, self.tab.scroll_x) != before {
+            self.rendered_rows = self.visible_rows(t.height as usize);
+            self.rendered_scroll = self.rendered_rows.iter().map(|r| self.row_scroll_x(r.line)).collect();
         }
         let cy = y.clamp(t.y, t.y + t.height.saturating_sub(1));
         let cx = x.clamp(t.x, t.x + t.width);
@@ -2641,6 +2649,35 @@ pub(crate) mod tests {
         a.handle_event(ev(MouseEventKind::Down(MouseButton::Left)));
         a.handle_event(ev(MouseEventKind::Up(MouseButton::Left)));
         assert_eq!(a.tab.buf.selected_text(), "beta\n");
+    }
+
+    /// Holding a drag below the text scrolls on each tick and extends the
+    /// selection; back above the text scrolls back up.
+    #[test]
+    fn drag_past_the_edge_autoscrolls_and_extends_selection() {
+        let body: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut a = app_with(&body, 40, 10);
+        a.rendered_rows = a.visible_rows(10);
+        let ev = |kind, row| Event::Mouse(MouseEvent { kind, column: 6, row, modifiers: KeyModifiers::NONE });
+        a.handle_event(ev(MouseEventKind::Down(MouseButton::Left), 2));
+        let anchor = a.tab.buf.sel.anchor;
+        assert_eq!(a.tab.buf.line_of(anchor), 1);
+        a.handle_event(ev(MouseEventKind::Drag(MouseButton::Left), 15));
+        for _ in 0..20 {
+            assert!(a.tick(), "a held drag outside the text keeps redrawing");
+        }
+        assert!(a.tab.top_line >= 15, "scrolled down: top {}", a.tab.top_line);
+        assert_eq!(a.tab.buf.sel.anchor, anchor, "the anchor stays put");
+        assert!(a.tab.buf.line_of(a.tab.buf.sel.head) >= a.tab.top_line + 9, "head follows the bottom edge");
+        let low = a.tab.top_line;
+        a.handle_event(ev(MouseEventKind::Drag(MouseButton::Left), 0));
+        for _ in 0..5 {
+            a.tick();
+        }
+        assert!(a.tab.top_line < low, "scrolled back up");
+        a.handle_event(ev(MouseEventKind::Up(MouseButton::Left), 0));
+        assert!(!a.tick(), "released: no more scrolling");
+        assert!(!a.tab.buf.sel.is_empty());
     }
 
     #[test]

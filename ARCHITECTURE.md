@@ -59,6 +59,15 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-23 · 0.5.12
+
+Phase 6 test audit against the plan's automated-test list (section 10). The gaps it found:
+
+- **Damaged recovery snapshots are recovered lossily** instead of being skipped: the file is read as bytes, the header up to the first blank line must start with the magic line, an unreadable pid counts as a dead process, and invalid UTF-8 in the text becomes U+FFFD with `Snapshot::damaged` set (shown in the dialog). Losing a whole document over one bad byte was the worse failure. A file without the magic header is left alone, never deleted.
+- **Stale `.tmp` snapshot files** (a crash during `write_atomic`) are removed by `Recovery::orphans` when the pid in their name isn't a running Plica. The previous complete snapshot is still in place, because a write only replaces it by rename.
+- **Drag autoscroll hit-tested against the rows drawn before the scroll**, so the selection's head trailed one row behind the edge (and stopped there on release). `on_drag` now re-lays out `rendered_rows` and `rendered_scroll` after it scrolls. Found by the new unit test `drag_past_the_edge_autoscrolls_and_extends_selection`.
+- New tests: syntax colours meet their contrast targets and keep comment, string, keyword, function and type distinct in every built-in theme (normal and high contrast); empty and newline-only files round-trip byte for byte.
+
 ### 2026-10-23 · 0.5.10
 
 - **Syntax colours use syntect with two-face's grammars and the pure-Rust `fancy-regex` engine.** Measured before choosing: Oniguruma parses about 3.5× faster and makes a smaller binary, but it is C, and the static musl release build would then need a musl C compiler (`musl-gcc`), which isn't installed. That's the same trade-off as mimalloc (0.5.5). The cost of fancy-regex is about 0.1 ms per line of Rust, 0.2 ms for Python and 0.75 ms for Markdown, so the design below never parses more than it must. The binary grows from 2.8 to 6.1 MB (grammars and regex engine). two-face (bat's set, 213 grammars) costs only about 0.6 MB more than syntect's 75 and adds TOML, INI, TypeScript, Dockerfile, Git files and more. Grammar licences go into THIRD_PARTY_LICENSES.md through `examples/grammar_licences.rs`.

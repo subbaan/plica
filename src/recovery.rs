@@ -51,6 +51,9 @@ pub struct Snapshot {
     pub text: String,
     /// Missing in snapshots from Plica before 0.3.1.
     pub encoding: Option<Encoding>,
+    /// The text wasn't valid UTF-8 (a damaged file): the bad bytes became
+    /// U+FFFD so the rest can still be recovered.
+    pub damaged: bool,
 }
 
 pub fn default_dir() -> Option<PathBuf> {
@@ -117,12 +120,21 @@ impl Recovery {
         }
     }
 
-    /// Snapshots from Plica processes that are no longer running.
+    /// Snapshots from Plica processes that are no longer running. Also
+    /// removes half-written temp files those processes left behind (a
+    /// snapshot is renamed into place only once complete, so the previous
+    /// complete one is still there).
     pub fn orphans(&self) -> Vec<Snapshot> {
         let Ok(entries) = fs::read_dir(&self.dir) else { return Vec::new() };
-        let mut out: Vec<Snapshot> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
+        let files: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+        for tmp in files.iter().filter(|p| p.extension().is_some_and(|x| x == "tmp")) {
+            let pid = tmp.file_name().and_then(|n| n.to_str()).and_then(|n| n.split('.').next()).and_then(|p| p.parse::<u32>().ok());
+            if pid.is_some_and(|pid| !plica_running(pid)) {
+                let _ = fs::remove_file(tmp);
+            }
+        }
+        let mut out: Vec<Snapshot> = files
+            .into_iter()
             .filter(|p| p.extension().is_some_and(|x| x == EXT))
             .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{}-", self.session))))
             .filter_map(|p| parse(&p))
@@ -154,9 +166,18 @@ fn write_atomic(file: &Path, header: &str, text: &Rope) -> std::io::Result<()> {
     fs::rename(&tmp, file)
 }
 
+/// Read a snapshot. A damaged one still yields what can be read: an
+/// unreadable pid counts as a finished process, and invalid UTF-8 in the
+/// text is replaced (and flagged) rather than losing the whole document.
 fn parse(file: &Path) -> Option<(u32, Snapshot)> {
-    let data = fs::read_to_string(file).ok()?;
-    let (head, text) = data.split_once("\n\n")?;
+    let data = fs::read(file).ok()?;
+    let split = data.windows(2).position(|w| w == b"\n\n")?;
+    let head = String::from_utf8_lossy(&data[..split]);
+    let body = &data[split + 2..];
+    let (text, damaged) = match std::str::from_utf8(body) {
+        Ok(t) => (t.to_string(), false),
+        Err(_) => (String::from_utf8_lossy(body).into_owned(), true),
+    };
     let mut lines = head.lines();
     if lines.next()? != MAGIC {
         return None;
@@ -165,7 +186,7 @@ fn parse(file: &Path) -> Option<(u32, Snapshot)> {
     for l in lines {
         let (k, v) = l.split_once(": ").unwrap_or((l.trim_end_matches(':'), ""));
         match k {
-            "pid" => pid = v.parse().ok()?,
+            "pid" => pid = v.parse().unwrap_or(0),
             "path" => path = unescape(v),
             "name" => name = unescape(v),
             "time" => time = v.parse().unwrap_or(0),
@@ -174,7 +195,7 @@ fn parse(file: &Path) -> Option<(u32, Snapshot)> {
         }
     }
     let doc_path = (!path.is_empty()).then(|| PathBuf::from(path));
-    Some((pid, Snapshot { file: file.to_path_buf(), doc_path, name, time, text: text.to_string(), encoding }))
+    Some((pid, Snapshot { file: file.to_path_buf(), doc_path, name, time, text, encoding, damaged }))
 }
 
 /// Is a process with this pid alive *and* a Plica (guards against pid reuse)?
@@ -230,6 +251,28 @@ mod tests {
         other.delete(&other.orphans());
         other.flush();
         assert!(other.orphans().is_empty());
+    }
+
+    #[test]
+    fn damaged_snapshots_still_offer_their_text_and_stale_temps_go() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("rec");
+        let r = Recovery::new(dir.clone()).unwrap();
+        // A dead session (pid 0 never runs Plica): a snapshot with a bad
+        // byte in its text and a mangled pid, and a half-written temp file.
+        let mut bytes = format!("{MAGIC}\npid: 12x\npath: /tmp/a.txt\nname: a.txt\ntime: 5\n\n").into_bytes();
+        bytes.extend_from_slice(b"caf\xe9 and the rest\n");
+        fs::write(dir.join(format!("0.1.0-1.{EXT}")), &bytes).unwrap();
+        fs::write(dir.join("0.1.0-2.tmp"), b"plica-recovery 1\npid: 0\n").unwrap();
+        // Garbage that isn't a snapshot at all is left alone.
+        fs::write(dir.join(format!("0.1.0-3.{EXT}")), b"\xff\xfe junk").unwrap();
+        let o = r.orphans();
+        assert_eq!(o.len(), 1, "{o:?}");
+        assert!(o[0].damaged);
+        assert_eq!(o[0].text, "caf\u{fffd} and the rest\n");
+        assert_eq!(o[0].doc_path.as_deref(), Some(Path::new("/tmp/a.txt")));
+        assert!(!dir.join("0.1.0-2.tmp").exists(), "stale temp file removed");
+        assert!(dir.join(format!("0.1.0-3.{EXT}")).exists());
     }
 
     #[test]

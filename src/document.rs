@@ -286,6 +286,18 @@ mod tests {
     }
 
     #[test]
+    fn empty_and_newline_only_files_round_trip() {
+        let d = tmpdir();
+        for original in [&b""[..], b"\n", b"\r\n", b"\n\n\n", b"x"] {
+            let p = d.path().join("f.txt");
+            fs::write(&p, original).unwrap();
+            let mut l = load(&p).unwrap();
+            l.doc.save(&l.text).unwrap();
+            assert_eq!(fs::read(&p).unwrap(), original, "{original:?}");
+        }
+    }
+
+    #[test]
     fn other_encodings_round_trip_and_binary_is_refused() {
         let d = tmpdir();
         let p = d.path().join("latin1.txt");

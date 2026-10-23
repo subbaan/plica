@@ -656,6 +656,29 @@ mod tests {
         assert!(c.view(&buf, 2, 2, Duration::from_secs(5))[0].as_ref().is_none_or(|r| r.is_empty()));
     }
 
+    /// Every built-in theme, normal and high contrast: each kind is drawn
+    /// at its contrast target, and the main kinds stay told apart.
+    #[test]
+    fn colours_meet_contrast_and_differ_in_every_builtin_theme() {
+        use crate::theme::{Adjust, Builtin, contrast, resolve_with};
+        for b in Builtin::ALL {
+            for hc in [false, true] {
+                let t = resolve_with(&b.palette(), &Adjust { high_contrast: hc, ..Adjust::default() });
+                let drawn = |k: Kind| k.resolve(&[], &t, hc).unwrap();
+                for k in Kind::ALL {
+                    let c = contrast(drawn(k), t.editor_bg);
+                    assert!(c >= k.min_contrast(hc) - 0.05, "{b:?} hc={hc} {}: {c:.2}", k.name());
+                }
+                let main = [Kind::Comment, Kind::String, Kind::Keyword, Kind::Function, Kind::Type];
+                for (i, x) in main.iter().enumerate() {
+                    for y in &main[i + 1..] {
+                        assert_ne!(drawn(*x), drawn(*y), "{b:?} hc={hc}: {} and {} look the same", x.name(), y.name());
+                    }
+                }
+            }
+        }
+    }
+
     /// Whatever is edited, the incremental result equals a fresh parse.
     #[test]
     fn incremental_matches_fresh_parse() {
