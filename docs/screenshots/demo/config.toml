@@ -1,0 +1,14 @@
+# Plica demo configuration for screenshots (tools/screenshot.sh copies it
+# into a throwaway folder; nothing here is a real user's setup).
+version = 1
+
+[highlights]
+enabled = true
+samples = true
+
+[[highlights.group]]
+name = "Weather"
+terms = ["frost", "rain"]
+fg = "color6"
+underline = true
+file_types = ["md"]

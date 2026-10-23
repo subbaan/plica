@@ -24,6 +24,10 @@ Steps for a public release. Nothing here runs automatically, and publishing is a
        --title "Plica VERSION" --notes-file <(sed -n '/^## VERSION /,/^## /p' CHANGELOG.md | sed '$d')
    ```
 
+## Screenshots
+
+`tools/screenshot.sh` (`-t nord`, `-t solarized-light`, `-s 120x34`, `--help`) opens the demo files in a new Kitty window with a built-in theme and nothing from your own setup. Tabs: `weather.py`, `backup.sh`, `garden.md` (a Markdown table and highlights) and `inventory.txt` (a box table). Ctrl+PageDown moves between them.
+
 ## Portability of the binary
 
 `make dist` packages a **static musl build** (`target/x86_64-unknown-linux-musl/release/plica`), which runs on any x86-64 Linux whatever its glibc. It needs the musl target (`sudo pacman -S rust-musl` on Arch/Manjaro, or `rustup target add x86_64-unknown-linux-musl`). Measured against the glibc build: the same on the 35 MB perf test, about 30% slower only for typing that widens a column of a 50 000-row table (musl's allocator). The everyday `./plica` stays the glibc build.

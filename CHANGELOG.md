@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.13 (2026-10-23): muted colours fix, screenshot kit
+
+- **Fixed:** in Solarized Light (and any palette whose `color8` is darker than its text on a light background), comments, line numbers and other muted text were drawn darker than the text itself instead of fainter.
+- `tools/screenshot.sh` opens Plica on a set of demo files (Python, bash, Markdown with a table, a box table) in a clean Kitty window with a built-in theme, for screenshots. It uses throwaway copies of the files, config and state, so nothing of yours shows up.
+
 ## 0.5.12 (2026-10-23): sturdier crash recovery, drag selection fix
 
 - **A damaged recovery snapshot is still offered.** If a snapshot of unsaved work got corrupted (for example a bad disk sector), Plica used to skip it silently. Now it offers what can be read, marked "damaged" in the recovery dialog, with unreadable characters shown as �.

@@ -1,6 +1,6 @@
 [package]
 name = "plica"
-version = "0.5.12"
+version = "0.5.13"
 edition = "2024"
 description = "A mouse-friendly terminal text editor"
 license = "MIT"

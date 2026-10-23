@@ -1,0 +1,13 @@
+Workshop inventory
+
+┌──────────────────┬─────┬───────────┐
+│ Item             │ Qty │ Location  │
+├──────────────────┼─────┼───────────┤
+│ Hand saw         │   2 │ Wall rack │
+│ Cordless drill   │   1 │ Shelf 2   │
+│ Wood screws 4×40 │ 350 │ Drawer A  │
+│ Sandpaper (120)  │  12 │ Drawer B  │
+│ Café chairs      │   4 │ Loft      │
+└──────────────────┴─────┴───────────┘
+
+Checked in October. Restock sandpaper before winter.

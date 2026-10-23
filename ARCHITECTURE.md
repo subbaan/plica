@@ -59,6 +59,11 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-23 · 0.5.13
+
+- **Muted takes `color8` only if it recedes** (less contrast with the background than the text has), else a text/background mix. Solarized's canonical slot layout puts base03, its darkest colour, in `color8`, so on Solarized Light comments and line numbers were darker than body text. Found while previewing screenshots; `muted_recedes_in_every_builtin` covers it.
+- **Screenshot kit:** `tools/screenshot.sh` copies `docs/screenshots/demo/` (fictional files plus a demo config with one highlight group) into a fresh `plica-demo.*` folder under `$TMPDIR` or `/tmp`, and points `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` there. It unsets `PLICA_PALETTE` and `NO_COLOR` and starts `kitty --config NONE` with the theme's background, so none of the user's palette, highlight groups, `documents.toml`, recovery snapshots or Kitty settings can appear in a screenshot. The folder is left in place (path printed), never deleted.
+
 ### 2026-10-23 · 0.5.12
 
 Phase 6 test audit against the plan's automated-test list (section 10). The gaps it found:

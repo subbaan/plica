@@ -500,8 +500,11 @@ fn resolve_base(p: &Palette, text_min: f64, muted_min: f64) -> Theme {
     let bg = p.background;
     let a = |i: usize| p.ansi[i];
 
+    // color8 ("bright black") is usually a grey between text and
+    // background, but not always: Solarized puts its darkest base there,
+    // which on a light background stands out more than the text itself.
     let muted = a(8)
-        .filter(|&c| contrast(c, bg) >= muted_min)
+        .filter(|&c| contrast(c, bg) >= muted_min && contrast(c, bg) < contrast(fg, bg))
         .unwrap_or_else(|| fg.mix(bg, 0.45));
     let muted = ensure_contrast(muted, bg, muted_min);
 
@@ -613,6 +616,18 @@ color15                   #e0e1e1
             assert!(contrast(t.surface_fg, t.surface_bg) >= 4.5);
             assert!(contrast(t.accent_fg, t.accent) >= 4.5);
             assert!(contrast(t.muted, t.editor_bg) >= 2.5);
+        }
+    }
+
+    /// Muted text (comments, line numbers) recedes: less contrast than
+    /// the body text, in every built-in theme and both contrast modes.
+    #[test]
+    fn muted_recedes_in_every_builtin() {
+        for b in Builtin::ALL {
+            for hc in [false, true] {
+                let t = resolve_with(&b.palette(), &Adjust { high_contrast: hc, ..Adjust::default() });
+                assert!(contrast(t.muted, t.editor_bg) < contrast(t.editor_fg, t.editor_bg), "{b:?} hc={hc}: {} vs {}", t.muted, t.editor_fg);
+            }
         }
     }
 
