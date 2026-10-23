@@ -8,6 +8,8 @@ Steps for a public release. Nothing here runs automatically, and publishing is a
 2. **Donations (optional):** add `.github/FUNDING.yml`, for example `github: subbaan` or `ko_fi: name`, so GitHub shows a Sponsor button, and mention it in the README.
 3. **Repository visibility:** make `github.com/subbaan/plica` public.
 
+4. **Name check** (done 2026-10-23, not legal advice): no software package called `plica` on crates.io, the AUR, PyPI, npm or Homebrew, and none in any distribution Repology tracks, so `/usr/bin/plica` is free. On GitHub, two tiny unrelated repositories share the name (`Akamig/plica`, 1 star; `theagitist/plica`, a PDF imposition tool, 1 star). Web searches for "plica text editor" find nothing. "Plica" is also an anatomical term (plica syndrome), so search results for the bare word are medical. Searching "plica editor" works. The crates.io name is unclaimed; publishing there (`cargo publish`) would reserve it, and that is the user's decision.
+
 ## Every release
 
 1. Version bumped in `Cargo.toml` and in `docs/plica.1` (`.TH` line), with a `CHANGELOG.md` entry.
