@@ -33,6 +33,8 @@ Press **F1** inside Plica for the keys, **F9** for Preferences. The full key lis
 
 The title bar has clickable Prefs, Save, Table, Wrap, Mouse and Help buttons (when the window is wide enough). Alt+M hands the mouse to the terminal, for its own text selection.
 
+**Back where you left off:** a file you open again comes back with the caret and scroll position where they were, and with a language or encoding you picked for it by hand. **Alt+R** (or **↓** in the Ctrl+O prompt) lists recent files, newest first; type to filter by name or folder. `+LINE` on the command line still wins. The list lives in `~/.local/state/plica/recent.toml` (up to 500 files), never in your files; Preferences → Files → Remember positions (`[files] remember_position = false`) turns it off, and the list's last entry forgets them all.
+
 **Overwrite mode:** Insert (or clicking `INS` in the status bar) switches between inserting and overwriting. While the status bar shows `OVR` and the cursor is a block, typed characters replace the ones after the caret, handy for ASCII art and maps. The line's end is never overwritten; there, typing extends the line. Paste, Backspace, Delete, Tab and Enter work as usual. On a keyboard without an Insert key, bind `toggle_overwrite` to another key in the config.
 
 ### Tables

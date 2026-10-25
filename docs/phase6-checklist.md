@@ -5,7 +5,7 @@
 **Automated coverage:**
 
 - `make check`: clippy, about 170 unit tests (editing, layout, encodings, tables, highlights, themes, syntax colours, recovery, config) and the release build.
-- `make e2e`: 20 pty sessions with real keys and mouse. They cover typing, mouse selection, palettes changing live, files changed outside Plica, crash recovery after SIGTERM, SIGKILL and a closed window, tabs, find/replace, config, Preferences, highlights, encodings, tables, overwrite mode and syntax colours.
+- `make e2e`: 21 pty sessions with real keys and mouse. They cover typing, mouse selection, palettes changing live, files changed outside Plica, crash recovery after SIGTERM, SIGKILL and a closed window, tabs, find/replace, config, Preferences, highlights, encodings, tables, overwrite mode, syntax colours and reopening files where they were left.
 - `make perf`: a 35 MB text file and a 2 MB Python file (startup, jumps, typing, idle CPU, memory).
 - Randomised invariant tests: tables (`table_invariants_under_random_operations`), the buffer change log (`changes_since_covers_every_edit`) and incremental syntax parsing (`incremental_matches_fresh_parse`).
 - Release notes: `CHANGELOG.md`, one entry per version.

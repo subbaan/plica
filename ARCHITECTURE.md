@@ -31,6 +31,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ table_border.rs ─ bordered ASCII/Unicode tables: recognition, rendering, minimal replace
         ├─ table_edit.rs ─ App: typing in cells, Tab/Enter navigation, menu actions, insert/convert
         ├─ recovery.rs ─ snapshot writer thread, orphan scan, restore data
+        ├─ recent.rs ── recent files and where each was left (recent.toml in the state dir)
         ├─ keymap.rs ── Command table, chord parsing/normalisation, Keymap
         ├─ config.rs ── config.toml loading/validation, defaults text
         ├─ prefs.rs ─── Preferences model/dialog, live apply, comment-preserving save
@@ -58,6 +59,16 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-25 · 0.5.14
+
+- **Places live in `$XDG_STATE_HOME/plica/recent.toml`, not the config dir:** they're Plica's own state, written all the time, and safe to delete. (Per-document highlights stay in `documents.toml` next to `config.toml` because the user writes those.) Keyed by canonical path like `documents.toml`. Lines and columns are 1-based on disk so the file reads naturally; the column counts chars, and restoring snaps it to a grapheme boundary and clamps it to the current text.
+- **Two windows don't lose each other's entries:** changes collect in `Recent::pending`, and `flush` re-reads the file, merges (the newer `time` per path wins, a tie goes to this window), trims to 500 and writes atomically through `Document::save`. Flushes happen on tab close, on quit (also after SIGHUP or a terminal error), and from `App::tick_recent` every 30 s, which only records tabs whose `Tab::spot()` differs from what was last recorded. Nothing happens per keystroke.
+- **The recent list never stats its entries.** The user has old mechanical drives and network automounts, and a stat per entry for a 500-entry list could wake them all. A missing file is noticed when it's chosen, and then dropped from the list. Opening it through `open_file` would otherwise make a "New file" tab.
+- **Only hand-made choices are remembered.** Language: only when `syntax_manual` is set (stored as the grammar's name, because grammar indices aren't stable between versions; "" means plain text). Encoding: only after Reopen with / Save with (`Tab::encoding_manual`). It comes back as the decoder's `prefer`, not `force`, so a BOM or a file that has since become UTF-8 still decides; the choice lapses when the bytes override it. `--encoding` (force) is never remembered. Wrap and the other view toggles are global settings, not per-file, so they aren't stored.
+- **`+LINE` beats the remembered line** and resets the top line to 0, so the view is placed as before (the caret at the bottom of the screen). Recovery restores still put the caret at the start, because the text was replaced.
+- **Reach:** Alt+R (free in XFCE Terminal's menu bar, unlike Alt+E/H/T) and ↓/↑ in the Ctrl+O prompt (its hint says so). Ctrl+O itself stays a typed path, so muscle memory and creating new files are unchanged.
+- **e2e:** the harness's sessions share one state dir, so a file reopened by a later session now comes back at its old place. The table session's reopen check presses Ctrl+Home first. Session 21 covers the feature.
 
 ### 2026-10-23 · 0.5.13
 

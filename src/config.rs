@@ -68,6 +68,8 @@ pub struct Config {
     pub high_contrast: bool,
     pub colour_overrides: Vec<(OverrideRole, Colour)>,
     pub recovery: bool,
+    /// Reopen files where they were left; keep a recent-files list.
+    pub remember_position: bool,
     /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     /// Re-pad a table column as its cells change.
@@ -95,6 +97,7 @@ impl Default for Config {
             high_contrast: false,
             colour_overrides: Vec::new(),
             recovery: true,
+            remember_position: true,
             fallback_encoding: None,
             tables: true,
             table_realign: true,
@@ -219,6 +222,7 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
             }),
             "files" => section(val, "files", &mut w, |k, v, w| match k {
                 "recovery" => known(boolean(v, "files.recovery", w).map(|b| cfg.recovery = b)),
+                "remember_position" => known(boolean(v, "files.remember_position", w).map(|b| cfg.remember_position = b)),
                 "fallback_encoding" => {
                     match v.as_str().map(str::trim) {
                         Some("auto") => cfg.fallback_encoding = None,
@@ -489,6 +493,9 @@ high_contrast = false    # raise text contrast to 7:1 (WCAG AAA)
 
 [files]
 recovery = true          # snapshot unsaved work for crash recovery
+# Reopen each file where you left it (caret, scroll, a language or encoding
+# you chose) and keep a list of recent files (Alt+R, or Down in Ctrl+O).
+remember_position = true
 # Encoding for files that aren't valid UTF-8 or UTF-16: "auto" guesses
 # (windows-1252, Shift_JIS, …); or name one, e.g. "windows-1250", "koi8-r".
 # Files are always saved back in the encoding they were read in.

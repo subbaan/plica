@@ -16,6 +16,7 @@ mod keymap;
 mod lineedit;
 mod picker;
 mod layout;
+mod recent;
 mod recovery;
 mod syntax;
 mod tab;
@@ -254,12 +255,15 @@ fn run() -> Result<()> {
 
     // Load documents before touching the terminal so errors print cleanly.
     let tab_opts = TabOpts { tab_width: cfg.tab_width, indent: cfg.indent, fallback_encoding: cfg.fallback_encoding, tables: cfg.tables };
+    let recent = if cfg.remember_position { recent::default_file().map(recent::Recent::new) } else { None };
     let mut tabs: Vec<Tab> = Vec::new();
     for path in &args.files {
         if tabs.iter().any(|t| t.shows(path)) {
             continue;
         }
-        tabs.push(Tab::open(path, tab_opts, args.encoding)?.0);
+        // Back where it was left (an explicit --encoding still wins).
+        let spot = recent.as_ref().and_then(|r| r.get(path)).map(|e| e.spot);
+        tabs.push(Tab::open_at(path, tab_opts, args.encoding, spot.as_ref())?.0);
     }
     if tabs.is_empty() {
         tabs.push(Tab::untitled(tab_opts));
@@ -334,7 +338,12 @@ fn run() -> Result<()> {
     if let Some(line) = args.line {
         let l = line.saturating_sub(1).min(app.tab.buf.len_lines() - 1);
         app.tab.buf.sel = Selection::caret(app.tab.buf.line_start(l));
+        app.tab.top_line = 0;
     }
+    app.remember_position = cfg.remember_position;
+    app.recent = recent;
+    // The files just opened go to the top of the recent list.
+    app.tick_recent(true);
     app.recovery = recovery;
     if !cfg_warnings.is_empty() {
         let more = if cfg_warnings.len() > 1 { format!(" (+{} more; run plica --check-config)", cfg_warnings.len() - 1) } else { String::new() };
@@ -397,6 +406,7 @@ fn run() -> Result<()> {
             redraw = false;
         }
         app.tick_recovery(false);
+        app.tick_recent(false);
         if app.palette_watch_dirty {
             app.palette_watch_dirty = false;
             _palette_watcher = make_palette_watcher(&mut app, tx.clone());
@@ -478,6 +488,7 @@ fn run() -> Result<()> {
     if let Some(r) = &app.recovery {
         r.flush();
     }
+    app.tick_recent(true);
     drop(terminal);
     drop(guard);
     // stderr may be the closed terminal: write, don't eprintln! (which panics).

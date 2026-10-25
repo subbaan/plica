@@ -40,6 +40,7 @@ commands! {
     Save => "save", "Save", ["ctrl+s"];
     SaveAs => "save_as", "Save as", ["ctrl+shift+s", "f12"];
     Open => "open", "Open", ["ctrl+o"];
+    RecentFiles => "recent_files", "Recent files (reopen where you left off)", ["alt+r"];
     NewTab => "new_tab", "New tab", ["ctrl+n"];
     CloseTab => "close_tab", "Close tab", ["ctrl+w"];
     Quit => "quit", "Quit", ["ctrl+q"];
@@ -257,6 +258,7 @@ pub fn cheat_sheet(km: &Keymap) -> String {
                 ("Tab / Shift+Tab", "Indent / outdent (the selected lines)"),
                 ("Esc", "Clear the selection"),
                 ("Alt+1 … Alt+9", "Go to tab 1 … 8, Alt+9 the last tab"),
+                ("↓ in the Open prompt", "Recent files"),
             ],
         ),
         (

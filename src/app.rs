@@ -29,6 +29,8 @@ const SNAPSHOT_IDLE: Duration = Duration::from_secs(2);
 /// …or at least this often while editing continues.
 const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(30);
 const SCROLL_STEP: usize = 3;
+/// How often moved carets are recorded in the recent-files list.
+const RECENT_EVERY: Duration = Duration::from_secs(30);
 /// Idle syntax parsing works in slices this long, so keys stay responsive.
 const SYNTAX_SLICE: Duration = Duration::from_millis(8);
 
@@ -139,6 +141,9 @@ pub enum PickChoice {
     Table(TableAction),
     /// A grammar (`Some(None)` = plain text), or `None` = detect it.
     Syntax(Option<Option<usize>>),
+    /// A file in the Recent files list (index into `App::recent_offer`).
+    Recent(usize),
+    ForgetRecent,
 }
 
 /// Entries of the table menu.
@@ -272,6 +277,13 @@ pub struct App {
     pub config_path: Option<PathBuf>,
     /// Snapshots from a crashed session, offered at startup.
     pub recovery_offer: Vec<Snapshot>,
+    /// Recent files and where each was left (None: switched off, or no
+    /// state directory).
+    pub recent: Option<crate::recent::Recent>,
+    pub remember_position: bool,
+    /// The files listed in the open Recent files picker.
+    recent_offer: Vec<PathBuf>,
+    recent_due: Instant,
     after_save: Option<AfterSave>,
 }
 
@@ -333,6 +345,10 @@ impl App {
             palette_real: None,
             config_path: None,
             recovery_offer: Vec::new(),
+            recent: None,
+            remember_position: true,
+            recent_offer: Vec::new(),
+            recent_due: Instant::now(),
             after_save: None,
         }
     }
@@ -394,6 +410,8 @@ impl App {
         {
             r.remove(self.tab.uid);
         }
+        self.remember(self.active);
+        self.flush_recent();
         if self.bg_tabs.is_empty() {
             self.quit = true;
             return;
@@ -663,6 +681,105 @@ impl App {
         for t in self.all_tabs().filter(|t| t.snap_key.is_some()) {
             r.remove(t.uid);
         }
+    }
+
+    // ---- recent files ----------------------------------------------------------------
+
+    /// Record where tab `i` is in the recent-files list (written at the next
+    /// flush). Untitled tabs and files never saved aren't listed.
+    fn remember(&mut self, i: usize) {
+        let Some(r) = &mut self.recent else { return };
+        let tab = match i.cmp(&self.active) {
+            std::cmp::Ordering::Equal => &mut self.tab,
+            std::cmp::Ordering::Less => &mut self.bg_tabs[i],
+            std::cmp::Ordering::Greater => &mut self.bg_tabs[i - 1],
+        };
+        let Some(path) = tab.doc.path.as_deref().filter(|p| tab.doc.stamp.is_some() || p.exists()) else { return };
+        let spot = tab.spot();
+        r.note(path, spot.clone());
+        tab.spot_noted = Some(spot);
+    }
+
+    fn flush_recent(&mut self) {
+        if let Some(r) = &mut self.recent
+            && let Err(e) = r.flush()
+        {
+            self.recent = None;
+            self.warn(format!("Recent files off for this session: {e:#}"));
+        }
+    }
+
+    /// Called from the main loop: every half minute, record tabs that moved
+    /// since they were last recorded, so a crash keeps the places too.
+    /// `force` records every tab now (quitting).
+    pub fn tick_recent(&mut self, force: bool) {
+        if self.recent.is_none() || (!force && Instant::now() < self.recent_due) {
+            return;
+        }
+        self.recent_due = Instant::now() + RECENT_EVERY;
+        for i in 0..self.tab_count() {
+            let t = self.tab_at(i);
+            if force || t.spot_noted.as_ref().is_some_and(|s| *s != t.spot()) || (t.spot_noted.is_none() && t.doc.path.is_some()) {
+                self.remember(i);
+            }
+        }
+        self.flush_recent();
+    }
+
+    /// Turn remembering positions on or off at runtime (Preferences). Off
+    /// stops recording; what's already stored is kept for when it's back on.
+    pub fn set_remember_position(&mut self, on: bool) {
+        self.remember_position = on;
+        if !on {
+            self.flush_recent();
+            self.recent = None;
+        } else if self.recent.is_none() {
+            self.recent = crate::recent::default_file().map(crate::recent::Recent::new);
+            for i in 0..self.tab_count() {
+                self.remember(i);
+            }
+        }
+    }
+
+    /// The Recent files picker: newest first; type to filter by name or folder.
+    pub fn recent_menu(&mut self) {
+        let Some(r) = &self.recent else {
+            self.info(if self.remember_position { "No recent files (no state directory)" } else { "Recent files are off: turn on Preferences → Files → Remember positions" });
+            return;
+        };
+        let open: Vec<PathBuf> = self.all_tabs().filter_map(|t| t.doc.path.as_deref().map(crate::recent::key)).collect();
+        let entries: Vec<_> = r.list().into_iter().filter(|e| !open.contains(&e.path)).collect();
+        if entries.is_empty() {
+            self.info("No other recent files");
+            return;
+        }
+        let mut items: Vec<picker::Item<PickChoice>> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| picker::Item {
+                label: e.path.file_name().map_or_else(|| e.path.display().to_string(), |n| n.to_string_lossy().into_owned()),
+                detail: e.path.parent().map(crate::prefs::tilde).unwrap_or_default(),
+                current: false,
+                value: PickChoice::Recent(i),
+            })
+            .collect();
+        items.push(picker::Item { label: "Forget all recent files".into(), detail: String::new(), current: false, value: PickChoice::ForgetRecent });
+        self.recent_offer = entries.into_iter().map(|e| e.path).collect();
+        self.picker = Some(Picker::new("Recent files", items));
+    }
+
+    /// Open a file from the Recent list; one that's gone is dropped from it.
+    fn open_recent(&mut self, path: &Path) {
+        if !path.exists() {
+            self.warn(format!("{} no longer exists; removed from recent files", path.display()));
+            if let Some(r) = &mut self.recent
+                && let Err(e) = r.remove(path)
+            {
+                self.warn(format!("Could not update recent files: {e:#}"));
+            }
+            return;
+        }
+        self.open_file(path);
     }
 
     fn continue_after_save(&mut self) {
@@ -1019,6 +1136,7 @@ impl App {
             }
             Command::SaveAs => self.open_prompt(PromptKind::SaveAs),
             Command::Open => self.open_prompt(PromptKind::Open),
+            Command::RecentFiles => self.recent_menu(),
             Command::NewTab => {
                 self.add_tab(Tab::untitled(self.tab_opts()));
                 self.info("New file");
@@ -1629,6 +1747,21 @@ impl App {
                     self.info("Syntax colours are off: turn them on in Preferences → Appearance");
                 }
             }
+            PickChoice::Recent(i) => {
+                if let Some(path) = self.recent_offer.get(i).cloned() {
+                    self.open_recent(&path);
+                }
+                self.recent_offer.clear();
+            }
+            PickChoice::ForgetRecent => {
+                self.recent_offer.clear();
+                if let Some(r) = &mut self.recent {
+                    match r.forget_all() {
+                        Ok(()) => self.info("Forgot all recent files"),
+                        Err(e) => self.warn(format!("Could not forget recent files: {e:#}")),
+                    }
+                }
+            }
         }
         self.tab.follow_caret = true;
     }
@@ -1726,6 +1859,7 @@ impl App {
         let dirty = self.tab.buf.is_dirty();
         match self.tab.reload_from_disk(Some(e)) {
             Ok(()) => {
+                self.tab.encoding_manual = true;
                 let undo = if dirty { " (Ctrl+Z brings back your edits)" } else { "" };
                 self.info(format!("Reopened {name} as {}{undo}", self.tab.doc.encoding.label()));
                 if self.tab.doc.inexact || self.tab.doc.raw_bytes > 0 {
@@ -1754,7 +1888,10 @@ impl App {
         let old = std::mem::replace(&mut self.tab.doc.encoding, e);
         self.after_save = None;
         match self.save_active(false) {
-            SaveOutcome::Saved => self.info(format!("Saved {} as {}", self.tab.doc.display_name(), e.label())),
+            SaveOutcome::Saved => {
+                self.tab.encoding_manual = true;
+                self.info(format!("Saved {} as {}", self.tab.doc.display_name(), e.label()))
+            }
             SaveOutcome::Failed => self.tab.doc.encoding = old,
             SaveOutcome::Waiting => {}
         }
@@ -1772,9 +1909,11 @@ impl App {
             self.info(format!("{} is already open", self.tab.doc.display_name()));
             return true;
         }
-        match Tab::open(path, self.tab_opts(), None) {
+        let spot = self.recent.as_ref().and_then(|r| r.get(path)).map(|e| e.spot);
+        match Tab::open_at(path, self.tab_opts(), None, spot.as_ref()) {
             Ok((tab, is_new)) => {
                 self.add_tab(tab);
+                self.remember(self.active);
                 let name = self.tab.doc.display_name();
                 self.info(if is_new { format!("New file {name}") } else { format!("Opened {name}") });
                 self.announce_open();
@@ -1843,6 +1982,10 @@ impl App {
                 }
                 self.prompt = None;
                 self.tab.follow_caret = true;
+            }
+            KeyCode::Down | KeyCode::Up if kind == PromptKind::Open => {
+                self.prompt = None;
+                self.recent_menu();
             }
             KeyCode::Char('v') if ctrl => {
                 let t = self.clipboard.paste();
@@ -2723,6 +2866,72 @@ pub(crate) mod tests {
         key(&mut a, KeyCode::F(3), KeyModifiers::NONE);
         assert!(a.find.is_some(), "F3 reopens with the last search and options");
         assert!(a.find.as_ref().unwrap().opts.match_case);
+    }
+
+    #[test]
+    fn reopened_files_go_back_where_they_were_left() {
+        let d = tempfile::tempdir().unwrap();
+        let (f, g) = (d.path().join("long.txt"), d.path().join("other.txt"));
+        let text: String = (1..=300).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&f, &text).unwrap();
+        std::fs::write(&g, "x\n").unwrap();
+        let state = d.path().join("state/recent.toml");
+        let mut a = app_with("", 40, 10);
+        a.recent = Some(crate::recent::Recent::new(state.clone()));
+        assert!(a.open_file(&f));
+        a.goto_line("200");
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        a.ensure_caret_visible();
+        a.tab.set_syntax(Some(None));
+        let (top, head) = (a.tab.top_line, a.tab.buf.sel.head);
+        assert!(top > 0);
+        a.open_file(&g);
+        a.switch_to(0);
+        a.request_close_tab();
+        assert!(state.exists(), "closing a tab writes the list");
+
+        // A new session (a fresh store reading the same file).
+        let mut b = app_with("", 40, 10);
+        b.recent = Some(crate::recent::Recent::new(state.clone()));
+        b.recent_menu();
+        let p = b.picker.as_ref().expect("recent files picker");
+        let mut labels: Vec<_> = p.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels.pop(), Some("Forget all recent files"));
+        labels.sort();
+        assert_eq!(labels, ["long.txt", "other.txt"]);
+        type_str(&mut b, "long");
+        key(&mut b, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(b.tab.shows(&f));
+        assert_eq!((b.tab.top_line, b.tab.buf.sel.head), (top, head));
+        assert!(b.tab.syntax_manual && b.tab.syntax.is_none(), "plain text, chosen by hand, is remembered");
+
+        // A file that shrank since: the caret is clamped to its end.
+        let s = d.path().join("short.txt");
+        std::fs::write(&s, "short\n").unwrap();
+        let far = crate::recent::Spot { line: 500, column: 9, top: 450, ..Default::default() };
+        let (t, _) = Tab::open_at(&s, b.tab_opts(), None, Some(&far)).unwrap();
+        assert_eq!((t.buf.sel.head, t.top_line), (6, 1));
+
+        // Ctrl+O, then Down: the list leaves out files already open.
+        key(&mut b, KeyCode::Char('o'), KeyModifiers::CONTROL);
+        key(&mut b, KeyCode::Down, KeyModifiers::NONE);
+        assert!(b.prompt.is_none());
+        let labels: Vec<_> = b.picker.as_ref().unwrap().items.iter().map(|i| i.label.clone()).collect();
+        assert_eq!(labels, ["other.txt", "Forget all recent files"]);
+
+        // A file that's gone is dropped from the list when chosen.
+        std::fs::remove_file(&g).unwrap();
+        key(&mut b, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(b.tab.shows(&f), "nothing opened");
+        assert!(b.recent.as_ref().unwrap().get(&g).is_none());
+
+        b.recent_menu();
+        let n = b.picker.as_ref().map_or(0, |p| p.items.len());
+        assert_eq!(n, 0, "only the open file is left, so no picker");
+        b.set_remember_position(false);
+        b.recent_menu();
+        assert!(b.picker.is_none());
+        assert!(b.status.as_ref().unwrap().0.contains("Remember positions"));
     }
 
     #[test]

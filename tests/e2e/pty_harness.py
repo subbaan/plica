@@ -701,7 +701,7 @@ check("table: tab-separated paste fills and extends the table", open(tdoc).read(
 t.send("\x11", 0.5)
 if t.p.isalive(): t.send("n", 0.4)
 t = Term([tdoc])
-t.send("\x1b[B\x1b[B", 0.3)
+t.send("\x1b[1;5H\x1b[B\x1b[B", 0.3)  # Ctrl+Home first: the file reopens where it was left
 check("table: reopened file is a table with the pasted values", "Table" in t.line(ROWS - 1) or "Table:" in t.text(), t.text())
 check("table: pasted values survive reopening", "| 1 | X | Y |" in t.text() and "| 2 | Z | W |" in t.text(), t.text())
 # A table wider than the window doesn't wrap; the caret's table scrolls.
@@ -841,6 +841,41 @@ check("syntax: back to automatic", "Python" in t.line(ROWS - 1), t.line(ROWS - 1
 t.send("\x11", 0.3)
 t.send("n", 0.6)  # the typing above left the buffer modified
 check("syntax: quits", not t.p.isalive())
+
+# ---------------------------------------------------------------- session 21: back where you left off, recent files
+rdoc = os.path.join(WORK, "places.py")
+open(rdoc, "w").write("".join(f"x{i} = {i}\n" for i in range(1, 301)))
+odoc = os.path.join(WORK, "elsewhere.txt")
+open(odoc, "w").write("other\n")
+t = Term([rdoc])
+t.send("\x07150\r")  # Ctrl+G 150
+t.send("\x1bOS")  # F4: plain text, chosen by hand
+t.send("plain text")
+t.send("\r")
+check("recent: moved and chose plain text", "Ln 150" in t.line(ROWS - 1) and "Plain text" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x11", 0.6)
+check("recent: quits", not t.p.isalive())
+t = Term([rdoc])
+check("recent: reopens on the same line", "Ln 150" in t.line(ROWS - 1) and "x150 = 150" in t.text(), t.line(ROWS - 1))
+check("recent: and with the language chosen", "Plain text" in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x11", 0.6)
+t = Term(["+5", rdoc])
+check("recent: +LINE wins", "Ln 5," in t.line(ROWS - 1), t.line(ROWS - 1))
+t.send("\x11", 0.6)
+t = Term([odoc])
+t.send("\x1br")  # Alt+R
+check("recent: Alt+R lists recent files", "Recent files" in t.text() and "places.py" in t.text(), t.text())
+t.send("\x1b")
+t.send("\x0f")  # Ctrl+O
+check("recent: the Open prompt mentions the list", "recent files" in t.line(ROWS - 2), t.line(ROWS - 2))
+t.send("\x1b[B")  # Down
+t.send("places")
+t.send("\r", 0.4)
+check("recent: chosen from the list, opens where it was left", "places.py" in t.line(0) and "Ln 5," in t.line(ROWS - 1), t.line(0) + " / " + t.line(ROWS - 1))
+t.send("\x11", 0.6)
+check("recent: quits again", not t.p.isalive())
+state = open(os.path.join(WORK, "state", "plica", "recent.toml")).read()
+check("recent: kept in the state dir, not in the file", "places.py" in state and open(rdoc).read().startswith("x1 = 1\n"), state[:300])
 
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))

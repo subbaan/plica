@@ -348,7 +348,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ---- prompt ----
     if let Some(pr) = &app.prompt {
         buf.set_style(prompt, surface);
-        let hint = "  Enter confirm · Esc cancel";
+        let hint = if pr.kind == crate::app::PromptKind::Open && app.recent.is_some() { "  ↓ recent files · Enter confirm · Esc cancel" } else { "  Enter confirm · Esc cancel" };
         let label = format!(" {}: ", pr.kind.label());
         let lw = label.chars().count() as u16;
         buf.set_stringn(prompt.x, prompt.y, &label, prompt.width as usize, accent);
@@ -796,6 +796,7 @@ fn draw_help(buf: &mut TermBuf, app: &App, area: Rect, p: &Painter) {
         (C::Preferences, C::HighlightWord),
         (C::Encoding, C::TableMenu),
         (C::ToggleOverwrite, C::FormatTable),
+        (C::Syntax, C::RecentFiles),
     ] {
         lines.push(pair(a, b));
     }

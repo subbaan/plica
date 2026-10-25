@@ -57,6 +57,11 @@ pub struct Tab {
     pub changed_at: std::time::Instant,
     pub snap_key: Option<(u64, u64)>,
     pub snap_at: std::time::Instant,
+    /// The user chose the encoding (Reopen / Save with, or remembered from
+    /// such a choice), so it is remembered for next time.
+    pub encoding_manual: bool,
+    /// Where this tab was when last recorded in the recent-files list.
+    pub spot_noted: Option<crate::recent::Spot>,
 }
 
 static NEXT_TAB_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -92,6 +97,8 @@ impl Tab {
             changed_at: now,
             snap_key: None,
             snap_at: now,
+            encoding_manual: false,
+            spot_noted: None,
         }
     }
 
@@ -99,11 +106,55 @@ impl Tab {
         Self::new(Buffer::new(), Document::untitled(), opts)
     }
 
-    /// Open `path`, decoding it as `force` if given (else detected).
-    pub fn open(path: &Path, opts: TabOpts, force: Option<Encoding>) -> anyhow::Result<(Self, bool)> {
-        let eo = encoding::Options { force, prefer: None, fallback: opts.fallback_encoding };
+    /// Open `path`, decoding it as `force` if given (else detected), back
+    /// where `spot` says the user left it (recent files). A remembered
+    /// encoding is preferred, but the bytes still decide (a BOM, or a file
+    /// that became UTF-8); `force` overrides both.
+    pub fn open_at(path: &Path, opts: TabOpts, force: Option<Encoding>, spot: Option<&crate::recent::Spot>) -> anyhow::Result<(Self, bool)> {
+        let prefer = spot.and_then(|s| s.encoding.as_deref()).and_then(Encoding::parse);
+        let eo = encoding::Options { force, prefer, fallback: opts.fallback_encoding };
         let l = document::load_with(path, &eo)?;
-        Ok((Self::new(Buffer::from_str(&l.text), l.doc, opts), l.is_new))
+        let mut tab = Self::new(Buffer::from_str(&l.text), l.doc, opts);
+        if let Some(s) = spot {
+            tab.restore_spot(s);
+            tab.encoding_manual = force.is_none() && prefer.is_some_and(|p| p.enc == tab.doc.encoding.enc);
+            tab.spot_noted = Some(tab.spot());
+        }
+        Ok((tab, l.is_new))
+    }
+
+    /// Where the user is: caret, first visible line, hand-picked language
+    /// and encoding.
+    pub fn spot(&self) -> crate::recent::Spot {
+        let head = self.buf.sel.head;
+        let line = self.buf.line_of(head);
+        crate::recent::Spot {
+            line,
+            column: head - self.buf.line_start(line),
+            top: self.top_line,
+            language: self.syntax_manual.then(|| self.syntax.map_or(String::new(), |i| crate::syntax::name(i).to_string())),
+            encoding: self.encoding_manual.then(|| self.doc.encoding.config_name()),
+        }
+    }
+
+    /// Go back to `spot`, clamped to the text as it is now (the file may
+    /// have changed since).
+    pub fn restore_spot(&mut self, spot: &crate::recent::Spot) {
+        let line = spot.line.min(self.buf.len_lines() - 1);
+        let pos = (self.buf.line_start(line) + spot.column).min(self.buf.line_end(line));
+        self.buf.sel = crate::buffer::Selection::caret(self.buf.snap(pos));
+        self.top_line = spot.top.min(line);
+        self.top_row = 0;
+        self.follow_caret = true;
+        match spot.language.as_deref() {
+            Some("") => self.set_syntax(Some(None)),
+            Some(name) => {
+                if let Some(i) = crate::syntax::by_name(name) {
+                    self.set_syntax(Some(Some(i)));
+                }
+            }
+            None => {}
+        }
     }
 
     /// Replace the buffer with the file's current contents as one undoable

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.14 (2026-10-25): back where you left off, recent files
+
+- **Files reopen where you left them:** the caret, the scroll position, and a language (F4) or encoding (Alt+E) you chose for that file by hand come back the next time you open it, from the command line, Ctrl+O, a drop or the recent list. If the file got shorter in the meantime, the caret goes to its end. `+LINE` on the command line still wins, and so does `--encoding`.
+- **Recent files:** **Alt+R** (the `recent_files` command), or **↓** in the Ctrl+O prompt, lists the files you opened most recently, newest first, leaving out the ones already open. Type to filter by name or folder. A file that no longer exists is dropped from the list when you choose it. The list's last entry, "Forget all recent files", empties it.
+- The places are kept in `~/.local/state/plica/recent.toml` (`$XDG_STATE_HOME`), up to 500 files, never in the files themselves. They are written when a tab closes, when Plica quits, and every half minute while you work, so a crash keeps them too. Two Plica windows merge their entries instead of overwriting each other's.
+- Preferences → Files & Recovery → **Remember positions** (`[files] remember_position = false`) turns it off. What's already stored is kept for when you turn it back on.
+
 ## 0.5.13 (2026-10-23): muted colours fix, screenshot kit
 
 - **Fixed:** in Solarized Light (and any palette whose `color8` is darker than its text on a light background), comments, line numbers and other muted text were drawn darker than the text itself instead of fainter.

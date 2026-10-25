@@ -1,5 +1,5 @@
 .\" Man page for Plica. Read in place with: man -l docs/plica.1
-.TH PLICA 1 "2026-10-23" "Plica 0.5.13" "User Commands"
+.TH PLICA 1 "2026-10-25" "Plica 0.5.14" "User Commands"
 .SH NAME
 plica \- a mouse-friendly terminal text editor
 .SH SYNOPSIS
@@ -76,7 +76,15 @@ save as, \fBCtrl+O\fR open, \fBCtrl+N\fR new tab, \fBCtrl+W\fR close tab,
 whitespace, \fBAlt+M\fR give the mouse to the terminal,
 \fBAlt+H\fR or \fBF8\fR highlight the word in this document,
 \fBAlt+E\fR or \fBF7\fR encoding menu, \fBF4\fR language for syntax colours,
-\fBAlt+T\fR or \fBF6\fR table menu, \fBF9\fR Preferences, \fBF1\fR help.
+\fBAlt+T\fR or \fBF6\fR table menu, \fBAlt+R\fR recent files,
+\fBF9\fR Preferences, \fBF1\fR help.
+.PP
+A file opens where it was left: the caret, the scroll position, and a
+language or encoding chosen for it by hand.
+\fBAlt+R\fR (or \fBDown\fR in the \fBCtrl+O\fR prompt) lists recent files;
+type to filter it by name or folder.
+\fB+LINE\fR on the command line goes to that line instead.
+Preferences \(-> Files (\fB[files] remember_position = false\fR) turns this off.
 .PP
 \fBInsert\fR, or a click on \fBINS\fR/\fBOVR\fR in the status bar, switches
 overwrite mode: typed characters replace the ones after the caret (block
@@ -137,6 +145,9 @@ Highlights for individual documents, by full path.
 .I $XDG_STATE_HOME/plica/recovery/
 Snapshots of unsaved work, offered back after a crash
 (default \fI~/.local/state/plica/recovery/\fR).
+.TP
+.I $XDG_STATE_HOME/plica/recent.toml
+Recent files and where each was left (up to 500; safe to delete).
 .TP
 .I $XDG_CONFIG_HOME/kitty/current-theme.conf
 The theme chosen with Kitty's theme selector (\fBkitty +kitten themes\fR).

@@ -266,6 +266,11 @@ pub fn name(syntax: usize) -> &'static str {
     syntaxes().syntaxes().get(syntax).map_or("?", |s| s.name.as_str())
 }
 
+/// The grammar called `name` (as `name` gives it), e.g. a remembered choice.
+pub fn by_name(name: &str) -> Option<usize> {
+    syntaxes().syntaxes().iter().position(|s| s.name == name && s.name != "Plain Text")
+}
+
 /// Grammars to offer in the language menu: (index, name, extensions),
 /// sorted by name. Hidden helper grammars are left out.
 pub fn menu() -> Vec<(usize, &'static str, String)> {

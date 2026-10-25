@@ -26,6 +26,7 @@ pub struct Settings {
     pub palette: Option<PathBuf>,
     pub high_contrast: bool,
     pub recovery: bool,
+    pub remember_position: bool,
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     pub tables: bool,
     pub table_realign: bool,
@@ -47,6 +48,7 @@ impl Settings {
             palette: c.palette.clone(),
             high_contrast: c.high_contrast,
             recovery: c.recovery,
+            remember_position: c.remember_position,
             fallback_encoding: c.fallback_encoding,
             tables: c.tables,
             table_realign: c.table_realign,
@@ -66,7 +68,7 @@ impl Settings {
         macro_rules! take {
             ($($f:ident),*) => { $(if old.$f != new.$f { s.$f = new.$f.clone(); })* };
         }
-        take!(tab_width, wrap, line_numbers, show_whitespace, indent, mouse, primary_selection, theme, palette, high_contrast, recovery, fallback_encoding, tables, table_realign, highlights, syntax);
+        take!(tab_width, wrap, line_numbers, show_whitespace, indent, mouse, primary_selection, theme, palette, high_contrast, recovery, remember_position, fallback_encoding, tables, table_realign, highlights, syntax);
         s
     }
 }
@@ -85,6 +87,7 @@ pub enum Row {
     HighContrast,
     Syntax,
     Recovery,
+    RememberPosition,
     FallbackEncoding,
     Tables,
     TableRealign,
@@ -129,7 +132,7 @@ impl Section {
             Section::Editor => &[Row::TabWidth, Row::Wrap, Row::LineNumbers, Row::Whitespace, Row::Indent],
             Section::Interaction => &[Row::Mouse, Row::Primary],
             Section::Appearance => &[Row::Theme, Row::Palette, Row::HighContrast, Row::Syntax],
-            Section::Files => &[Row::Recovery, Row::FallbackEncoding],
+            Section::Files => &[Row::Recovery, Row::RememberPosition, Row::FallbackEncoding],
             Section::Tables => &[Row::Tables, Row::TableRealign],
             _ => &[],
         }
@@ -151,6 +154,7 @@ impl Row {
             Row::HighContrast => "High contrast",
             Row::Syntax => "Syntax colours",
             Row::Recovery => "Crash recovery",
+            Row::RememberPosition => "Remember positions",
             Row::FallbackEncoding => "Other encodings",
             Row::Tables => "Tables",
             Row::TableRealign => "Realign as you type",
@@ -171,6 +175,7 @@ impl Row {
             Row::HighContrast => "Text contrast 7:1 instead of 4.5:1",
             Row::Syntax => "Colour code by language (click it in the status bar)",
             Row::Recovery => "Snapshot unsaved work for crash recovery",
+            Row::RememberPosition => "Reopen files where you left off; recent files (Alt+R)",
             Row::FallbackEncoding => "Files that aren't UTF-8: auto guesses",
             Row::Tables => "Off: tables are plain text (ASCII art, maps)",
             Row::TableRealign => "Re-pad a column as its cells grow or shrink",
@@ -199,6 +204,7 @@ impl Row {
             Row::Syntax => b(s.syntax),
             Row::Palette => s.palette.as_ref().map_or_else(|| "(none)".into(), |p| tilde(p)),
             Row::Recovery => b(s.recovery),
+            Row::RememberPosition => b(s.remember_position),
             Row::FallbackEncoding => format!("‹ {} ›", s.fallback_encoding.map_or("auto", |e| e.name())),
             Row::Tables => b(s.tables),
             Row::TableRealign => b(s.table_realign),
@@ -223,6 +229,7 @@ impl Row {
             Row::HighContrast => s.high_contrast = !s.high_contrast,
             Row::Syntax => s.syntax = !s.syntax,
             Row::Recovery => s.recovery = !s.recovery,
+            Row::RememberPosition => s.remember_position = !s.remember_position,
             Row::FallbackEncoding => s.fallback_encoding = cycle(&crate::encoding::fallback_choices(), s.fallback_encoding, dir),
             Row::Tables => s.tables = !s.tables,
             Row::TableRealign => s.table_realign = !s.table_realign,
@@ -232,7 +239,7 @@ impl Row {
     }
 }
 
-fn tilde(p: &Path) -> String {
+pub fn tilde(p: &Path) -> String {
     if let Some(home) = std::env::var_os("HOME")
         && let Ok(rest) = p.strip_prefix(&home)
     {
@@ -284,6 +291,7 @@ impl App {
             palette: self.palette_setting.clone(),
             high_contrast: self.adjust.high_contrast,
             recovery: self.recovery_enabled,
+            remember_position: self.remember_position,
             fallback_encoding: self.fallback_encoding,
             tables: self.tables,
             table_realign: self.table_realign,
@@ -341,6 +349,9 @@ impl App {
         }
         if s.recovery != old.recovery {
             self.set_recovery_enabled(s.recovery);
+        }
+        if s.remember_position != old.remember_position {
+            self.set_remember_position(s.remember_position);
         }
         if s.fallback_encoding != old.fallback_encoding {
             // Used for files opened (or reloaded) from now on.
@@ -637,6 +648,7 @@ pub fn write_settings(doc: &mut DocumentMut, s: &Settings, existing_file: bool) 
     set("appearance", "theme", s.theme.name().into(), s.theme == d.theme);
     set("appearance", "high_contrast", s.high_contrast.into(), s.high_contrast == d.high_contrast);
     set("files", "recovery", s.recovery.into(), s.recovery == d.recovery);
+    set("files", "remember_position", s.remember_position.into(), s.remember_position == d.remember_position);
     let fallback = s.fallback_encoding.map_or("auto", |e| e.name());
     set("files", "fallback_encoding", fallback.into(), s.fallback_encoding == d.fallback_encoding);
     set("tables", "enabled", s.tables.into(), s.tables == d.tables);
