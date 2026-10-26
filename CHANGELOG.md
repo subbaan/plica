@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.15 (2026-10-26): highlights in new documents
+
+- **Fixed:** a highlight group limited to file types (`file_types = ["txt"]`, or File types in Preferences → Highlights) didn't show in a new Untitled document. An Untitled document now counts as plain text, so groups that include `txt` apply to it, the same as groups for every file. Groups for other types (e.g. `md`) start applying once you save it under that name.
+
 ## 0.5.14 (2026-10-25): back where you left off, recent files
 
 - **Files reopen where you left them:** the caret, the scroll position, and a language (F4) or encoding (Alt+E) you chose for that file by hand come back the next time you open it, from the command line, Ctrl+O, a drop or the recent list. If the file got shorter in the meantime, the caret goes to its end. `+LINE` on the command line still wins, and so does `--encoding`.

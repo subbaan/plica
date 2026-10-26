@@ -60,6 +60,10 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-26 · 0.5.15
+
+- **An Untitled document matches `file_types` as `txt`** (`Group::applies_to` with no path). It used to match only groups without file types, so a user's txt-only group vanished in a new tab. Plain text is what an Untitled tab is (no syntax colours either), so md-only or py-only groups still wait for a name. Extensionless files (`README`, `Makefile`) are unchanged: they match only groups without file types.
+
 ### 2026-10-25 · 0.5.14
 
 - **Places live in `$XDG_STATE_HOME/plica/recent.toml`, not the config dir:** they're Plica's own state, written all the time, and safe to delete. (Per-document highlights stay in `documents.toml` next to `config.toml` because the user writes those.) Keyed by canonical path like `documents.toml`. Lines and columns are 1-based on disk so the file reads naturally; the column counts chars, and restoring snaps it to a grapheme boundary and clamps it to the current text.

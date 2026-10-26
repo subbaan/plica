@@ -541,7 +541,7 @@ samples = true           # built-in TODO / FIXME / IMPORTANT / IDEA / DONE group
 # bold = true            # also: italic, underline
 # whole_word = true      # default true
 # case_sensitive = false # default false
-# file_types = ["md", "txt"]   # default: every file
+# file_types = ["md", "txt"]   # default: every file; Untitled counts as txt
 #
 # Alt+H (or F8) highlights the word under the caret in the current document
 # only; those rules are kept in documents.toml next to this file.

@@ -99,7 +99,8 @@ pub struct Group {
     pub underline: bool,
     pub case_sensitive: bool,
     pub whole_word: bool,
-    /// File extensions (lowercase, no dot); empty = every file.
+    /// File extensions (lowercase, no dot); empty = every file. An
+    /// Untitled document counts as `txt`.
     pub file_types: Vec<String>,
     pub enabled: bool,
 }
@@ -125,7 +126,11 @@ impl Group {
         if self.file_types.is_empty() {
             return true;
         }
-        let ext = path.and_then(Path::extension).map(|e| e.to_string_lossy().to_ascii_lowercase());
+        let ext = match path {
+            Some(p) => p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()),
+            // Untitled: plain text until it's saved under a name.
+            None => Some("txt".into()),
+        };
         ext.is_some_and(|e| self.file_types.contains(&e))
     }
 }
@@ -335,6 +340,16 @@ mod tests {
         assert!(h.active(None).is_empty());
         h.enabled = false;
         assert!(h.active(Some(Path::new("x.md"))).is_empty());
+    }
+
+    #[test]
+    fn untitled_counts_as_plain_text() {
+        let mut h = Highlights { samples: false, ..Highlights::default() };
+        h.groups.push(Group { file_types: vec!["txt".into()], ..group("Txt", &["a"]) });
+        h.groups.push(Group { file_types: vec!["md".into()], ..group("Md", &["b"]) });
+        let names = |p: Option<&Path>| h.active(p).into_iter().map(|g| g.name).collect::<Vec<_>>();
+        assert_eq!(names(None), ["Txt"]);
+        assert_eq!(names(Some(Path::new("/a/README"))), Vec::<String>::new());
     }
 
     #[test]
