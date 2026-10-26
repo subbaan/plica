@@ -7,6 +7,8 @@
 //!   bytes. `LineEnding` only decides what Enter inserts.
 //! - Saves are atomic (temp file in the same directory, fsync, rename, fsync
 //!   directory), follow symlinks to their target, and keep mode/owner.
+//!   A file whose permissions forbid writing is refused (`ReadOnly`), even
+//!   though the rename itself would be allowed.
 
 use anyhow::{Context, Result, bail};
 use std::fs::{self, File, Metadata};
@@ -178,6 +180,9 @@ impl Document {
         {
             bail!("{} is not a regular file; not overwriting", target.display());
         }
+        if existing.is_some() && !writable(&target) {
+            return Err(ReadOnly(target).into());
+        }
 
         let data = self.encoding.encode(text)?;
 
@@ -195,6 +200,27 @@ impl Document {
         self.inexact = false;
         Ok(())
     }
+}
+
+/// The file exists, but its permissions don't let us write it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnly(pub PathBuf);
+
+impl std::fmt::Display for ReadOnly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is read-only", self.0.display())
+    }
+}
+
+impl std::error::Error for ReadOnly {}
+
+/// Whether the file's own permissions let us write it. The OS won't stop an
+/// atomic save: replacing a file by rename only needs the folder to be
+/// writable, so a read-only file would be silently replaced. (Root may write
+/// anything, as with other editors.)
+fn writable(path: &Path) -> bool {
+    use rustix::{fs, io::Errno};
+    !matches!(fs::access(path, fs::Access::WRITE_OK), Err(Errno::ACCESS | Errno::ROFS))
 }
 
 fn resolve_symlinks(path: &Path) -> Result<PathBuf> {
@@ -343,6 +369,34 @@ mod tests {
         let mut l = load(&a).unwrap();
         l.doc.save("new").unwrap();
         assert_eq!(fs::read_to_string(&b).unwrap(), "new");
+    }
+
+    #[test]
+    fn read_only_files_are_refused_though_the_folder_is_writable() {
+        let d = tmpdir();
+        let p = d.path().join("ro.txt");
+        let link = d.path().join("ro-link.txt");
+        let hard = d.path().join("ro-hard.txt");
+        fs::write(&p, "keep me").unwrap();
+        symlink("ro.txt", &link).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o444)).unwrap();
+        if writable(&p) {
+            return; // running as root: the permission doesn't apply
+        }
+        for path in [&p, &link] {
+            let mut l = load(path).unwrap();
+            let e = l.doc.save("changed").unwrap_err();
+            assert_eq!(e.downcast_ref::<ReadOnly>().map(|r| r.0.file_name().unwrap().to_owned()), Some("ro.txt".into()));
+        }
+        fs::hard_link(&p, &hard).unwrap();
+        let mut l = load(&hard).unwrap();
+        assert!(l.doc.save("changed").unwrap_err().downcast_ref::<ReadOnly>().is_some());
+        assert_eq!(fs::read_to_string(&p).unwrap(), "keep me");
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 3, "no temp files");
+        // Writable again: saves as usual.
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o644)).unwrap();
+        l.doc.save("changed").unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), "changed");
     }
 
     #[test]

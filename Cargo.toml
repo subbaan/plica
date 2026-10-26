@@ -1,6 +1,6 @@
 [package]
 name = "plica"
-version = "0.5.16"
+version = "0.5.17"
 edition = "2024"
 description = "A mouse-friendly terminal text editor"
 license = "MIT"
@@ -18,7 +18,7 @@ encoding_rs = "0.8.42"
 notify = "8"
 ratatui = "0.30"
 ropey = "1"
-rustix = { version = "1", features = ["event", "stdio", "termios"] }
+rustix = { version = "1", features = ["event", "fs", "stdio", "termios"] }
 signal-hook = "0.3"
 # Syntax colouring: pure-Rust regexes (fancy-regex), so the static musl
 # build needs no C toolchain; grammars from two-face (bat's set).

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.17 (2026-10-26): read-only files are respected
+
+- **Fixed:** saving a read-only file (for example mode 444) replaced it with your edit, as long as its folder was writable. Plica now refuses: a "Read-only file" dialog says it wasn't saved and offers Save As for a copy under another name. The file and its permissions are left as they were, and the tab keeps your edits. The same applies to Save As → Replace onto a read-only file. As with other editors, root may still save over it.
+
 ## 0.5.16 (2026-10-26): highlight words in new documents
 
 - **Alt+H (or F8) works in a new Untitled document.** It used to say "Save the file first". The highlights are kept while you work, and the first save stores them for the file's new name in `documents.toml`, so they're still there next time you open it. If you save over a file that already has its own highlights, yours are added to them.

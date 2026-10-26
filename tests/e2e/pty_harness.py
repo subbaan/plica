@@ -4,7 +4,7 @@ Requires python-pexpect and python-pyte (dev only). Run: make e2e
 Works in a fresh temp dir; never touches your real palette or state dir.
 The temp dir is left in place (path printed at the end) for inspection.
 """
-import os, signal, sys, tempfile, time, unicodedata
+import gc, os, signal, sys, tempfile, time, unicodedata
 import pexpect, pyte
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,6 +32,10 @@ def check(name, cond, extra=""):
 
 class Term:
     def __init__(self, args, env_extra=None, wrap=()):
+        # Old Terms are reference cycles (the pyte callback holds self.p), so
+        # only the cyclic GC frees them, and pexpect's close sleeps per pty.
+        # Collect now, or that can land inside the timed startup pump below.
+        gc.collect()
         env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor",
                    XDG_STATE_HOME=os.path.join(WORK, "state"), XDG_CONFIG_HOME=os.path.join(WORK, "config"), DISPLAY="", WAYLAND_DISPLAY="")
         env.pop("NO_COLOR", None)
@@ -296,6 +300,16 @@ finally:
 t.send("\x13", 0.4)
 check("save succeeds once writable", open(rofile).read() == "edit original\n", open(rofile).read())
 t.send("\x11", 0.5)
+# A read-only file in a writable folder: a rename would replace it, so Plica refuses.
+os.chmod(rofile, 0o444)
+t = Term([rofile])
+t.send("more "); t.send("\x13", 0.4)
+check("read-only file: save refused with a dialog", "Read-only file" in t.text() and "Save As" in t.text(), t.text())
+check("read-only file: untouched", open(rofile).read() == "edit original\n" and os.stat(rofile).st_mode & 0o777 == 0o444)
+t.send("\x1b", 0.2)
+check("read-only file: still modified", "●" in t.line(0), t.line(0))
+t.send("\x11", 0.4); t.send("n", 0.5)
+os.chmod(rofile, 0o644)
 
 # ---------------------------------------------------------------- session 6: tabs
 fa = os.path.join(WORK, "alpha.txt"); open(fa, "w").write("alpha body\n")

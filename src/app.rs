@@ -1546,6 +1546,11 @@ impl App {
                     self.unmappable_dialog(&u.clone(), Action::SaveUtf8);
                     return SaveOutcome::Waiting;
                 }
+                if let Some(r) = e.downcast_ref::<crate::document::ReadOnly>() {
+                    // Keep `after_save`: Save As continues the chain.
+                    self.read_only_dialog(&r.clone());
+                    return SaveOutcome::Waiting;
+                }
                 self.after_save = None;
                 self.warn(format!("Save failed: {e:#}"));
                 SaveOutcome::Failed
@@ -1566,6 +1571,16 @@ impl App {
             format!("Can't save in {}", self.tab.doc.encoding.label()),
             vec![format!("{u} (line {}, column {col}; selected).", line + 1), "Save as UTF-8 instead, or change the text?".into()],
             vec![DButton::new("Save as &UTF-8", then), DButton::new("&Cancel", Action::Cancel)],
+        ));
+    }
+
+    /// The file's permissions forbid writing it: refuse, and offer a copy.
+    fn read_only_dialog(&mut self, r: &crate::document::ReadOnly) {
+        let name = r.0.file_name().map_or_else(|| r.0.display().to_string(), |n| n.to_string_lossy().into_owned());
+        self.dialog = Some(Dialog::new(
+            "Read-only file",
+            vec![format!("{name} is read-only, so it wasn't saved."), "Save As writes a copy under another name.".into()],
+            vec![DButton::new("Save &As…", Action::SaveAs), DButton::new("&Cancel", Action::Cancel)],
         ));
     }
 
@@ -1624,6 +1639,10 @@ impl App {
                 self.tab.doc.stamp = old_stamp;
                 if let (Some(u), Some(path)) = (e.downcast_ref::<encoding::Unmappable>(), path) {
                     self.unmappable_dialog(&u.clone(), Action::SaveAsUtf8(path));
+                    return false;
+                }
+                if let Some(r) = e.downcast_ref::<crate::document::ReadOnly>() {
+                    self.read_only_dialog(&r.clone());
                     return false;
                 }
                 self.after_save = None;
@@ -2764,6 +2783,32 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
         key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE); // Replace
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "new");
+        assert!(!a.tab.buf.is_dirty());
+    }
+
+    #[test]
+    fn read_only_file_is_not_saved_over_and_save_as_is_offered() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("ro.txt");
+        std::fs::write(&f, "keep").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new().append(true).open(&f).is_ok() {
+            return; // running as root
+        }
+        let mut a = app_with("", 40, 10);
+        a.open_file(&f);
+        type_str(&mut a, "edit ");
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(a.dialog.as_ref().map(|d| d.title.as_str()), Some("Read-only file"));
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "keep");
+        assert!(a.tab.buf.is_dirty());
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE); // Save As…
+        let copy = d.path().join("copy.txt");
+        a.prompt.as_mut().unwrap().input.set(&copy.display().to_string());
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(), "edit keep");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "keep");
         assert!(!a.tab.buf.is_dirty());
     }
 

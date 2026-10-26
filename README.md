@@ -64,7 +64,7 @@ With nothing configured, Plica uses the theme you picked with Kitty's theme sele
 
 ### Files, encodings and safety
 
-- Saves are atomic (temporary file, then rename). Permissions, ownership, symlinks and hard links are kept, and line endings (LF or CRLF) and a byte-order mark are preserved.
+- Saves are atomic (temporary file, then rename). Permissions, ownership, symlinks and hard links are kept, and line endings (LF or CRLF) and a byte-order mark are preserved. A read-only file is never saved over; Plica offers Save As instead.
 - A file changed by another program reloads by itself if you have no unsaved changes. If you do, Plica asks before overwriting.
 - Unsaved work is snapshotted to `~/.local/state/plica/recovery/` and offered back after a crash or a closed terminal window. Your original file is never written behind your back.
 - Encodings: UTF-8 (with or without BOM), UTF-16 and about 35 older encodings (Windows-125x, ISO-8859-x, KOI8, Shift_JIS, EUC-JP, GBK/GB18030, Big5, EUC-KR, …) are detected and saved back in the same encoding. Click the encoding in the status bar (or Alt+E / F7) to reopen or save in another one; `--encoding NAME` forces one. Bytes that aren't valid show as `\xNN` and are written back unchanged. A character the encoding can't store stops the save and offers UTF-8 instead.
