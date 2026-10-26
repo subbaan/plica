@@ -26,6 +26,8 @@ Steps for a public release. Nothing here runs automatically, and publishing is a
 
 ## Screenshots
 
+`tools/readme-shots.sh` retakes the README screenshots (`docs/screenshots/*.png`) automatically: each shot opens a throwaway Kitty with a copied theme from `~/.config/kitty/themes` (`--themes DIR` for another folder), sets the scene with Kitty's remote control and captures only that window. `--only NAME` retakes one. It needs X11, kitty and ImageMagick. Retake them before a release if the UI changed.
+
 `tools/screenshot.sh` (`-t nord`, `-t solarized-light`, `-s 120x34`, `--help`) opens the demo files in a new Kitty window with a built-in theme and nothing from your own setup. Tabs: `weather.py`, `backup.sh`, `garden.md` (a Markdown table and highlights) and `inventory.txt` (a box table). Ctrl+PageDown moves between them.
 
 ## Portability of the binary

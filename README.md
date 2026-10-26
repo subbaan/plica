@@ -8,6 +8,8 @@ Its three distinguishing features:
 - **Highlighting your own words and phrases**, across all files or just one document, without touching the file.
 - **Live colours from your desktop theme:** Plica follows a Kitty-format colour file (for example the one a theme switcher writes) and recolours itself the moment it changes.
 
+![Plica editing a Python file with syntax colours, four files open in tabs](docs/screenshots/python.png)
+
 ## Building
 
 Plica is written in Rust. You need a Rust toolchain (1.88 or newer; `rustup` or your distribution's `rust` package) and `make`.
@@ -39,6 +41,8 @@ The title bar has clickable Prefs, Save, Table, Wrap, Mouse and Help buttons (wh
 
 ### Tables
 
+![A Markdown table with the caret in a cell, and highlighted words in the list below](docs/screenshots/tables.png)
+
 - **Make one:** Alt+T (or F6, or the Table button) outside a table: a new Markdown, Unicode box or ASCII table. Or type a Markdown header row followed by `|---|---|`.
 - **Edit:** Tab / Shift+Tab move between cells; Tab in the last cell and Enter add a row. Typing keeps the column lined up. Backspace stops at the cell's edge. Typing `|` in a Markdown cell inserts `\|`.
 - **Table menu** (Alt+T, F6, right-click or the Table button inside a table): format, insert / delete / move rows and columns, align columns, convert between Markdown, box and ASCII, select a row, column or table, copy for a spreadsheet, and a short guide.
@@ -47,6 +51,8 @@ The title bar has clickable Prefs, Save, Table, Wrap, Mouse and Help buttons (wh
 - Wide tables don't wrap; the caret's table scrolls sideways on its own.
 - **Tables off:** Preferences → Tables → Tables (`[tables] enabled = false`) treats every table as plain text, for example for ASCII art or game maps drawn with `+---+` borders.
 - Only complete tables count: a Markdown header with its `---` row, or a fully bordered block. Text laid out in columns with spaces is never treated as a table. Markdown tables inside code blocks are left alone; bordered tables count anywhere.
+
+![A bordered table with a block of cells selected](docs/screenshots/bordered.png)
 
 ### Syntax colours
 
@@ -62,6 +68,10 @@ TODO, FIXME, IMPORTANT, IDEA and DONE are highlighted out of the box. Add your o
 
 With nothing configured, Plica uses the theme you picked with Kitty's theme selector (`kitty +kitten themes`, which writes `~/.config/kitty/current-theme.conf`) and follows it when you pick another. Without one it uses its Dracula theme. Built-in themes: Dracula, Gruvbox, Nord, Solarized Dark and Light (`--theme NAME`). `--palette PATH` (or `PLICA_PALETTE`) follows any Kitty-format colour file, reloading live; a broken or missing file keeps the last good colours. Preferences → Appearance has a preview, a high-contrast mode, and `[appearance.colours]` in the config overrides individual colours. `NO_COLOR` is respected.
 
+![The same file in four Kitty themes: Monokai Pro, Everforest Light, Alucard and Gruvbox Material Light](docs/screenshots/themes.png)
+
+![Find in a light theme, every match marked](docs/screenshots/find.png)
+
 ### Files, encodings and safety
 
 - Saves are atomic (temporary file, then rename). Permissions, ownership, symlinks and hard links are kept, and line endings (LF or CRLF) and a byte-order mark are preserved. A read-only file is never saved over; Plica offers Save As instead.
@@ -72,6 +82,8 @@ With nothing configured, Plica uses the theme you picked with Kitty's theme sele
 ### Configuration
 
 `~/.config/plica/config.toml` (or `$XDG_CONFIG_HOME/plica/config.toml`). Preferences (F9) edits it for you, keeping your comments. `plica --print-config` prints a fully commented default, and `plica --check-config` lists any problems. Every command can be rebound in `[keys]`. Preferences → Keybindings → **Edit config.toml** opens the file in a Plica tab (the commented template if you don't have one yet); saving it applies your changes at once.
+
+![Preferences, Appearance page](docs/screenshots/preferences.png)
 
 ## Terminals
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.18 (2026-10-26): shorter paths in the status bar, screenshots
+
+- The status bar shows a file in your home folder as `~/notes/todo.txt`, and when the path doesn't fit it drops the start (`…/notes/todo.txt`) so the file name stays visible. It used to cut off the end, which in a narrow window left only something like `/home/al`.
+- The README has screenshots: Python with syntax colours, a Markdown table with highlights, a bordered table with cells selected, the same file in four themes, find in a light theme, and Preferences.
+
 ## 0.5.17 (2026-10-26): read-only files are respected
 
 - **Fixed:** saving a read-only file (for example mode 444) replaced it with your edit, as long as its folder was writable. Plica now refuses: a "Read-only file" dialog says it wasn't saved and offers Save As for a copy under another name. The file and its permissions are left as they were, and the tab keeps your edits. The same applies to Save As → Replace onto a read-only file. As with other editors, root may still save over it.

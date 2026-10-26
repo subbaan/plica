@@ -386,7 +386,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             buf.set_stringn(status.x, status.y, format!(" {m}"), left_w, surface);
         }
         None => {
-            let path = app.tab.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "Untitled (Ctrl+S to choose a name)".into());
+            let path = match &app.tab.doc.path {
+                Some(p) => fit_start(&crate::prefs::tilde(p), left_w.saturating_sub(2)),
+                None => "Untitled (Ctrl+S to choose a name)".into(),
+            };
             buf.set_stringn(status.x, status.y, format!(" {path}"), left_w, surface.add_modifier(Modifier::DIM));
         }
     }
@@ -865,6 +868,25 @@ fn fit_middle(s: &str, w: usize) -> String {
     format!("{start}…{end}")
 }
 
+/// Shorten `s` to at most `w` cells by dropping its start (`…/demo/a.txt`),
+/// so a path keeps its file name.
+fn fit_start(s: &str, w: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if crate::layout::text_width(s) <= w {
+        return s.to_string();
+    }
+    let (mut tail, mut used) = (Vec::new(), 1); // 1: the ellipsis
+    for g in s.graphemes(true).rev() {
+        used += crate::layout::text_width(g);
+        if used > w {
+            break;
+        }
+        tail.push(g);
+    }
+    let tail: String = tail.into_iter().rev().collect();
+    "…".chars().take(w).chain(tail.chars()).collect()
+}
+
 /// Rounded box with a title in the top border; returns the inner rect.
 fn draw_box(buf: &mut TermBuf, r: Rect, title: &str, st: Style, border: Style) -> Rect {
     for y in r.y..r.bottom() {
@@ -1268,6 +1290,15 @@ mod tests {
         assert_eq!(fit_middle("dropped note.txt", 20), "dropped note.txt");
         assert_eq!(fit_middle("dropped note.txt", 9), "drop….txt");
         assert_eq!(fit_middle("abc", 1), "…");
+    }
+
+    #[test]
+    fn fit_start_keeps_the_file_name() {
+        assert_eq!(fit_start("~/demo/garden.md", 20), "~/demo/garden.md");
+        assert_eq!(fit_start("/tmp/plica-shots/demo/garden.md", 15), "…demo/garden.md");
+        assert_eq!(fit_start("/x/日本語.txt", 9), "…本語.txt");
+        assert_eq!(fit_start("abc", 1), "…");
+        assert_eq!(fit_start("abc", 0), "");
     }
 
     #[test]
