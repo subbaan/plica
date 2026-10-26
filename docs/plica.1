@@ -1,5 +1,5 @@
 .\" Man page for Plica. Read in place with: man -l docs/plica.1
-.TH PLICA 1 "2026-10-25" "Plica 0.5.15" "User Commands"
+.TH PLICA 1 "2026-10-25" "Plica 0.5.16" "User Commands"
 .SH NAME
 plica \- a mouse-friendly terminal text editor
 .SH SYNOPSIS
@@ -140,7 +140,8 @@ Settings, highlight groups and key bindings
 Preferences (F9) edits it, keeping comments.
 .TP
 .I $XDG_CONFIG_HOME/plica/documents.toml
-Highlights for individual documents, by full path.
+Highlights for individual documents, by full path. An Untitled
+document's highlights are written here when it is first saved.
 .TP
 .I $XDG_STATE_HOME/plica/recovery/
 Snapshots of unsaved work, offered back after a crash

@@ -1608,10 +1608,14 @@ impl App {
                 self.tab.buf.mark_saved();
                 self.tab.disk_conflict = false;
                 self.info(format!("Saved as {}", self.tab.doc.display_name()));
-                if let (Some(from), Some(to)) = (old.as_deref(), self.tab.doc.path.clone())
-                    && let Err(e) = self.doc_rules.carry_over(from, &to)
-                {
-                    self.warn(format!("Document highlights not copied: {e:#}"));
+                let to = self.tab.doc.path.clone().expect("just saved there");
+                let copied = match old.as_deref() {
+                    Some(from) => self.doc_rules.carry_over(from, &to),
+                    None => self.doc_rules.adopt(&to, &self.tab.doc_groups),
+                };
+                match copied {
+                    Ok(()) => self.tab.doc_groups.clear(),
+                    Err(e) => self.warn(format!("Document highlights not copied: {e:#}")),
                 }
                 true
             }
@@ -1636,20 +1640,16 @@ impl App {
             return Vec::new();
         }
         let path = self.tab.doc.path.as_deref();
-        let mut v: Vec<_> = path
-            .map(|p| self.doc_rules.groups(p).iter().filter(|g| g.enabled && !g.terms.is_empty()).cloned().collect())
-            .unwrap_or_default();
+        let own = path.map_or(self.tab.doc_groups.as_slice(), |p| self.doc_rules.groups(p));
+        let mut v: Vec<_> = own.iter().filter(|g| g.enabled && !g.terms.is_empty()).cloned().collect();
         v.extend(self.highlights.active(path));
         v
     }
 
     /// Toggle the selected text (or the word at the caret) in this
-    /// document's "Marked" highlight group.
+    /// document's "Marked" highlight group. An Untitled tab keeps the group
+    /// in memory until its first save.
     fn highlight_word(&mut self) {
-        let Some(path) = self.tab.doc.path.clone() else {
-            self.warn("Save the file first: document highlights are kept by file path");
-            return;
-        };
         let sel = self.tab.buf.sel;
         let (s, e) = if sel.is_empty() { self.tab.buf.word_at(sel.head) } else { (sel.start(), sel.end()) };
         let term: String = self.tab.buf.rope().slice(s..e).into();
@@ -1659,7 +1659,11 @@ impl App {
             return;
         }
         let label = self.keymap.label(Command::HighlightWord);
-        match self.doc_rules.toggle_marked(&path, term) {
+        let toggled = match self.tab.doc.path.clone() {
+            Some(path) => self.doc_rules.toggle_marked(&path, term),
+            None => Ok(crate::dochl::toggle_marked(&mut self.tab.doc_groups, term)),
+        };
+        match toggled {
             Ok(true) => self.info(format!("Highlighting \u{201c}{term}\u{201d} in this document ({label} again to remove)")),
             Ok(false) => self.info(format!("Removed highlight \u{201c}{term}\u{201d}")),
             Err(e) => self.warn(format!("Could not save document highlights: {e:#}")),
@@ -2941,8 +2945,6 @@ pub(crate) mod tests {
         std::fs::write(&f, "ask Alice now\n").unwrap();
         let mut a = app_with("", 40, 10);
         a.doc_rules = crate::dochl::DocRules::load(Some(d.path().join("documents.toml"))).0;
-        a.highlight_word();
-        assert!(a.status.as_ref().unwrap().0.contains("Save the file first"));
         assert!(a.open_file(&f));
         a.tab.buf.sel = Selection::caret(6); // inside "Alice"
         a.highlight_word();
@@ -2952,6 +2954,25 @@ pub(crate) mod tests {
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "ask Alice now\n", "file untouched");
         a.highlight_word();
         assert_ne!(a.active_highlights()[0].name, crate::dochl::MARKED, "second press removes it");
+    }
+
+    #[test]
+    fn untitled_highlights_are_kept_until_the_first_save() {
+        let d = tempfile::tempdir().unwrap();
+        let rules = d.path().join("documents.toml");
+        let mut a = app_with("ask Alice now", 40, 10);
+        a.doc_rules = crate::dochl::DocRules::load(Some(rules.clone())).0;
+        a.tab.buf.sel = Selection::caret(6);
+        a.highlight_word();
+        assert_eq!(a.active_highlights()[0].terms, ["Alice"]);
+        assert!(!rules.exists(), "nothing written while Untitled");
+        let f = d.path().join("n.txt");
+        assert!(a.save_as_path(f.clone()));
+        assert!(a.tab.doc_groups.is_empty());
+        assert_eq!(a.active_highlights()[0].terms, ["Alice"]);
+        let fresh = crate::dochl::DocRules::load(Some(rules)).0;
+        assert_eq!(fresh.groups(&f)[0].terms, ["Alice"]);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "ask Alice now");
     }
 
     #[test]

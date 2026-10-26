@@ -60,6 +60,11 @@ The top of the view is `(top_line, top_row)`: logical line plus visual row withi
 
 ## Decision and workaround log
 
+### 2026-10-26 · 0.5.16
+
+- **Untitled tabs hold Alt+H groups in memory** (`Tab::doc_groups`), since `documents.toml` is keyed by path and an Untitled tab has none. `active_highlights` reads them in place of `doc_rules` while there's no path. Every way an Untitled tab gets a path (Save, Save As, Save All, close/quit dialogs) goes through `App::save_as_path`, which calls `DocRules::adopt` after a successful save and clears the tab's copy only if that write worked. The toggle itself is the shared `dochl::toggle_marked`, so both paths behave the same.
+- **`adopt` merges, `carry_over` doesn't.** Save As of a named file leaves the target's existing rules alone (they were set for that path on purpose). An Untitled document's marks were made just now, so they're merged into a same-named group on the target (case-insensitive term dedupe) instead of being dropped. Not in recovery snapshots: losing marks after a crash costs a keystroke per word, and keeping them would mean a new snapshot format.
+
 ### 2026-10-26 · 0.5.15
 
 - **An Untitled document matches `file_types` as `txt`** (`Group::applies_to` with no path). It used to match only groups without file types, so a user's txt-only group vanished in a new tab. Plain text is what an Untitled tab is (no syntax colours either), so md-only or py-only groups still wait for a name. Extensionless files (`README`, `Makefile`) are unchanged: they match only groups without file types.

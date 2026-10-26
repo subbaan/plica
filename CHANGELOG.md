@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.16 (2026-10-26): highlight words in new documents
+
+- **Alt+H (or F8) works in a new Untitled document.** It used to say "Save the file first". The highlights are kept while you work, and the first save stores them for the file's new name in `documents.toml`, so they're still there next time you open it. If you save over a file that already has its own highlights, yours are added to them.
+- Closing an Untitled tab without saving drops its highlights along with the text. Crash recovery brings back the text of an Untitled tab, but not its highlights.
+
 ## 0.5.15 (2026-10-26): highlights in new documents
 
 - **Fixed:** a highlight group limited to file types (`file_types = ["txt"]`, or File types in Preferences → Highlights) didn't show in a new Untitled document. An Untitled document now counts as plain text, so groups that include `txt` apply to it, the same as groups for every file. Groups for other types (e.g. `md`) start applying once you save it under that name.

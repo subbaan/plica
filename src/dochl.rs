@@ -5,7 +5,9 @@
 //! The file on disk is the source of truth: every change re-reads it,
 //! updates only the one document's entry with `toml_edit` (other entries and
 //! comments are kept), and writes it atomically. Moving or renaming a file
-//! outside Plica loses its rules (Save As carries them over).
+//! outside Plica loses its rules (Save As carries them over). An Untitled
+//! tab keeps its groups in `Tab::doc_groups` until the first save `adopt`s
+//! them.
 
 use crate::highlight::{Colour, Group, Role};
 use anyhow::{Context, Result};
@@ -81,26 +83,32 @@ impl DocRules {
         // Start from what is on disk now.
         let (fresh, _) = Self::load(self.file.clone());
         let mut groups = fresh.groups(doc).to_vec();
-        let i = match groups.iter().position(|g| g.name == MARKED) {
-            Some(i) => i,
-            None => {
-                groups.insert(0, marked_group());
-                0
-            }
-        };
-        let g = &mut groups[i];
-        let on = if let Some(j) = g.terms.iter().position(|t| t.eq_ignore_ascii_case(term)) {
-            g.terms.remove(j);
-            false
-        } else {
-            g.terms.push(term.to_string());
-            true
-        };
-        if g.terms.is_empty() {
-            groups.remove(i);
-        }
+        let on = toggle_marked(&mut groups, term);
         self.set(doc, groups)?;
         Ok(on)
+    }
+
+    /// Give a newly saved document the groups it had while Untitled. Terms
+    /// are added to any groups of the same name the path already has.
+    pub fn adopt(&mut self, doc: &Path, groups: &[Group]) -> Result<()> {
+        if groups.is_empty() {
+            return Ok(());
+        }
+        let (fresh, _) = Self::load(self.file.clone());
+        let mut have = fresh.groups(doc).to_vec();
+        for g in groups {
+            match have.iter_mut().find(|h| h.name == g.name) {
+                Some(h) => {
+                    for t in &g.terms {
+                        if !h.terms.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                            h.terms.push(t.clone());
+                        }
+                    }
+                }
+                None => have.push(g.clone()),
+            }
+        }
+        self.set(doc, have)
     }
 
     /// Copy a document's rules to a new path (Save As).
@@ -111,6 +119,30 @@ impl DocRules {
         }
         self.set(to, g)
     }
+}
+
+/// Toggle `term` in the "Marked" group of `groups` (created first, removed
+/// when it empties). Returns true if the term is now highlighted.
+pub fn toggle_marked(groups: &mut Vec<Group>, term: &str) -> bool {
+    let i = match groups.iter().position(|g| g.name == MARKED) {
+        Some(i) => i,
+        None => {
+            groups.insert(0, marked_group());
+            0
+        }
+    };
+    let g = &mut groups[i];
+    let on = if let Some(j) = g.terms.iter().position(|t| t.eq_ignore_ascii_case(term)) {
+        g.terms.remove(j);
+        false
+    } else {
+        g.terms.push(term.to_string());
+        true
+    };
+    if g.terms.is_empty() {
+        groups.remove(i);
+    }
+    on
 }
 
 fn marked_group() -> Group {
@@ -277,6 +309,21 @@ mod tests {
         std::fs::write(&c, "").unwrap();
         r.carry_over(&a, &c).unwrap();
         assert_eq!(r.groups(&c)[0].terms, ["x"]);
+    }
+
+    #[test]
+    fn adopt_merges_into_existing_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        std::fs::write(&a, "x").unwrap();
+        let mut r = DocRules::load(Some(dir.path().join("documents.toml"))).0;
+        r.toggle_marked(&a, "Bob").unwrap();
+        let mut mine = Vec::new();
+        toggle_marked(&mut mine, "bob");
+        toggle_marked(&mut mine, "Carol");
+        r.adopt(&a, &mine).unwrap();
+        assert_eq!(r.groups(&a).len(), 1);
+        assert_eq!(r.groups(&a)[0].terms, ["Bob", "Carol"]);
     }
 
     #[test]

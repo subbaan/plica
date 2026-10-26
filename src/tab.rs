@@ -62,6 +62,9 @@ pub struct Tab {
     pub encoding_manual: bool,
     /// Where this tab was when last recorded in the recent-files list.
     pub spot_noted: Option<crate::recent::Spot>,
+    /// Document highlights (Alt+H) of an Untitled tab, kept in memory until
+    /// its first save writes them to `documents.toml`.
+    pub doc_groups: Vec<crate::highlight::Group>,
 }
 
 static NEXT_TAB_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -99,6 +102,7 @@ impl Tab {
             snap_at: now,
             encoding_manual: false,
             spot_noted: None,
+            doc_groups: Vec::new(),
         }
     }
 
