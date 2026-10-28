@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.19 (2026-10-28): README reorganised
+
+- The README leads with editable tables, has a Download section ahead of building from source, and keeps the finer details of position history and overwrite mode in the man page. Colours and Configuration are split into short points, with config examples.
+- **Corrected:** the README said every save is atomic. A file with hard links is written in place to keep its links, so that save isn't atomic; the README now says so.
+
 ## 0.5.18 (2026-10-26): shorter paths in the status bar, screenshots
 
 - The status bar shows a file in your home folder as `~/notes/todo.txt`, and when the path doesn't fit it drops the start (`…/notes/todo.txt`) so the file name stays visible. It used to cut off the end, which in a narrow window left only something like `/home/al`.
