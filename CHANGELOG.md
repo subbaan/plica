@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.21 (2026-10-28): shorter README opening
+
+- The README now opens with one plain line: a mouse-friendly text editor for the terminal that keeps text files tidy with editable tables. The comparison with Mousepad, Gedit, Vim and Emacs is gone.
+
 ## 0.5.20 (2026-10-28): README opens with a plain-text table
 
 - The README's first screenshot is now an ordinary `.txt` file: a box table and an ASCII table, a column that has just widened as text was typed into its cell, and highlighted names, statuses and notes. The Markdown table shot stays in the Tables section.

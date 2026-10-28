@@ -1,6 +1,6 @@
 # Plica
 
-A mouse-friendly text editor for the terminal. It works like Mousepad or Gedit, not like Vim or Emacs: typing edits straight away, the usual shortcuts work (Ctrl+S, Ctrl+Z, Ctrl+F…), and you can click, drag, scroll and press buttons with the mouse.
+A mouse-friendly text editor for the terminal. It keeps plain text files tidy with tables you can edit cell by cell, right in the text.
 
 Its three distinguishing features:
 
