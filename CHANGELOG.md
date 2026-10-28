@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.20 (2026-10-28): README opens with a plain-text table
+
+- The README's first screenshot is now an ordinary `.txt` file: a box table and an ASCII table, a column that has just widened as text was typed into its cell, and highlighted names, statuses and notes. The Markdown table shot stays in the Tables section.
+
 ## 0.5.19 (2026-10-28): README reorganised
 
 - The README leads with editable tables, has a Download section ahead of building from source, and keeps the finer details of position history and overwrite mode in the man page. Colours and Configuration are split into short points, with config examples.

@@ -11,4 +11,11 @@ name = "Weather"
 terms = ["frost", "rain"]
 fg = "color6"
 underline = true
-file_types = ["md"]
+file_types = ["md", "txt"]
+
+[[highlights.group]]
+name = "People"
+terms = ["Sam", "Priya", "Alex", "Jo"]
+fg = "color4"
+bold = true
+file_types = ["txt"]

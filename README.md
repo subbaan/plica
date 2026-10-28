@@ -4,11 +4,13 @@ A mouse-friendly text editor for the terminal. It works like Mousepad or Gedit, 
 
 Its three distinguishing features:
 
-- **Tables you can edit.** Markdown tables and bordered plain-text tables (ASCII `+---+` or Unicode `┌───┐`) are edited cell by cell: Tab between cells, columns stay lined up as you type, rows and columns can be added or moved, and cells copy and paste to and from spreadsheets. The file stays ordinary text.
+- **Tables you can edit, in plain text.** Bordered tables in any text file (ASCII `+---+` or Unicode `┌───┐`) and Markdown tables are edited cell by cell: Tab between cells, columns widen and narrow as you type, rows and columns can be added or moved, and cells copy and paste to and from spreadsheets. The file stays ordinary text, readable anywhere.
 - **Highlighting your own words and phrases**, across all files or just one document, without touching the file.
 - **Live colours from your desktop theme:** Plica follows a Kitty-format colour file (for example the one a theme switcher writes) and recolours itself the moment it changes.
 
-![A Markdown table with the caret in a cell, and highlighted words in the list below](docs/screenshots/tables.png)
+![A plain .txt file with a box table and an ASCII table. Text was just typed into a cell, and its column has widened to fit. Names, statuses and notes are highlighted.](docs/screenshots/plaintext.png)
+
+*An ordinary `.txt` file. "(butane)" was just typed into the Item cell, and the column widened to fit, borders and all. The coloured names, statuses and notes are highlights; nothing is added to the file.*
 
 ## Getting Plica
 

@@ -1,0 +1,30 @@
+Lake District trip, 14-18 April
+
+Who brings what:
+
+┌─────────────────┬──────────┬─────┬────────┐
+│ Item            │ Who      │ Qty │ Status │
+├─────────────────┼──────────┼─────┼────────┤
+│ Tent (4-person) │ Sam      │   1 │ DONE   │
+│ Camping stove   │ Priya    │   1 │ DONE   │
+│ Gas canisters   │ Priya    │   3 │ TODO   │
+│ Sleeping mats   │ everyone │   5 │ TODO   │
+│ Head torches    │ Alex     │   5 │ DONE   │
+│ First aid kit   │ Jo       │   1 │ TODO   │
+└─────────────────┴──────────┴─────┴────────┘
+
+Walks:
+
++-----+------------------------------+----+-------+
+| Day | Walk                         | km | Climb |
++-----+------------------------------+----+-------+
+| Tue | Catbells from Hawes End      |  6 | 450 m |
+| Wed | Helvellyn by Striding Edge   | 14 | 950 m |
+| Thu | Rest day, kayaks on the lake |  - |     - |
+| Fri | Round Buttermere             |  7 | 100 m |
++-----+------------------------------+----+-------+
+
+- IMPORTANT: book the campsite by Friday
+- TODO: check the forecast for rain on Wednesday
+- IDEA: fish and chips in Keswick on the last night
+- DONE: train tickets for Priya and Jo

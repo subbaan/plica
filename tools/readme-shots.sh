@@ -7,7 +7,7 @@
 # with a temporary config, Plica with temporary config, state and cache.
 set -euo pipefail
 
-VERSION=1.0.0
+VERSION=1.1.0
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/docs/screenshots/demo"
 OUT="$ROOT/docs/screenshots"
@@ -69,7 +69,7 @@ shot() {
     local home="$work/home"
     local files="$home/demo" pal="$home/.config/kitty/themes/${theme##*/}.conf"
     mkdir -p "$files" "$home/.config/plica" "$home/.config/kitty/themes" "$home/.local/state" "$home/.cache"
-    cp "$DEMO"/weather.py "$DEMO"/backup.sh "$DEMO"/garden.md "$DEMO"/inventory.txt "$files/"
+    cp "$DEMO"/weather.py "$DEMO"/backup.sh "$DEMO"/garden.md "$DEMO"/inventory.txt "$DEMO"/camping.txt "$files/"
     chmod +x "$files/backup.sh" "$files/weather.py"
     cp "$DEMO/config.toml" "$home/.config/plica/config.toml"
     cp "$src" "$pal"
@@ -89,7 +89,7 @@ EOF
         kitty --config "$work/kitty.conf" --listen-on "unix:$sock" --title "Plica" \
         env -u PLICA_PALETTE -u NO_COLOR HOME="$home" XDG_CONFIG_HOME="$home/.config" \
         XDG_STATE_HOME="$home/.local/state" XDG_CACHE_HOME="$home/.cache" \
-        "$BIN" --palette "$pal" weather.py backup.sh garden.md inventory.txt) >/dev/null 2>&1 &
+        "$BIN" --palette "$pal" weather.py backup.sh garden.md inventory.txt camping.txt) >/dev/null 2>&1 &
     local pid=$!
     for _ in $(seq 60); do [[ -S "$sock" ]] && break; sleep 0.1; done
     sleep 1.2
@@ -130,6 +130,11 @@ themes_grid() {
     echo "$OUT/themes.png"
 }
 
+# Plain-text tables (box and ASCII) with highlights; text typed into a cell
+# has just widened its column.
+rows=33 shot plaintext faves/gruvbox-dark \
+    key:alt+5 key:ctrl+home key:ctrl+g text:10 key:enter \
+    key:right key:right key:right key:right key:right key:right key:right key:right key:right key:right key:right key:right key:right key:right key:right text:" (butane)"
 # Python with syntax colours; the caret on a function name.
 shot python faves/Catppuccin-Macchiato \
     key:ctrl+home key:ctrl+g text:22 key:enter key:end

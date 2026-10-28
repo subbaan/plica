@@ -5,7 +5,7 @@
 # highlights, documents, recovery snapshots, key remaps) can show up.
 set -euo pipefail
 
-VERSION=1.0.0
+VERSION=1.1.0
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DEMO="$ROOT/docs/screenshots/demo"
 BIN="$ROOT/plica"
@@ -21,7 +21,7 @@ usage() {
 Usage: tools/screenshot.sh [options]
 
 Opens Plica on the demo files (weather.py, backup.sh, garden.md,
-inventory.txt) in a new Kitty window with a built-in theme. The files,
+inventory.txt, camping.txt) in a new Kitty window with a built-in theme. The files,
 config and state live in a fresh plica-demo.* folder in \$TMPDIR or /tmp
 (left in place; its path is printed), so editing during the shoot changes
 nothing else.
@@ -63,14 +63,14 @@ esac
 
 work=$(mktemp -d -p "${TMPDIR:-/tmp}" plica-demo.XXXXXX)
 mkdir -p "$work/files" "$work/config/plica" "$work/state" "$work/cache"
-cp "$DEMO"/weather.py "$DEMO"/backup.sh "$DEMO"/garden.md "$DEMO"/inventory.txt "$work/files/"
+cp "$DEMO"/weather.py "$DEMO"/backup.sh "$DEMO"/garden.md "$DEMO"/inventory.txt "$DEMO"/camping.txt "$work/files/"
 chmod +x "$work/files/backup.sh" "$work/files/weather.py"
 cp "$DEMO/config.toml" "$work/config/plica/config.toml"
 echo "demo folder: $work"
 
 # Relative names, so the status bar shows "weather.py", not a /tmp path.
 cd "$work/files"
-files=(weather.py backup.sh garden.md inventory.txt)
+files=(weather.py backup.sh garden.md inventory.txt camping.txt)
 run_env=(env -u PLICA_PALETTE -u NO_COLOR
     XDG_CONFIG_HOME="$work/config" XDG_STATE_HOME="$work/state" XDG_CACHE_HOME="$work/cache")
 
