@@ -48,7 +48,7 @@ Press **F1** inside Plica for the keys, **F9** for Preferences. The full key lis
 
 The title bar has clickable Prefs, Save, Table, Wrap, Mouse and Help buttons (when the window is wide enough). Alt+M hands the mouse to the terminal, for its own text selection.
 
-Files reopen where you left them, and **Alt+R** lists recent ones. **Insert** switches to overwrite mode, handy for ASCII art. The man page has the details of both.
+Open and Save As use a file dialog with places (recent files, home, bookmarks), sortable columns and a preview, and you can still type a path. Save As also picks the encoding and line endings. Files reopen where you left them, and **Alt+R** lists recent ones. **Insert** switches to overwrite mode, handy for ASCII art. The man page has the details of both.
 
 ### Tables
 

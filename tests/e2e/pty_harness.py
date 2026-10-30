@@ -83,6 +83,13 @@ class Term:
                 return x
         raise ValueError(needle)
 
+    def row_of(self, needle, start=0):
+        """First screen row from `start` containing `needle`."""
+        for y in range(start, ROWS):
+            if needle in self.screen.display[y]:
+                return y
+        raise ValueError(needle)
+
     def cell(self, x, y):
         return self.screen.buffer[y][x]
 
@@ -881,8 +888,9 @@ t.send("\x1br")  # Alt+R
 check("recent: Alt+R lists recent files", "Recent files" in t.text() and "places.py" in t.text(), t.text())
 t.send("\x1b")
 t.send("\x0f")  # Ctrl+O
-check("recent: the Open prompt mentions the list", "recent files" in t.line(ROWS - 2), t.line(ROWS - 2))
-t.send("\x1b[B")  # Down
+check("recent: the Open dialog has a Recent place", "Recent" in t.text(), t.text())
+y = t.row_of("Recent", 2)
+t.click(t.col_of(y, "Recent"), y)
 t.send("places")
 t.send("\r", 0.4)
 check("recent: chosen from the list, opens where it was left", "places.py" in t.line(0) and "Ln 5," in t.line(ROWS - 1), t.line(0) + " / " + t.line(ROWS - 1))
@@ -890,6 +898,57 @@ t.send("\x11", 0.6)
 check("recent: quits again", not t.p.isalive())
 state = open(os.path.join(WORK, "state", "plica", "recent.toml")).read()
 check("recent: kept in the state dir, not in the file", "places.py" in state and open(rdoc).read().startswith("x1 = 1\n"), state[:300])
+
+# ---------------------------------------------------------------- session 22: the Open / Save as dialog
+fd = os.path.join(WORK, "fd")
+os.makedirs(os.path.join(fd, "sub"))
+open(os.path.join(fd, "alpha.txt"), "w").write("alpha\n")
+open(os.path.join(fd, "beta.md"), "w").write("# Beta heading\n")
+open(os.path.join(fd, ".dotfile"), "w").write("")
+t = Term([os.path.join(fd, "alpha.txt")])
+def dlg():  # the dialog's rows, without the tab bar, prompt and status bar
+    return "\n".join(t.screen.display[1:ROWS - 2])
+t.send("\x0f")  # Ctrl+O
+check("filedlg: Ctrl+O opens the dialog in the file's folder", "Open" in t.line(1) and "fd" in t.line(2) and "beta.md" in dlg() and "sub/" in dlg(), t.text())
+check("filedlg: hidden files are hidden", ".dotfile" not in dlg())
+y = t.row_of("Hidden", 2)
+t.click(t.col_of(y, "Hidden"), y)
+check("filedlg: clicking Hidden shows them", ".dotfile" in dlg(), dlg())
+t.click(t.col_of(y, "Hidden"), y)
+t.send("bet")
+check("filedlg: typing filters the list", "beta.md" in dlg() and "alpha.txt" not in dlg(), dlg())
+t.send("\r", 0.4)
+check("filedlg: Enter opens the match", "beta.md" in t.line(0) and "Open" not in t.line(1) and "Beta heading" in t.text(), t.text())
+t.send("\x0f")
+y = t.row_of("sub/", 2)
+t.click(t.col_of(y, "sub/"), y); t.click(t.col_of(y, "sub/"), y)
+check("filedlg: double-click goes into a folder", "sub" in t.line(2) and "(empty folder)" in dlg(), dlg())
+t.send("\x7f")  # Backspace in the empty name field: up again
+check("filedlg: Backspace goes back up", "beta.md" in dlg(), dlg())
+t.send("\x04")  # Ctrl+D
+marks = open(os.path.join(WORK, "config", "plica", "bookmarks.toml")).read()
+check("filedlg: Ctrl+D bookmarks the folder in the config dir", fd in marks and "Unbookmark" in t.line(2), marks)
+t.send("\x04")
+t.send("\x1b", 0.3)
+check("filedlg: Esc closes it", "Open" not in t.line(1))
+t.send("\x0e")  # Ctrl+N: a new Untitled tab
+t.send("fresh\r")
+t.send("\x13")  # Ctrl+S
+check("filedlg: an Untitled tab asks with Save as, where the dialog was last", "Save as" in t.line(1) and "beta.md" in dlg(), t.text())
+t.send("\x0e")  # Ctrl+N in the dialog: New folder
+check("filedlg: Ctrl+N asks for a folder name", "New folder name" in t.line(ROWS - 2), t.line(ROWS - 2))
+t.send("made\r")
+check("filedlg: the folder is made and selected", os.path.isdir(os.path.join(fd, "made")) and "made/" in dlg(), dlg())
+t.send("\r")  # into it
+y = t.row_of("Line endings", 2)
+t.click(t.col_of(y, "‹ LF"), y)
+check("filedlg: line endings switch to CRLF", "CRLF" in t.line(y), t.line(y))
+t.send("new.txt\r", 0.5)
+saved = os.path.join(fd, "made", "new.txt")
+check("filedlg: saved there with CRLF", os.path.exists(saved) and open(saved, "rb").read() == b"fresh\r\n", saved)
+check("filedlg: the tab is named after it", "new.txt" in t.line(0), t.line(0))
+t.send("\x11", 0.6)
+check("filedlg: quits", not t.p.isalive())
 
 print(f"\nwork dir: {WORK}")
 print(f"{len(fails)} failure(s)" + (": " + ", ".join(fails) if fails else ""))

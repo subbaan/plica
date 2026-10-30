@@ -1,5 +1,5 @@
 .\" Man page for Plica. Read in place with: man -l docs/plica.1
-.TH PLICA 1 "2026-10-28" "Plica 0.5.21" "User Commands"
+.TH PLICA 1 "2026-10-30" "Plica 0.5.22" "User Commands"
 .SH NAME
 plica \- a mouse-friendly terminal text editor
 .SH SYNOPSIS
@@ -81,10 +81,24 @@ whitespace, \fBAlt+M\fR give the mouse to the terminal,
 .PP
 A file opens where it was left: the caret, the scroll position, and a
 language or encoding chosen for it by hand.
-\fBAlt+R\fR (or \fBDown\fR in the \fBCtrl+O\fR prompt) lists recent files;
-type to filter it by name or folder.
+\fBAlt+R\fR (or the \fBRecent\fR place in the Open dialog) lists recent
+files; type to filter it by name or folder.
 \fB+LINE\fR on the command line goes to that line instead.
 Preferences \(-> Files (\fB[files] remember_position = false\fR) turns this off.
+.PP
+Open and Save as use a file dialog: places on the left (Recent, Home,
+Desktop, Documents, the document's folder, the file system and your
+bookmarks), the folder's files with their size and date (click a column
+heading to sort), and a preview of the selected file. Typing goes to the
+\fBName\fR field: when opening it filters the list, and a name ending in
+\fB/\fR goes into that folder, so a whole path can still be typed.
+Double-click or \fBEnter\fR opens; \fBBackspace\fR in an empty name or
+\fBAlt+Up\fR goes up, \fBAlt+Left\fR / \fBAlt+Right\fR back and forward,
+\fBTab\fR moves to the places. \fBCtrl+D\fR bookmarks the folder,
+\fBCtrl+N\fR makes a new one, \fBAlt+.\fR (or \fBCtrl+H\fR) shows hidden
+files and \fBAlt+P\fR the preview. Save as also chooses the encoding and
+line endings (LF or CRLF) to write; changing the line endings is one undo
+step.
 .PP
 \fBInsert\fR, or a click on \fBINS\fR/\fBOVR\fR in the status bar, switches
 overwrite mode: typed characters replace the ones after the caret (block
@@ -142,6 +156,9 @@ Preferences (F9) edits it, keeping comments.
 .I $XDG_CONFIG_HOME/plica/documents.toml
 Highlights for individual documents, by full path. An Untitled
 document's highlights are written here when it is first saved.
+.TP
+.I $XDG_CONFIG_HOME/plica/bookmarks.toml
+Folders bookmarked in the Open / Save as dialog.
 .TP
 .I $XDG_STATE_HOME/plica/recovery/
 Snapshots of unsaved work, offered back after a crash

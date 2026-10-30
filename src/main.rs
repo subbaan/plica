@@ -6,6 +6,7 @@ mod config;
 mod dialog;
 mod document;
 mod encoding;
+mod filedlg;
 mod drop;
 mod find;
 mod dochl;

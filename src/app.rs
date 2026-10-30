@@ -23,7 +23,7 @@ use ratatui::layout::Rect;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+pub(crate) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Snapshot a dirty tab after this much idle time…
 const SNAPSHOT_IDLE: Duration = Duration::from_secs(2);
 /// …or at least this often while editing continues.
@@ -54,8 +54,8 @@ pub enum Level {
 pub enum PromptKind {
     GotoLine,
     PalettePath,
-    SaveAs,
-    Open,
+    /// A folder to make in the file dialog's folder.
+    NewFolder,
     HlName,
     HlTerms,
     HlFileTypes,
@@ -79,8 +79,7 @@ impl PromptKind {
         match self {
             PromptKind::GotoLine => "Go to line",
             PromptKind::PalettePath => "Palette file (empty = none)",
-            PromptKind::SaveAs => "Save as",
-            PromptKind::Open => "Open",
+            PromptKind::NewFolder => "New folder name",
             PromptKind::HlName => "Group name",
             PromptKind::HlTerms => "Words and phrases (comma-separated)",
             PromptKind::HlFileTypes => "File types, e.g. md, txt (empty = all files)",
@@ -131,6 +130,20 @@ pub struct Regions {
     pub picker_box: Rect,
     pub picker_field: Rect,
     pub picker_list: Rect,
+    /// The file dialog: buttons and toggles, the name field, the file
+    /// rows (first shown row at the top) and the places.
+    pub file_hits: Vec<(Rect, crate::filedlg::FileHit)>,
+    pub file_field: Rect,
+    pub file_list: Rect,
+    pub file_places: Rect,
+}
+
+/// Encoding and line endings chosen in the Save as dialog, applied by the
+/// save that follows (also after a Replace? dialog). None: unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SaveOpts {
+    pub enc: Option<Encoding>,
+    pub eol: Option<crate::document::LineEnding>,
 }
 
 /// What a choice in the picker does.
@@ -144,6 +157,8 @@ pub enum PickChoice {
     /// A file in the Recent files list (index into `App::recent_offer`).
     Recent(usize),
     ForgetRecent,
+    /// The encoding to save with, chosen from the Save as dialog.
+    DialogEncoding(Encoding),
 }
 
 /// Entries of the table menu.
@@ -249,6 +264,9 @@ pub struct App {
     last_click: Option<(Instant, u16, u16, u8)>,
     pub dialog: Option<Dialog>,
     pub picker: Option<Picker<PickChoice>>,
+    pub file_dlg: Option<crate::filedlg::FileDialog>,
+    pub file_dlg_prefs: crate::filedlg::Prefs,
+    save_opts: Option<SaveOpts>,
     /// Encoding for files that aren't UTF-8 or UTF-16 (None = guess).
     pub fallback_encoding: Option<&'static encoding_rs::Encoding>,
     /// Recognise tables (off: tables are plain text everywhere).
@@ -329,6 +347,9 @@ impl App {
             last_click: None,
             dialog: None,
             picker: None,
+            file_dlg: None,
+            file_dlg_prefs: crate::filedlg::Prefs::default(),
+            save_opts: None,
             fallback_encoding: None,
             tables: true,
             table_realign: true,
@@ -492,7 +513,7 @@ impl App {
     fn run_action(&mut self, action: Action) {
         self.dialog = None;
         match action {
-            Action::Cancel => self.after_save = None,
+            Action::Cancel => self.cancel_save_chain(),
             Action::SaveThenClose => {
                 self.after_save = Some(AfterSave::CloseTab);
                 if self.save_active(false) == SaveOutcome::Saved {
@@ -519,7 +540,7 @@ impl App {
                 self.tab.disk_conflict = false;
                 self.info("Keeping your version; saving will ask before overwriting");
             }
-            Action::SaveAs => self.open_prompt(PromptKind::SaveAs),
+            Action::SaveAs => self.open_file_dialog(crate::filedlg::Mode::SaveAs, None),
             Action::Replace(path) => {
                 if self.save_as_path(path) {
                     self.continue_after_save();
@@ -552,6 +573,9 @@ impl App {
             }
             Action::SaveAsUtf8(path) => {
                 self.use_utf8();
+                if let Some(o) = &mut self.save_opts {
+                    o.enc = None;
+                }
                 if self.save_as_path(path) {
                     self.continue_after_save();
                 }
@@ -769,7 +793,7 @@ impl App {
     }
 
     /// Open a file from the Recent list; one that's gone is dropped from it.
-    fn open_recent(&mut self, path: &Path) {
+    pub(crate) fn open_recent(&mut self, path: &Path) {
         if !path.exists() {
             self.warn(format!("{} no longer exists; removed from recent files", path.display()));
             if let Some(r) = &mut self.recent
@@ -975,12 +999,9 @@ impl App {
                 // Terminals deliver a file drag-and-drop as a paste of paths.
                 let dropped = drop::parse_dropped_paths(&text);
                 if let Some(p) = &mut self.prompt {
-                    match (dropped, p.kind) {
-                        (Some(paths), PromptKind::Open | PromptKind::SaveAs) => {
-                            p.input.set(&paths[0].display().to_string());
-                        }
-                        _ => p.input.insert(&text),
-                    }
+                    p.input.insert(&text);
+                } else if self.file_dlg.is_some() && self.dialog.is_none() && self.picker.is_none() {
+                    self.file_dialog_paste(&text);
                 } else if let Some(paths) = dropped {
                     self.open_dropped(&paths);
                 } else if self.find.is_some() {
@@ -1045,6 +1066,10 @@ impl App {
         }
         if self.prompt.is_some() {
             self.on_prompt_key(k);
+            return;
+        }
+        if self.file_dlg.is_some() {
+            self.on_file_dialog_key(k);
             return;
         }
         if self.prefs.is_some() {
@@ -1134,8 +1159,8 @@ impl App {
                 self.after_save = None;
                 self.save_active(false);
             }
-            Command::SaveAs => self.open_prompt(PromptKind::SaveAs),
-            Command::Open => self.open_prompt(PromptKind::Open),
+            Command::SaveAs => self.open_file_dialog(crate::filedlg::Mode::SaveAs, None),
+            Command::Open => self.open_file_dialog(crate::filedlg::Mode::Open, None),
             Command::RecentFiles => self.recent_menu(),
             Command::NewTab => {
                 self.add_tab(Tab::untitled(self.tab_opts()));
@@ -1487,7 +1512,7 @@ impl App {
     /// raises a dialog instead of being overwritten.
     fn save_active(&mut self, force: bool) -> SaveOutcome {
         if self.tab.doc.path.is_none() {
-            self.open_prompt(PromptKind::SaveAs);
+            self.open_file_dialog(crate::filedlg::Mode::SaveAs, None);
             return SaveOutcome::Waiting;
         }
         if self.tab.doc.inexact {
@@ -1590,10 +1615,20 @@ impl App {
         self.tab.doc.encoding = Encoding { raw, ..Encoding::UTF8 };
     }
 
-    /// Save As from the prompt: confirm before replacing another file.
-    fn save_as(&mut self, input: &str) {
-        let path = std::path::absolute(expand_tilde(input)).unwrap_or_else(|_| expand_tilde(input));
+    /// Abandon a save chain (close or quit after saving) and any Save as
+    /// options waiting for it.
+    pub(crate) fn cancel_save_chain(&mut self) {
+        self.after_save = None;
+        self.save_opts = None;
+    }
+
+    /// Save As from the file dialog, with its encoding and line endings:
+    /// confirm before replacing another file.
+    pub(crate) fn save_as_with(&mut self, path: PathBuf, opts: SaveOpts) {
+        self.save_opts = (opts != SaveOpts::default()).then_some(opts);
+        let path = std::path::absolute(&path).unwrap_or(path);
         if self.tab.doc.inexact && self.tab.shows(&path) {
+            self.save_opts = None;
             // Saving over the original: ask as a plain save would.
             if self.save_active(false) == SaveOutcome::Saved {
                 self.continue_after_save();
@@ -1615,11 +1650,32 @@ impl App {
     }
 
     fn save_as_path(&mut self, path: PathBuf) -> bool {
+        let opts = self.save_opts.unwrap_or_default();
         let old = self.tab.doc.path.replace(path);
         let old_stamp = self.tab.doc.stamp.take();
-        let text = self.tab.buf.rope().to_string();
+        let old_enc = self.tab.doc.encoding;
+        if let Some(e) = opts.enc {
+            self.tab.doc.encoding = Encoding { raw: old_enc.raw, ..e };
+        }
+        let mut text = self.tab.buf.rope().to_string();
+        if let Some(le) = opts.eol {
+            text = convert_line_endings(&text, le);
+        }
         match self.tab.doc.save(&text) {
             Ok(()) => {
+                self.save_opts = None;
+                if let Some(le) = opts.eol {
+                    // The buffer takes the endings just written, as one undo step.
+                    let ops = line_ending_ops(self.tab.buf.rope(), le);
+                    if !ops.is_empty() {
+                        self.tab.buf.transact(ops);
+                    }
+                    self.tab.doc.line_ending = le;
+                    self.tab.doc.mixed_line_endings = false;
+                }
+                if opts.enc.is_some() {
+                    self.tab.encoding_manual = true;
+                }
                 self.tab.buf.mark_saved();
                 self.tab.disk_conflict = false;
                 self.info(format!("Saved as {}", self.tab.doc.display_name()));
@@ -1637,15 +1693,17 @@ impl App {
             Err(e) => {
                 let path = std::mem::replace(&mut self.tab.doc.path, old);
                 self.tab.doc.stamp = old_stamp;
+                self.tab.doc.encoding = old_enc;
                 if let (Some(u), Some(path)) = (e.downcast_ref::<encoding::Unmappable>(), path) {
                     self.unmappable_dialog(&u.clone(), Action::SaveAsUtf8(path));
                     return false;
                 }
                 if let Some(r) = e.downcast_ref::<crate::document::ReadOnly>() {
+                    self.save_opts = None;
                     self.read_only_dialog(&r.clone());
                     return false;
                 }
-                self.after_save = None;
+                self.cancel_save_chain();
                 self.warn(format!("Save failed: {e:#}"));
                 false
             }
@@ -1776,6 +1834,7 @@ impl App {
                 }
                 self.recent_offer.clear();
             }
+            PickChoice::DialogEncoding(e) => self.dialog_encoding_chosen(e),
             PickChoice::ForgetRecent => {
                 self.recent_offer.clear();
                 if let Some(r) = &mut self.recent {
@@ -1920,10 +1979,6 @@ impl App {
         }
     }
 
-    fn open_path(&mut self, path: &str) {
-        self.open_file(&expand_tilde(path));
-    }
-
     /// Open a file in a tab (switching to it if it is already open).
     /// Returns true on success.
     pub(crate) fn open_file(&mut self, path: &Path) -> bool {
@@ -1953,11 +2008,7 @@ impl App {
     fn open_dropped(&mut self, paths: &[PathBuf]) {
         if paths.len() == 1 && paths[0].is_dir() {
             // Let the user pick a file inside the dropped folder.
-            let mut input = paths[0].display().to_string();
-            if !input.ends_with('/') {
-                input.push('/');
-            }
-            self.prompt = Some(Prompt::new(PromptKind::Open, &input));
+            self.open_file_dialog(crate::filedlg::Mode::Open, Some(paths[0].clone()));
             return;
         }
         let files: Vec<&PathBuf> = paths.iter().filter(|p| !p.is_dir()).collect();
@@ -1975,11 +2026,7 @@ impl App {
     // ---- prompt / find ---------------------------------------------------------------
 
     fn open_prompt(&mut self, kind: PromptKind) {
-        let input = match kind {
-            PromptKind::SaveAs => self.tab.doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
-            _ => String::new(),
-        };
-        self.prompt = Some(Prompt::new(kind, &input));
+        self.prompt = Some(Prompt::new(kind, ""));
     }
 
     fn on_prompt_key(&mut self, k: KeyEvent) {
@@ -1987,28 +2034,19 @@ impl App {
         let Some(p) = &mut self.prompt else { return };
         let kind = p.kind;
         match k.code {
-            KeyCode::Esc => {
-                self.prompt = None;
-                self.after_save = None;
-            }
+            KeyCode::Esc => self.prompt = None,
             KeyCode::Enter => {
                 let input = p.input.text().to_string();
                 match kind {
                     PromptKind::GotoLine => self.goto_line(&input),
                     PromptKind::PalettePath => self.set_palette_path(&input),
-                    PromptKind::SaveAs if !input.is_empty() => self.save_as(&input),
-                    PromptKind::Open if !input.is_empty() => self.open_path(&input),
+                    PromptKind::NewFolder => self.new_folder_done(&input),
                     PromptKind::HlName | PromptKind::HlTerms | PromptKind::HlFileTypes | PromptKind::HlFg | PromptKind::HlBg => {
                         self.hl_prompt_done(kind, &input)
                     }
-                    _ => {}
                 }
                 self.prompt = None;
                 self.tab.follow_caret = true;
-            }
-            KeyCode::Down | KeyCode::Up if kind == PromptKind::Open => {
-                self.prompt = None;
-                self.recent_menu();
             }
             KeyCode::Char('v') if ctrl => {
                 let t = self.clipboard.paste();
@@ -2059,6 +2097,11 @@ impl App {
                     if let Some(a) = action {
                         self.run_action(a);
                     }
+                }
+            }
+            _ if self.file_dlg.is_some() => {
+                if self.prompt.is_none() {
+                    self.on_file_dialog_mouse(m);
                 }
             }
             _ if self.prefs.is_some() => {
@@ -2491,6 +2534,32 @@ impl App {
     }
 }
 
+/// `text` with every line break as `le` (lone CRs are left alone).
+fn convert_line_endings(text: &str, le: crate::document::LineEnding) -> String {
+    let lf = text.replace("\r\n", "\n");
+    match le {
+        crate::document::LineEnding::Lf => lf,
+        crate::document::LineEnding::CrLf => lf.replace('\n', "\r\n"),
+    }
+}
+
+/// The edits that make the rope's line breaks `le`, as `convert_line_endings` does.
+fn line_ending_ops(rope: &ropey::Rope, le: crate::document::LineEnding) -> Vec<(usize, usize, String)> {
+    let mut ops = Vec::new();
+    let mut prev = '\0';
+    for (i, c) in rope.chars().enumerate() {
+        if c == '\n' {
+            match le {
+                crate::document::LineEnding::Lf if prev == '\r' => ops.push((i - 1, 1, String::new())),
+                crate::document::LineEnding::CrLf if prev != '\r' => ops.push((i, 0, "\r".to_string())),
+                _ => {}
+            }
+        }
+        prev = c;
+    }
+    ops
+}
+
 fn contains(r: Rect, x: u16, y: u16) -> bool {
     x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }
@@ -2679,7 +2748,7 @@ pub(crate) mod tests {
         key(&mut a, KeyCode::Char('1'), KeyModifiers::ALT);
         key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
         key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE); // Save
-        assert_eq!(a.prompt.as_ref().map(|p| p.kind), Some(PromptKind::SaveAs));
+        assert_eq!(a.file_dlg.as_ref().map(|d| d.mode), Some(crate::filedlg::Mode::SaveAs));
         let target = d.path().join("named.txt");
         type_str(&mut a, &target.display().to_string());
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -2700,7 +2769,7 @@ pub(crate) mod tests {
         key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
         key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE); // Save All
         assert!(!a.quit);
-        assert_eq!(a.prompt.as_ref().map(|p| p.kind), Some(PromptKind::SaveAs), "asks a name for Untitled");
+        assert_eq!(a.file_dlg.as_ref().map(|d| d.mode), Some(crate::filedlg::Mode::SaveAs), "asks a name for Untitled");
         let target = d.path().join("u.txt");
         type_str(&mut a, &target.display().to_string());
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -2805,7 +2874,7 @@ pub(crate) mod tests {
         assert!(a.tab.buf.is_dirty());
         key(&mut a, KeyCode::Char('a'), KeyModifiers::NONE); // Save As…
         let copy = d.path().join("copy.txt");
-        a.prompt.as_mut().unwrap().input.set(&copy.display().to_string());
+        a.file_dlg.as_mut().expect("Save As dialog").name.set(&copy.display().to_string());
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), "edit keep");
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "keep");
@@ -2820,17 +2889,60 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn dropped_folder_opens_prompt_and_drop_into_open_prompt_fills_it() {
+    fn dropped_folder_opens_the_file_dialog_there_and_a_dropped_file_opens() {
         let d = tempfile::tempdir().unwrap();
         let mut a = app_with("", 40, 10);
         a.handle_event(Event::Paste(d.path().display().to_string()));
-        let p = a.prompt.as_ref().unwrap();
-        assert_eq!(p.kind, PromptKind::Open);
-        assert!(p.input.text().ends_with('/'));
+        let dlg = a.file_dlg.as_ref().unwrap();
+        assert_eq!(dlg.mode, crate::filedlg::Mode::Open);
+        assert_eq!(dlg.dir, d.path());
         let f = d.path().join("a.txt");
-        std::fs::write(&f, "").unwrap();
+        std::fs::write(&f, "dropped").unwrap();
         a.handle_event(Event::Paste(f.display().to_string()));
-        assert_eq!(a.prompt.as_ref().unwrap().input.text(), f.display().to_string());
+        assert!(a.file_dlg.is_none());
+        assert!(a.tab.shows(&f));
+    }
+
+    #[test]
+    fn save_as_dialog_writes_the_chosen_encoding_and_line_endings() {
+        let d = tempfile::tempdir().unwrap();
+        let mut a = app_with("café\nend\n", 40, 10);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let dlg = a.file_dlg.as_mut().expect("Untitled asks for a name");
+        dlg.enc = Encoding::new(encoding_rs::WINDOWS_1252);
+        dlg.cycle_eol();
+        let target = d.path().join("w.txt");
+        type_str(&mut a, &target.display().to_string());
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(std::fs::read(&target).unwrap(), b"caf\xe9\r\nend\r\n");
+        assert!(!a.tab.buf.is_dirty());
+        assert_eq!(a.tab.buf.rope().to_string(), "café\r\nend\r\n", "the buffer has the endings it was saved with");
+        assert_eq!(a.tab.doc.line_ending, crate::document::LineEnding::CrLf);
+        // Undo brings the old endings back (and the file is then unsaved).
+        key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(a.tab.buf.rope().to_string(), "café\nend\n");
+        // A char the encoding lacks: nothing written, the dialog offers UTF-8.
+        type_str(&mut a, "€✓");
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert!(a.dialog.is_some(), "can't save ✓ in windows-1252");
+        assert_eq!(std::fs::read(&target).unwrap(), b"caf\xe9\r\nend\r\n");
+    }
+
+    #[test]
+    fn cancelled_replace_drops_the_save_as_options() {
+        let d = tempfile::tempdir().unwrap();
+        let other = d.path().join("other.txt");
+        std::fs::write(&other, "keep").unwrap();
+        let mut a = app_with("text\n", 40, 10);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        a.file_dlg.as_mut().unwrap().cycle_eol();
+        type_str(&mut a, &other.display().to_string());
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.dialog.as_ref().is_some_and(|d| d.title == "Replace file?"));
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(a.save_opts, None);
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep");
+        assert_eq!(a.tab.buf.rope().to_string(), "text\n");
     }
 
     #[test]
@@ -2961,10 +3073,8 @@ pub(crate) mod tests {
         let (t, _) = Tab::open_at(&s, b.tab_opts(), None, Some(&far)).unwrap();
         assert_eq!((t.buf.sel.head, t.top_line), (6, 1));
 
-        // Ctrl+O, then Down: the list leaves out files already open.
-        key(&mut b, KeyCode::Char('o'), KeyModifiers::CONTROL);
-        key(&mut b, KeyCode::Down, KeyModifiers::NONE);
-        assert!(b.prompt.is_none());
+        // Alt+R: the list leaves out files already open.
+        key(&mut b, KeyCode::Char('r'), KeyModifiers::ALT);
         let labels: Vec<_> = b.picker.as_ref().unwrap().items.iter().map(|i| i.label.clone()).collect();
         assert_eq!(labels, ["other.txt", "Forget all recent files"]);
 

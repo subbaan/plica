@@ -348,7 +348,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // ---- prompt ----
     if let Some(pr) = &app.prompt {
         buf.set_style(prompt, surface);
-        let hint = if pr.kind == crate::app::PromptKind::Open && app.recent.is_some() { "  ↓ recent files · Enter confirm · Esc cancel" } else { "  Enter confirm · Esc cancel" };
+        let hint = "  Enter confirm · Esc cancel";
         let label = format!(" {}: ", pr.kind.label());
         let lw = label.chars().count() as u16;
         buf.set_stringn(prompt.x, prompt.y, &label, prompt.width as usize, accent);
@@ -420,6 +420,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_prefs(buf, app, area, &p);
         if app.prompt.is_none() {
             caret_pos = None;
+        }
+    }
+    app.regions.file_hits.clear();
+    app.regions.file_field = Rect::default();
+    app.regions.file_list = Rect::default();
+    app.regions.file_places = Rect::default();
+    if app.file_dlg.is_some() {
+        // Between the tab bar and the prompt row (the New folder prompt).
+        let room = Rect { y: area.y + 1, height: area.height.saturating_sub(3), ..area };
+        let pos = draw_file_dialog(buf, app, room, &p);
+        if app.prompt.is_none() {
+            caret_pos = pos;
         }
     }
     if app.picker.is_some() {
@@ -887,6 +899,26 @@ fn fit_start(s: &str, w: usize) -> String {
     "…".chars().take(w).chain(tail.chars()).collect()
 }
 
+/// Shorten `s` to at most `w` cells by dropping its end (`long-na…`).
+fn fit_end(s: &str, w: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    if crate::layout::text_width(s) <= w {
+        return s.to_string();
+    }
+    let (mut out, mut used) = (String::new(), 1); // 1: the ellipsis
+    for g in s.graphemes(true) {
+        used += crate::layout::text_width(g);
+        if used > w {
+            break;
+        }
+        out.push_str(g);
+    }
+    if w > 0 {
+        out.push('…');
+    }
+    out
+}
+
 /// Rounded box with a title in the top border; returns the inner rect.
 fn draw_box(buf: &mut TermBuf, r: Rect, title: &str, st: Style, border: Style) -> Rect {
     for y in r.y..r.bottom() {
@@ -995,6 +1027,266 @@ fn draw_picker(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {
     app.regions.picker_box = r;
     app.regions.picker_field = Rect { x: fx, y: inner.y, width: fw, height: 1 };
     app.regions.picker_list = list;
+}
+
+/// The Open / Save as dialog. Returns where the name field's caret goes.
+fn draw_file_dialog(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) -> Option<Position> {
+    use crate::filedlg::{FileHit, Focus, Mode, PlaceKind, Preview, Sort, human_size, when};
+    use crate::layout::text_width;
+    let t = &app.theme;
+    let d = app.file_dlg.as_ref()?;
+    let st = p.plain_or(p.style(t.surface_fg, t.surface_bg), Modifier::REVERSED);
+    let border = p.plain_or(p.style(t.accent, t.surface_bg), Modifier::REVERSED);
+    let sel = p.plain_or(p.style(t.accent_fg, t.accent), Modifier::BOLD | Modifier::UNDERLINED);
+    let field = p.plain_or(p.style(t.editor_fg, t.editor_bg), Modifier::UNDERLINED);
+    let text = p.style(t.editor_fg, t.editor_bg);
+    let dim = st.add_modifier(Modifier::DIM);
+    let bold = st.add_modifier(Modifier::BOLD);
+    let button = st.add_modifier(Modifier::BOLD | Modifier::REVERSED);
+    let w = area.width.saturating_sub(2).min(110);
+    let h = area.height.min(32);
+    if w < 30 || h < 10 {
+        return None;
+    }
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    let inner = draw_box(buf, r, d.title(), st, border);
+    let save = d.mode == Mode::SaveAs;
+    let roomy = inner.height >= 18;
+    let footer_h = 3 + u16::from(save);
+    let body_top = inner.y + 1 + u16::from(roomy);
+    let body_bottom = inner.bottom().saturating_sub(footer_h + u16::from(roomy));
+    if body_bottom < body_top + 2 {
+        return None;
+    }
+    let mut hits: Vec<(Rect, FileHit)> = Vec::new();
+    let rule = |buf: &mut TermBuf, y: u16| {
+        for x in inner.x..inner.right() {
+            put(buf, x, y, "─", 1, dim);
+        }
+    };
+
+    // ---- path bar: ← → ↑, the folders, Bookmark / New folder ----
+    let y = inner.y;
+    let mut x = inner.x;
+    let up = d.recent_on || d.dir.parent().is_some();
+    for (label, hit, on) in [(" ← ", FileHit::Back, d.can_back()), (" → ", FileHit::Forward, d.can_forward()), (" ↑ ", FileHit::Up, up)] {
+        buf.set_stringn(x, y, label, 3, if on { bold } else { dim });
+        hits.push((Rect { x, y, width: 3, height: 1 }, hit));
+        x += 3;
+    }
+    x += 1;
+    let mut btns = vec![(" New folder ", FileHit::NewFolder)];
+    if !d.recent_on {
+        btns.insert(0, (if d.is_bookmarked() { " Unbookmark " } else { " Bookmark " }, FileHit::Bookmark));
+    }
+    let btns_w: u16 = btns.iter().map(|(l, _)| l.len() as u16 + 1).sum();
+    let mut right = inner.right();
+    if right.saturating_sub(x) >= btns_w + 12 {
+        right -= btns_w;
+        let mut bx = right + 1;
+        for (label, hit) in btns {
+            let bw = label.len() as u16;
+            buf.set_stringn(bx, y, label, bw as usize, button);
+            hits.push((Rect { x: bx, y, width: bw, height: 1 }, hit));
+            bx += bw + 1;
+        }
+    }
+    let aw = right.saturating_sub(x + 1) as usize;
+    if d.recent_on {
+        buf.set_stringn(x, y, "Recent files", aw, bold);
+    } else {
+        let crumbs = d.crumbs();
+        let n = crumbs.len();
+        let widths: Vec<usize> = crumbs.iter().map(|(l, _)| text_width(l)).collect();
+        let total = |from: usize| widths[from..].iter().sum::<usize>() + 3 * (n - from - 1) + if from > 0 { 4 } else { 0 };
+        let mut first = 0;
+        while first + 1 < n && total(first) > aw {
+            first += 1;
+        }
+        let end = x + aw as u16;
+        if first > 0 {
+            (x, _) = buf.set_stringn(x, y, "… › ", end.saturating_sub(x) as usize, dim);
+        }
+        for (i, (label, _)) in crumbs.iter().enumerate().skip(first) {
+            let last = i + 1 == n;
+            let (nx, _) = buf.set_stringn(x, y, label, end.saturating_sub(x) as usize, if last { bold } else { st });
+            hits.push((Rect { x, y, width: nx - x, height: 1 }, FileHit::Crumb(i)));
+            x = nx;
+            if !last {
+                (x, _) = buf.set_stringn(x, y, " › ", end.saturating_sub(x) as usize, dim);
+            }
+        }
+    }
+    if roomy {
+        rule(buf, inner.y + 1);
+        rule(buf, body_bottom);
+    }
+
+    // ---- places ----
+    let rows = body_bottom - body_top;
+    let mut list_x = inner.x;
+    let mut places_rect = Rect::default();
+    if inner.width >= 50 {
+        let side_w = (d.places.iter().map(|p| text_width(&p.label) + 3).max().unwrap_or(0) as u16).clamp(10, 18);
+        let top = d.place_scroll_for(rows as usize);
+        let current = d.current_place();
+        let hl = if d.focus == Focus::Places { Some(d.place_sel) } else { current };
+        for (i, place) in d.places.iter().enumerate().skip(top).take(rows as usize) {
+            let py = body_top + (i - top) as u16;
+            let style = if Some(i) == hl { sel } else if Some(i) == current { bold } else { st };
+            buf.set_style(Rect { x: inner.x, y: py, width: side_w, height: 1 }, style);
+            let mark = if matches!(place.kind, PlaceKind::Bookmark(_)) { "•" } else { " " };
+            let label = fit_end(&place.label, side_w.saturating_sub(3) as usize);
+            buf.set_stringn(inner.x, py, format!("{mark} {label}"), side_w as usize, style);
+        }
+        for py in body_top..body_bottom {
+            put(buf, inner.x + side_w, py, "│", 1, dim);
+        }
+        places_rect = Rect { x: inner.x, y: body_top, width: side_w, height: rows };
+        list_x = inner.x + side_w + 2;
+    }
+
+    // ---- the list, and the preview beside it ----
+    let avail = inner.right().saturating_sub(list_x);
+    let (list_w, preview_x) = if d.prefs.preview && avail >= 64 {
+        let pw = avail * 2 / 5;
+        (avail - pw - 2, Some(list_x + avail - pw))
+    } else {
+        (avail, None)
+    };
+    let (size_w, date_w) = (if d.recent_on { (list_w / 3).max(8) } else { 8 }, 11u16);
+    let show_date = list_w >= 36;
+    let show_size = list_w >= 24;
+    let name_w = list_w.saturating_sub(2 + if show_size { size_w + 2 } else { 0 } + if show_date { date_w + 2 } else { 0 });
+    let size_x = list_x + 1 + name_w + 2;
+    let date_x = size_x + if show_size { size_w + 2 } else { 0 };
+    let arrow = |s: Sort| match (d.recent_on, d.prefs.sort == s, d.prefs.descending) {
+        (false, true, false) => " ▲",
+        (false, true, true) => " ▼",
+        _ => "",
+    };
+    let hy = body_top;
+    buf.set_stringn(list_x + 1, hy, format!("Name{}", arrow(Sort::Name)), name_w as usize, bold);
+    hits.push((Rect { x: list_x, y: hy, width: name_w + 1, height: 1 }, FileHit::Header(Sort::Name)));
+    if show_size {
+        let label = if d.recent_on { "Folder".to_string() } else { format!("{:>w$}", format!("Size{}", arrow(Sort::Size)), w = size_w as usize) };
+        buf.set_stringn(size_x, hy, label, size_w as usize, bold);
+        hits.push((Rect { x: size_x, y: hy, width: size_w, height: 1 }, FileHit::Header(Sort::Size)));
+    }
+    if show_date {
+        let label = if d.recent_on { "Used".to_string() } else { format!("Modified{}", arrow(Sort::Modified)) };
+        buf.set_stringn(date_x, hy, label, date_w as usize + 2, bold);
+        hits.push((Rect { x: date_x, y: hy, width: date_w, height: 1 }, FileHit::Header(Sort::Modified)));
+    }
+    let list = Rect { x: list_x, y: body_top + 1, width: list_w, height: rows - 1 };
+    let visible = d.visible();
+    let top = d.scroll_for(list.height as usize);
+    for (row, &i) in visible.iter().enumerate().skip(top).take(list.height as usize) {
+        let ly = list.y + (row - top) as u16;
+        let e = d.entry(i);
+        let style = if row == d.sel { sel } else { st };
+        buf.set_style(Rect { x: list.x, y: ly, width: list.width, height: 1 }, style);
+        let name = if e.dir { format!("{}/", e.name) } else { e.name.clone() };
+        let nstyle = if e.dir { style.add_modifier(Modifier::BOLD) } else { style };
+        buf.set_stringn(list.x + 1, ly, fit_end(&name, name_w as usize), name_w as usize, nstyle);
+        let other = if row == d.sel { style } else { dim };
+        if show_size {
+            let size = match (&e.folder, e.size) {
+                (Some(f), _) => fit_start(f, size_w as usize),
+                (None, Some(n)) => format!("{:>w$}", human_size(n), w = size_w as usize),
+                _ => String::new(),
+            };
+            buf.set_stringn(size_x, ly, size, size_w as usize, other);
+        }
+        if show_date && let Some(m) = e.modified {
+            buf.set_stringn(date_x, ly, when(m), date_w as usize, other);
+        }
+    }
+    if visible.is_empty() {
+        let note = match (&d.error, d.recent_on) {
+            (Some(e), _) => format!("(can't read this folder: {e})"),
+            (None, true) => "(no recent files match)".into(),
+            (None, false) if !save && !d.name.is_empty() => "(nothing matches; Enter opens it as a new file)".into(),
+            (None, false) => "(empty folder)".into(),
+        };
+        buf.set_stringn(list.x + 1, list.y, note, list.width.saturating_sub(1) as usize, dim);
+    }
+    if let Some(px) = preview_x {
+        let pw = inner.right() - px;
+        for py in body_top..body_bottom {
+            put(buf, px - 2, py, "│", 1, dim);
+        }
+        let title = d.selected().map(|e| e.name.clone()).unwrap_or_default();
+        buf.set_stringn(px, hy, fit_end(&title, pw as usize), pw as usize, bold);
+        let body = Rect { x: px, y: hy + 1, width: pw, height: rows - 1 };
+        match d.preview() {
+            Preview::Lines(lines) => {
+                buf.set_style(body, text);
+                for (k, l) in lines.iter().take(body.height as usize).enumerate() {
+                    buf.set_stringn(px, body.y + k as u16, l, pw as usize, text);
+                }
+            }
+            Preview::Note(n) => {
+                buf.set_stringn(px, body.y, n, pw as usize, dim);
+            }
+        }
+    }
+
+    // ---- footer: name, options, encoding, buttons ----
+    let fy = body_bottom + u16::from(roomy);
+    let label = "Name: ";
+    buf.set_stringn(inner.x, fy, label, inner.width as usize, bold);
+    let fx = inner.x + label.len() as u16;
+    let fw = inner.right().saturating_sub(fx);
+    buf.set_style(Rect { x: fx, y: fy, width: fw, height: 1 }, field);
+    let v = d.name.view(fw as usize);
+    buf.set_stringn(fx, fy, v.shown, fw as usize, field);
+    if d.name.is_empty() && !save {
+        buf.set_stringn(fx + 1, fy, "type to filter, or a path", fw.saturating_sub(1) as usize, field.add_modifier(Modifier::DIM));
+    }
+    let caret = Position { x: (fx + v.caret).min(inner.right().saturating_sub(1)), y: fy };
+    let check = |on: bool| if on { "[x]" } else { "[ ]" };
+    let mut ox = inner.x;
+    let oy = fy + 1;
+    let filter = if d.prefs.text_only { "‹ Text files ›" } else { "‹ All files ›" };
+    for (label, hit) in [
+        (format!("{} Hidden", check(d.prefs.show_hidden)), FileHit::Hidden),
+        (format!("{} Preview", check(d.prefs.preview)), FileHit::Preview),
+        (filter.to_string(), FileHit::TextOnly),
+    ] {
+        let (nx, _) = buf.set_stringn(ox, oy, &label, inner.right().saturating_sub(ox) as usize, st);
+        hits.push((Rect { x: ox, y: oy, width: nx - ox, height: 1 }, hit));
+        ox = nx + 3;
+    }
+    if save {
+        let ey = oy + 1;
+        let mut ex = inner.x;
+        for (label, value, hit, focus) in [
+            ("Encoding: ", d.enc.label(), FileHit::Encoding, Focus::Encoding),
+            ("Line endings: ", d.eol_label().to_string(), FileHit::LineEnd, Focus::LineEnd),
+        ] {
+            let (vx, _) = buf.set_stringn(ex, ey, label, inner.right().saturating_sub(ex) as usize, st);
+            let (nx, _) = buf.set_stringn(vx, ey, format!("‹ {value} ›"), inner.right().saturating_sub(vx) as usize, if d.focus == focus { sel } else { bold });
+            hits.push((Rect { x: ex, y: ey, width: nx - ex, height: 1 }, hit));
+            ex = nx + 3;
+        }
+    }
+    let by = inner.bottom() - 1;
+    let mut bx = inner.x;
+    for (label, hit) in [(if save { " Save " } else { " Open " }, FileHit::Ok), (" Cancel ", FileHit::Cancel)] {
+        let bw = label.len() as u16;
+        buf.set_stringn(bx, by, label, bw as usize, button);
+        hits.push((Rect { x: bx, y: by, width: bw, height: 1 }, hit));
+        bx += bw + 1;
+    }
+    let hint = " Tab places · Alt+↑ up · Ctrl+D bookmark · Ctrl+N new folder · Alt+. hidden · Alt+P preview";
+    buf.set_stringn(bx, by, hint, inner.right().saturating_sub(bx) as usize, dim);
+
+    app.regions.file_hits = hits;
+    app.regions.file_field = Rect { x: fx, y: fy, width: fw, height: 1 };
+    app.regions.file_list = list;
+    app.regions.file_places = places_rect;
+    Some(caret)
 }
 
 fn draw_prefs(buf: &mut TermBuf, app: &mut App, area: Rect, p: &Painter) {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.22 (2026-10-30): a file dialog for Open and Save As
+
+- **Open (Ctrl+O) and Save As (Ctrl+Shift+S / F12) now open a file dialog** instead of a one-line prompt. Places are on the left: Recent, Home, Desktop, Documents, the document's folder, the file system and your bookmarks. The folder's files are listed with size and date (click a heading to sort), with a preview of the selected file beside them when the window is wide enough. It opens in the current document's folder with that file selected.
+- Typing still works as before: it goes to the Name field, which filters the list when opening. A name ending in `/` goes into that folder, so you can type a whole path, and a name that doesn't exist opens as a new file. Double-click or Enter opens; Backspace in an empty name (or Alt+↑) goes up; Alt+← / → go back and forward.
+- **Save As chooses the encoding and line endings** (LF or CRLF; a file with mixed endings can keep them as they are). Converting the line endings is one undo step.
+- Ctrl+D bookmarks the folder (kept in `~/.config/plica/bookmarks.toml`), Ctrl+N makes a new folder, Alt+. or Ctrl+H shows hidden files, Alt+P turns the preview on or off, and "Text files" hides images, archives and other binary files. These choices last for the session.
+- A folder dropped on the window opens the dialog there. The Down key in the Open prompt is gone with the prompt; recent files are the Recent place, or Alt+R as before.
+
 ## 0.5.21 (2026-10-28): shorter README opening
 
 - The README now opens with one plain line: a mouse-friendly text editor for the terminal that keeps text files tidy with editable tables. The comparison with Mousepad, Gedit, Vim and Emacs is gone.

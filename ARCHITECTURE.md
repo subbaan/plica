@@ -27,6 +27,7 @@ main.rs ── CLI (files → tabs), palette selection, event loop, debounces, r
         ├─ syntax.rs ── syntect grammars → token kinds; incremental per-line parse cache (per tab)
         ├─ lineedit.rs ─ single-line text field (cursor, word motion, scroll, click)
         ├─ picker.rs ── filterable list popup (encoding and table menus)
+        ├─ filedlg.rs ─ Open / Save As dialog: places, listing, preview, bookmarks.toml
         ├─ table.rs ─── Markdown table recognition, TableModel with source spans, format/edit ops
         ├─ table_border.rs ─ bordered ASCII/Unicode tables: recognition, rendering, minimal replace
         ├─ table_edit.rs ─ App: typing in cells, Tab/Enter navigation, menu actions, insert/convert
@@ -59,6 +60,16 @@ ui.rs ── draws App into ratatui's cell buffer; Painter maps roles → trueco
 The top of the view is `(top_line, top_row)`: logical line plus visual row within it. That makes wrapped scrolling independent of document size. `ensure_caret_visible` counts rows from the top only as far as the viewport height.
 
 ## Decision and workaround log
+
+### 2026-10-30 · 0.5.22
+
+- **File dialog (`filedlg.rs`) instead of the Open / Save As prompts.** The model (`FileDialog`) does all file system work and returns an `Outcome`; `ui::draw_file_dialog` records `FileHit` regions plus the field, list and places rects; `impl App` in the same file runs outcomes. Key order: dialog > picker > help > prompt > file dialog > Preferences, so the encoding picker and the New folder prompt (a normal bottom prompt) work on top of it. The dialog is drawn between the tab bar and the prompt row, or the New folder prompt would be hidden under it in a short terminal.
+- **Typing a path still works, with no mode switch:** typing always goes to the Name field. Opening, it filters the list (type-ahead selects the first name starting with it); a text ending in `/` that is a folder navigates there and clears the field, so `~/notes/todo.txt` typed key by key ends in `~/notes` with `todo.txt` in the field. Enter on a name that doesn't exist opens the selected match if there is one (type-ahead), else a new file, as the prompt did. The old unit tests that type a full path into Save As pass unchanged.
+- **Nothing is stat'ed that the user didn't ask to see** (old drives, automounts): recent files and bookmarks are listed from their files, and a bookmark is only read when chosen. A folder's entries are stat'ed once when it's read (symlinks followed), never while drawing. The preview reads at most 16 kB of the selected regular file (never a FIFO or device) and is cached per path. Desktop and Documents come from `user-dirs.dirs` and are checked with one `is_dir` each when the dialog opens.
+- **Bookmarks live in `$XDG_CONFIG_HOME/plica/bookmarks.toml`** (the user chose them, like `documents.toml`), not in the state dir. Every change re-reads the file first, so another window's bookmark isn't lost, and writes through `Document::save` (atomic).
+- **Save As options (`app::SaveOpts`) travel with the save, not the document:** they're set only when they differ from the document, applied in `save_as_path` (so also after the "Replace file?" dialog) and dropped on Cancel, on a read-only refusal and on failure. The document's encoding is restored if the save fails. Line endings: the converted text is written first, and only after a successful save is the buffer changed to match (one `transact`, so one undo step) and marked saved; a failed save leaves the buffer untouched. "Save as UTF-8" after an unmappable character clears the chosen encoding but keeps the line endings.
+- **Dates use `libc::localtime_r`** (libc was already in the tree through signal-hook), so "Today 11:40" / "Yesterday" follow the local time zone without a date crate; it works in the static musl build, which reads `/etc/localtime` and `TZ`. Sizes are decimal (kB), like GNOME's file manager.
+- Prompt Esc no longer clears `after_save`: that was for the Save As prompt, and with the New folder prompt it would have broken a close/quit save chain.
 
 ### 2026-10-26 · 0.5.18
 

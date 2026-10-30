@@ -258,7 +258,21 @@ pub fn cheat_sheet(km: &Keymap) -> String {
                 ("Tab / Shift+Tab", "Indent / outdent (the selected lines)"),
                 ("Esc", "Clear the selection"),
                 ("Alt+1 … Alt+9", "Go to tab 1 … 8, Alt+9 the last tab"),
-                ("↓ in the Open prompt", "Recent files"),
+            ],
+        ),
+        (
+            "Open / Save as dialog",
+            &[
+                ("Typing", "Name field: filters the list when opening; a name ending in / goes into that folder"),
+                ("↑ / ↓, Enter, double-click", "Choose; open a folder or file"),
+                ("Backspace (empty name), Alt+↑", "Parent folder"),
+                ("Alt+← / Alt+→", "Back / forward"),
+                ("Tab", "Places, then (Save as) encoding and line endings"),
+                ("Ctrl+D", "Bookmark the folder (Delete removes a bookmark in Places)"),
+                ("Ctrl+N", "New folder"),
+                ("Alt+. or Ctrl+H", "Show hidden files"),
+                ("Alt+P", "Preview"),
+                ("Click a column heading", "Sort by it (again: reverse)"),
             ],
         ),
         (
